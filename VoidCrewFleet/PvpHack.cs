@@ -119,6 +119,7 @@ namespace VoidCrewFleet
         private static float _nextRequest;
         private static float _nextPush;
         private static float _lastCockpitWarning = -100f;
+        private static float _inCockpitSince = -1f;
         private static Color? _glow;
 
         private static UIDocument _timerDocument;
@@ -628,29 +629,42 @@ namespace VoidCrewFleet
             return !Physics.Linecast(eye, point - to.normalized * 0.15f, SightMask, QueryTriggerInteraction.Ignore);
         }
 
-        /// <summary>An enemy who gets into the cockpit (a door left open) is pushed back out.</summary>
+        /// <summary>
+        /// An enemy who gets into the cockpit (an open archway, or a door left open) is pushed back out, and put just
+        /// outside it if they are still in after a moment.
+        /// </summary>
         private static void KeepOutOfCockpit()
         {
             if (Time.unscaledTime < _nextPush) return;
             _nextPush = Time.unscaledTime + 0.1f;
             LocalPlayer me = LocalPlayer.Instance;
-            if (me == null || me.IsDead) return;
-            PlayerControlledShip ship = FleetShips.AboardShip(me);
-            if (!PvpBoarding.IsEnemyShip(ship)) return;
-            Room cockpit = CockpitRoom(ship);
-            var rooms = ship.Hull != null ? ship.Hull.RoomCollection : null;
+            PlayerControlledShip ship = me != null && !me.IsDead ? FleetShips.AboardShip(me) : null;
+            Room cockpit = PvpBoarding.IsEnemyShip(ship) ? CockpitRoom(ship) : null;
+            var rooms = ship != null && ship.Hull != null ? ship.Hull.RoomCollection : null;
             Vector3 hit;
-            if (cockpit == null || rooms == null || !rooms.RoomSphereIntersect(cockpit, me.transform.position + me.transform.up, 0.3f, out hit)) return;
+            if (cockpit == null || rooms == null || !rooms.RoomSphereIntersect(cockpit, me.transform.position + me.transform.up, 0.3f, out hit))
+            {
+                _inCockpitSince = -1f;
+                return;
+            }
+            if (_inCockpitSince < 0f) _inCockpitSince = Time.unscaledTime;
             Helm helm = ship.GetModule<Helm>();
             Vector3 away = Vector3.ProjectOnPlane(me.transform.position - (helm != null ? helm.transform.position : ship.transform.position), ship.transform.up);
             if (away.sqrMagnitude < 0.01f) away = -me.transform.forward;
             try
             {
-                if (me.Character != null) me.Character.AddForce(away.normalized * 0.35f);
+                if (Time.unscaledTime - _inCockpitSince > 1.2f)
+                {
+                    Vector3 exit;
+                    if (CockpitExit(cockpit, me.transform.position, out exit))
+                        me.Locomotion.SetPositionAndRotation(exit, me.transform.rotation, true, true);
+                    _inCockpitSince = -1f;
+                }
+                else if (me.Character != null) me.Character.AddForce(away.normalized * 0.5f);
             }
-            catch
+            catch (Exception e)
             {
-                // Pushing is best effort.
+                Log.Failure("Keeping an enemy out of the cockpit", e);
             }
             if (Time.unscaledTime - _lastCockpitWarning > 3f)
             {
@@ -664,6 +678,31 @@ namespace VoidCrewFleet
                     // Only a hint.
                 }
             }
+        }
+
+        /// <summary>A point just outside the cockpit, in the room past its nearest doorway.</summary>
+        private static bool CockpitExit(Room cockpit, Vector3 from, out Vector3 exit)
+        {
+            exit = Vector3.zero;
+            float best = float.MaxValue;
+            if (cockpit.PortalConnections == null) return false;
+            foreach (RoomPortal portal in cockpit.PortalConnections)
+            {
+                if (portal == null || portal.RoomConnections == null) continue;
+                foreach (Room other in portal.RoomConnections)
+                {
+                    Vector3 local;
+                    if (other == null || other == cockpit || other.InSpace || other.PortalConnectionPoints == null || !other.PortalConnectionPoints.TryGetValue(portal, out local)) continue;
+                    Vector3 doorway = portal.transform.position;
+                    Vector3 beyond = portal.transform.TransformPoint(local);
+                    Vector3 point = doorway + (beyond - doorway).normalized * 1.5f;
+                    float distance = Vector3.Distance(from, doorway);
+                    if (distance >= best) continue;
+                    best = distance;
+                    exit = point;
+                }
+            }
+            return best < float.MaxValue;
         }
 
         // ---------------------------------------------------------------- the host

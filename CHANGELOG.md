@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0
+- **Airlock Hacking Terminal replaces the breaching charge.** Plug it into the control panel outside an enemy airlock.
+  After a one-minute hack, your team can use that ship's doors for five minutes (not the cockpit's). Countdowns show on
+  screen, and the defenders can pull it out while it hacks.
+- **Aboard the enemy ship:**
+  - its systems' power switches are always usable;
+  - the helm, turrets, seats, terminals and the homunculus stay off-limits;
+  - enemies can't get into the cockpit.
+- Fixed an error in clone-tube healing when a player loads in while someone is in a clone tube.
+
 ## 0.1.1
 - **Punching works in VR.** It aims where you look (the game's own interaction ray, which the VR UI Fix points with
   your head) instead of the camera's mouse-look direction.

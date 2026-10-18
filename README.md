@@ -41,23 +41,23 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
   or damage markers.
 - **The ships can damage each other.** Destroy the enemy ship to win, and a team with no players left forfeits.
 - **Boarding:**
-  - Enemy players can come aboard only through an open airlock.
-  - They can't open your airlocks or use anything on your ship, except its **System Enhancement panels**.
-  - An enemy who completes a panel's minigame shuts that system down for **120 seconds**.
+  - Enemy players can come aboard through an airlock its crew left open, or one their team hacked (below).
+  - Aboard the enemy ship you can always use its **System Enhancement panels** and its systems' **power switches**.
+    Finishing a panel's minigame shuts that system down for **120 seconds**, and a power switch turns a turret, shield or
+    any other system off.
+  - You can never use its helm, turrets, seats or terminals, enter its **cockpit**, or take its **homunculus**.
 - **Fighting aboard:** punch enemy players with **V**, or with **Fire** when your hands are empty. Five punches knock
   one out, and it aims where you look, VR included.
 - **Turrets vs. players:** point defenses and B.R.A.I.N. auto-turrets shoot enemy players floating in open space near
   the ship.
 - **Proximity voice** is forced on. You hear players on the same ship, or within 50 m in open space.
-- **Airlock Breaching Charge:** a new fabricator item on the Resources tab, made from the Hull Repair Plate's model.
-  1. Print it and carry it to the **outer door of an enemy airlock**.
-  2. **Hold Fire** on the door to attach it.
-  3. **Hold Fire** on the charge to arm it. It beeps, then blows after 6 seconds.
-  4. The blast forces **both airlock doors open** and **vents the enemy ship's air**. The doors stay jammed open for
-     30 seconds, then the crew can close them again.
-
-  Until it blows, the defending crew can **pull it off** (hold Fire on it for 3 seconds). Opening the airlock knocks it
-  off too.
+- **Airlock Hacking Terminal:** a new fabricator item on the Resources tab, made from the Data Shard's model.
+  1. Print it and carry it to the **control panel outside an enemy airlock**.
+  2. **Hold Fire** on the panel to plug it in. The hack takes **1 minute**, and the defenders can **pull it out** (hold
+     Fire on it for 3 seconds) until then.
+  3. When it finishes, your whole team can **use every door of that ship for 5 minutes**, including the airlock's door
+     buttons and pressurise lever, but not the cockpit doors or the airlock's safety override. A countdown shows on
+     screen for both teams.
 
 ## Installation
 1. Install **BepInEx 5** for Void Crew, with a Thunderstore mod manager (BepInExPack) or by hand.
@@ -74,7 +74,7 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
 | Fleet Pilgrimage | EnemyMultiplier | 1.6 | How many more enemies the Fleet Pilgrimage sends (host). |
 | PvP | StartDistance | 3600 | How far apart the PvP ships start (m). |
 | PvP | PunchKey | V | The punch key (Fire with empty hands also punches). |
-| PvP | BreachChargeCost | 10 | The breaching charge's fabricator price in alloys (host). |
+| PvP | HackTerminalCost | 10 | The hacking terminal's fabricator price in alloys (host). |
 | Diagnostics | VerboseLogging | false | More detail in the BepInEx log. |
 | Diagnostics | AutoTest | Off | Developer self-test; leave it Off to play. |
 
@@ -98,7 +98,7 @@ haven't been played yet:
 - turrets shooting players;
 - boarding;
 - panel sabotage;
-- the breaching charge's attach, arm and defuse;
+- the hacking terminal (plugging in, the hack, pulling it out, door access);
 - proximity voice.
 
 Please report anything odd with your `BepInEx\LogOutput.log`.
