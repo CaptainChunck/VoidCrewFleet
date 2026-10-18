@@ -12,7 +12,7 @@ namespace VoidCrewFleet
         public static ConfigEntry<float> PvpStartDistance;
         public static ConfigEntry<float> EnemyMultiplier;
         public static ConfigEntry<Key> PunchKey;
-        public static ConfigEntry<int> BreachChargeCost;
+        public static ConfigEntry<int> HackTerminalCost;
         public static ConfigEntry<bool> VerboseLogging;
         public static ConfigEntry<AutoTestMode> AutoTest;
         public static ConfigEntry<bool> AutoTestJump;
@@ -43,8 +43,8 @@ namespace VoidCrewFleet
             PunchKey = config.Bind("PvP", "PunchKey", Key.V,
                 "The key that throws a punch at an enemy player in front of you (PvP only).");
 
-            BreachChargeCost = config.Bind("PvP", "BreachChargeCost", BreachCharge.DefaultCost,
-                new ConfigDescription("How many alloys the Airlock Breaching Charge costs in the fabricator. Only the host's setting counts.",
+            HackTerminalCost = config.Bind("PvP", "HackTerminalCost", HackTerminal.DefaultCost,
+                new ConfigDescription("How many alloys the Airlock Hacking Terminal costs in the fabricator. Only the host's setting counts.",
                     new AcceptableValueRange<int>(1, 60)));
 
             VerboseLogging = config.Bind("Diagnostics", "VerboseLogging", false,

@@ -189,7 +189,7 @@ namespace VoidCrewFleet
             PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyLocked, null } });
             PvpMatch.ResetRoom();
             PvpSabotage.ResetRoom();
-            PvpBreach.ResetRoom();
+            PvpHack.ResetRoom();
         }
     }
 }

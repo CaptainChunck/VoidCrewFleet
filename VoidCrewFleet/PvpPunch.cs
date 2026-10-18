@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using CG;
 using CG.Client.Player.Interactions;
+using CG.Input;
 using CG.Game;
 using CG.Game.Player;
 using Gameplay.Chat;
@@ -68,13 +70,13 @@ namespace VoidCrewFleet
                 Key key = Settings.PunchKey.Value;
                 if (keyboard != null && key != Key.None && keyboard[key].wasPressedThisFrame) TryPunch(false);
                 // Fire punches too (a mouse button, or the VR controller's trigger), with empty hands and an enemy in reach.
-                InputAction fire = PvpBreach.Fire();
-                if (fire != null && fire.WasPressedThisFrame() && !PvpBreach.Busy && HandsEmpty()) TryPunch(true);
+                InputAction fire = Fire();
+                if (fire != null && fire.WasPressedThisFrame() && !PvpHack.Busy && HandsEmpty()) TryPunch(true);
                 if (Time.unscaledTime >= _nextHint)
                 {
                     _nextHint = Time.unscaledTime + HintSeconds;
                     Player target = CanPunch() ? FindTarget() : null;
-                    string keys = Settings.PunchKey.Value.ToString().ToUpperInvariant() + (HandsEmpty() ? " OR " + PvpBreach.FireName(fire) : "");
+                    string keys = Settings.PunchKey.Value.ToString().ToUpperInvariant() + (HandsEmpty() ? " OR " + FireName(fire) : "");
                     ShowHint(target != null ? keys + "  PUNCH " + NameOf(target).ToUpperInvariant() : null);
                 }
             }
@@ -84,7 +86,7 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>The local player is alive, on foot and not in a menu, chat or seat (also used by the breaching charge).</summary>
+        /// <summary>The local player is alive, on foot and not in a menu, chat or seat (also used by the hacking terminal).</summary>
         internal static bool CanPunch()
         {
             LocalPlayer me = LocalPlayer.Instance;
@@ -93,6 +95,29 @@ namespace VoidCrewFleet
             if (ChatOpenField != null && TextChat.Instance != null && ChatOpenField.GetValue(TextChat.Instance) is bool && (bool)ChatOpenField.GetValue(TextChat.Instance))
                 return false;
             return Camera.main != null;
+        }
+
+        /// <summary>The game's Fire action (left mouse button, or the VR controller's trigger).</summary>
+        internal static InputAction Fire()
+        {
+            InputService service = ServiceBase<InputService>.Instance;
+            return service != null && service.InputActionReferences != null && service.InputActionReferences.Fire1 != null
+                ? service.InputActionReferences.Fire1.action
+                : null;
+        }
+
+        internal static string FireName(InputAction fire)
+        {
+            string name = null;
+            try
+            {
+                name = fire != null ? fire.GetBindingDisplayString() : null;
+            }
+            catch
+            {
+                // Just the label.
+            }
+            return string.IsNullOrEmpty(name) ? "FIRE" : name.ToUpperInvariant();
         }
 
         private static bool HandsEmpty()

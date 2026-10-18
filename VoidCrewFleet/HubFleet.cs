@@ -414,7 +414,7 @@ namespace VoidCrewFleet
                     ShipBHomunculus = shipBLoadout.HomunculusOverride != null && !shipBLoadout.HomunculusOverride.IsNull
                         ? shipBLoadout.HomunculusOverride.AssetGuid
                         : GUIDUnion.Empty(),
-                    BreachCost = Settings.BreachChargeCost.Value
+                    HackCost = Settings.HackTerminalCost.Value
                 };
                 FleetSession.Attach(gameSession, plan);
                 Log.Info("Starting a fleet mission: " + plan + "; ship 2 is " + shipBName + ".");

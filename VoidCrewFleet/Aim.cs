@@ -3,7 +3,7 @@ using UnityEngine;
 namespace VoidCrewFleet
 {
     /// <summary>
-    /// Where the local player is looking, for punching and the breaching charge. It's the game's own interaction ray,
+    /// Where the local player is looking, for punching and the hacking terminal. It's the game's own interaction ray,
     /// read while the game aims it. In VR (with the VR UI Fix mod) that ray follows the head, but the main camera keeps
     /// the mouse-look direction the rest of the frame, so aiming with the camera missed. Falls back to the main camera.
     /// </summary>

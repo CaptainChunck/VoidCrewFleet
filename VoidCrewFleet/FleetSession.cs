@@ -41,8 +41,8 @@ namespace VoidCrewFleet
         /// <summary>Host only: what the second ship spawns with. Not sent; clients receive the ship through Photon.</summary>
         public ShipLoadout ShipBLoadout;
 
-        /// <summary>PvP: what the airlock breaching charge costs in the fabricator (the host's setting, the same for everyone).</summary>
-        public int BreachCost = BreachCharge.DefaultCost;
+        /// <summary>PvP: what the airlock hacking terminal costs in the fabricator (the host's setting, the same for everyone).</summary>
+        public int HackCost = HackTerminal.DefaultCost;
 
         public JObject ToJson()
         {
@@ -54,7 +54,7 @@ namespace VoidCrewFleet
                 ["shipB"] = ShipB.AsHex(),
                 ["shipBName"] = ShipBName ?? "",
                 ["shipBHomunculus"] = ShipBHomunculus.AsHex(),
-                ["breachCost"] = BreachCost
+                ["hackCost"] = HackCost
             };
         }
 
@@ -68,7 +68,7 @@ namespace VoidCrewFleet
             if (json.TryGetValue("shipBName", out token)) plan.ShipBName = token.Value<string>();
             if (json.TryGetValue("shipBHomunculus", out token) && !string.IsNullOrEmpty(token.Value<string>()))
                 plan.ShipBHomunculus = new GUIDUnion(token.Value<string>());
-            if (json.TryGetValue("breachCost", out token)) plan.BreachCost = token.Value<int>();
+            if (json.TryGetValue("hackCost", out token)) plan.HackCost = token.Value<int>();
             return plan;
         }
 

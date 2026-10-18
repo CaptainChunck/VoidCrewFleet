@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using CG.Client;
+using CG.Client.Ship;
+using CG.Client.Ship.Modules.Mediators;
 using CG.Client.Player.Interactions;
 using CG.Client.Ship.Interactions;
 using CG.Game.Player;
@@ -17,14 +19,18 @@ using UnityEngine;
 namespace VoidCrewFleet
 {
     /// <summary>
-    /// Boarding rules in PvP. A player may go aboard the enemy ship only through an airlock its crew left open, and once
-    /// aboard may use nothing of it except its System Enhancement panels: no doors or airlock controls, seats, helm,
-    /// turrets, terminals, switches, sockets, items, repairs or clone tubes. Passing through an open door needs no
-    /// interaction, so it still works.
+    /// Boarding rules in PvP. A player may go aboard the enemy ship through an airlock its crew left open, or after their
+    /// team hacked one of its airlocks (<see cref="PvpHack"/>). Aboard the enemy ship a player may use:
+    /// - its System Enhancement panels (sabotage), and the power switches of its modules (turn a turret, shield or any
+    ///   other system off), always;
+    /// - its doors, airlock door buttons and pressurise levers, while their team has door access from a hack, except the
+    ///   doors into the cockpit (never), and never an airlock's safety override.
+    /// Nothing else: no seats, helm, turrets, terminals, other switches, sockets (the homunculus stays in its cradle),
+    /// items, repairs or clone tubes. Passing through an open door needs no interaction, so it always works.
     /// - Every client hides the enemy ship's interactables from its own player (the game's one interaction raycast), and
     ///   refuses to start a seat, terminal or minigame of the enemy ship (the game's one "activate abilities" event).
     ///   This also covers a host on the enemy team, whose actions never go through the network.
-    /// - The host also refuses door and airlock requests from enemy players.
+    /// - The host also refuses door and airlock requests from enemy players without access.
     /// </summary>
     internal static class PvpBoarding
     {
@@ -33,6 +39,9 @@ namespace VoidCrewFleet
         private const float WarningSeconds = 20f;
 
         private static readonly Dictionary<int, bool> EnhancementParts = new Dictionary<int, bool>();
+        private static readonly Dictionary<int, bool> PowerSwitches = new Dictionary<int, bool>();
+        private static readonly Dictionary<int, AbstractDoor> DoorControls = new Dictionary<int, AbstractDoor>();
+        private static readonly HashSet<int> PressurizeLevers = new HashSet<int>();
         private static float _lastWarning = -100f;
 
         /// <summary>The local player's team (0 BLUE, 1 RED), or -1 when not on a team.</summary>
@@ -89,20 +98,86 @@ namespace VoidCrewFleet
             return part;
         }
 
+        /// <summary>A module's own power switch (any system's on/off switch).</summary>
+        public static bool IsModulePowerSwitch(Component component)
+        {
+            var clicker = component as SwitchClicker;
+            if (clicker == null) return false;
+            int id = clicker.GetInstanceID();
+            bool power;
+            if (PowerSwitches.TryGetValue(id, out power)) return power;
+            power = false;
+            foreach (IShipModuleMediator mediator in clicker.GetComponentsInParent<IShipModuleMediator>(true))
+            {
+                var property = mediator.GetType().GetProperty("PowerSwitch");
+                if (property != null && ReferenceEquals(property.GetValue(mediator, null), clicker))
+                {
+                    power = true;
+                    break;
+                }
+            }
+            PowerSwitches[id] = power;
+            return power;
+        }
+
+        /// <summary>A door's own clicker, an airlock panel's door button, or an airlock's pressurise lever (not into a cockpit).</summary>
+        private static bool IsDoorControl(Component component)
+        {
+            int id = component.GetInstanceID();
+            AbstractDoor door;
+            if (DoorControls.TryGetValue(id, out door)) return door != null && !PvpHack.IsCockpitDoor(door);
+            return PressurizeLevers.Contains(id);
+        }
+
         private static bool Blocked(Component interactable)
         {
             if (interactable == null || !PvpCombat.Active) return false;
-            return IsEnemyShip(ShipOf(interactable)) && !IsEnhancementPart(interactable);
+            PlayerControlledShip ship = ShipOf(interactable);
+            if (!IsEnemyShip(ship)) return false;
+            if (IsEnhancementPart(interactable) || IsModulePowerSwitch(interactable)) return false;
+            return !(IsDoorControl(interactable) && PvpHack.LocalHasAccess(ship));
+        }
+
+        /// <summary>For the self-test: how many of a ship's door controls the local player may use now.</summary>
+        public static string DescribeAccess(PlayerControlledShip ship)
+        {
+            int doors = 0;
+            int usable = 0;
+            foreach (KeyValuePair<int, AbstractDoor> entry in DoorControls)
+            {
+                if (entry.Value == null || FleetShips.OwnerOf(entry.Value) != ship) continue;
+                doors++;
+                if (!PvpHack.IsCockpitDoor(entry.Value) && PvpHack.LocalHasAccess(ship)) usable++;
+            }
+            return usable + " of " + doors + " door controls usable by the local team";
+        }
+
+        // ---------------------------------------------------------------- doors and airlock levers register their controls
+
+        [GamePatch(Feature, "CG.Client.Ship.Interactions.DoorActor", "Start", PatchKind.Postfix)]
+        private static void DoorActorPostfix(DoorActor __instance, List<ClickerInteractable> ___clickers)
+        {
+            if (___clickers == null || __instance.Door == null) return;
+            foreach (ClickerInteractable clicker in ___clickers)
+            {
+                if (clicker != null) DoorControls[clicker.GetInstanceID()] = __instance.Door;
+            }
+        }
+
+        [GamePatch(Feature, "CG.Client.Ship.AirlockButtonPanel", "Initialize", PatchKind.Postfix)]
+        private static void AirlockPanelPostfix(ClickerInteractable ___pressurizationSwitch)
+        {
+            if (___pressurizationSwitch != null) PressurizeLevers.Add(___pressurizationSwitch.GetInstanceID());
         }
 
         private static void Warn()
         {
-            if (Time.unscaledTime - _lastWarning < WarningSeconds || BreachCharge.LocalHeld != null) return;
+            if (Time.unscaledTime - _lastWarning < WarningSeconds || HackTerminal.LocalHeld != null) return;
             _lastWarning = Time.unscaledTime;
             try
             {
                 if (ViewEventBus.Instance != null)
-                    ViewEventBus.Instance.OnShowQuickWarning.Publish("ENEMY SHIP: you can only use its System Enhancement panels.");
+                    ViewEventBus.Instance.OnShowQuickWarning.Publish("ENEMY SHIP: only its System Enhancement panels and power switches (hack an airlock for its doors).");
             }
             catch
             {
@@ -197,7 +272,10 @@ namespace VoidCrewFleet
             if (!PvpCombat.Active || info.Sender == null) return true;
             try
             {
-                if (!IsEnemyOf(info.Sender.ActorNumber, FleetShips.OwnerOf(__instance))) return true;
+                PlayerControlledShip ship = FleetShips.OwnerOf(__instance);
+                if (!IsEnemyOf(info.Sender.ActorNumber, ship)) return true;
+                AbstractDoor door = ____shipDoors != null && index >= 0 && index < ____shipDoors.Count ? ____shipDoors[index] : null;
+                if (door != null && !PvpHack.IsCockpitDoor(door) && PvpHack.HasAccess(FleetShips.CrewSlot(info.Sender.ActorNumber), ship)) return true;
                 // Tell the requester the door's real state, which undoes its own early open.
                 if (____shipDoors != null && index >= 0 && index < ____shipDoors.Count)
                     __instance.GetComponent<PhotonView>().RPC("NotifyClientOfOutcome", info.Sender, ____shipDoors[index].IsOpen, index);
@@ -211,15 +289,29 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>Opening an airlock door and cycling the airlock: allowed with door access from a hack.</summary>
         [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.AirlockController", "NetworkAirlockOpenRequest", PatchKind.Prefix)]
-        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.AirlockController", "NetworkSafetyRequest", PatchKind.Prefix)]
         [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.AirlockController", "NetworkStartPressurization", PatchKind.Prefix)]
         private static bool AirlockRequestPrefix(AirlockController __instance, PhotonMessageInfo info)
+        {
+            return AirlockRequest(__instance, info, true);
+        }
+
+        /// <summary>The safety override (venting the ship): never for enemies.</summary>
+        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.AirlockController", "NetworkSafetyRequest", PatchKind.Prefix)]
+        private static bool AirlockSafetyPrefix(AirlockController __instance, PhotonMessageInfo info)
+        {
+            return AirlockRequest(__instance, info, false);
+        }
+
+        private static bool AirlockRequest(AirlockController __instance, PhotonMessageInfo info, bool accessAllows)
         {
             if (!PvpCombat.Active || info.Sender == null) return true;
             try
             {
-                if (!IsEnemyOf(info.Sender.ActorNumber, FleetShips.OwnerOf(__instance))) return true;
+                PlayerControlledShip ship = FleetShips.OwnerOf(__instance);
+                if (!IsEnemyOf(info.Sender.ActorNumber, ship)) return true;
+                if (accessAllows && PvpHack.HasAccess(FleetShips.CrewSlot(info.Sender.ActorNumber), ship)) return true;
                 Log.Info("PvP: refused an airlock control of " + FleetShips.Describe(FleetShips.OwnerOf(__instance)) + " to enemy player " + info.Sender.ActorNumber + ".");
                 return false;
             }

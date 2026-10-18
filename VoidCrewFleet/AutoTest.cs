@@ -116,7 +116,7 @@ namespace VoidCrewFleet
                     _lastReport = Time.unscaledTime;
                     Report("mission");
                     Screenshot("mission");
-                    if (FleetSession.IsPvP && _reports == 0) StartBreachTest();
+                    if (FleetSession.IsPvP && _reports == 0) StartHackTest();
                     if (++_reports < (FleetSession.IsPvP ? 10 : 3)) return;
                     if (Settings.AutoTestJump.Value && FleetSession.Mode == FleetMode.TwoShips) StartJump();
                     else Finish();
@@ -223,33 +223,34 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>PvP: print-free breaching charge test: spawn one by the player, and blow the RED ship's airlock.</summary>
-        private static void StartBreachTest()
+        /// <summary>PvP: hacking test without a second player: spawn a terminal by the player, and give BLUE door access to RED.</summary>
+        private static void StartHackTest()
         {
             try
             {
                 LocalPlayer me = LocalPlayer.Instance;
-                if (me != null && PrefabSpawnerSync.Instance != null && BreachCharge.Registered)
+                if (me != null && PrefabSpawnerSync.Instance != null && HackTerminal.Registered)
                 {
-                    PrefabSpawnerSync.Instance.SpawnCloneStarObject(BreachCharge.Guid, me.transform.position + me.transform.forward * 1.2f + me.transform.up, Quaternion.identity);
-                    Log.Info("[autotest] Spawned a breaching charge in front of the player.");
+                    PrefabSpawnerSync.Instance.SpawnCloneStarObject(HackTerminal.Guid, me.transform.position + me.transform.forward * 1.2f + me.transform.up, Quaternion.identity);
+                    Log.Info("[autotest] Spawned a hacking terminal in front of the player.");
                 }
-                Log.Info("[autotest] Breach: " + PvpBreach.DebugArm(FleetShips.BySlot(1), 4f) + ".");
+                Log.Info("[autotest] Hack: " + PvpHack.DebugAccess(FleetShips.BySlot(1), 0, 30f) + ".");
+                Log.Info("[autotest] Cockpits: ship 1 " + (PvpHack.CockpitRoom(FleetShips.BySlot(0)) != null) + ", ship 2 " + (PvpHack.CockpitRoom(FleetShips.BySlot(1)) != null) + ".");
             }
             catch (Exception e)
             {
-                Log.Failure("[autotest] breach test", e);
+                Log.Failure("[autotest] hack test", e);
             }
         }
 
-        private static string DescribeCharges()
+        private static string DescribeTerminals()
         {
             int count = 0;
             foreach (CG.Objects.CarryableObject item in UnityEngine.Object.FindObjectsOfType<CG.Objects.CarryableObject>())
             {
-                if (BreachCharge.Is(item)) count++;
+                if (HackTerminal.Is(item)) count++;
             }
-            return count + " breaching charge item(s) in the world";
+            return count + " hacking terminal item(s) in the world";
         }
 
         private static void StartJump()
@@ -308,7 +309,7 @@ namespace VoidCrewFleet
                     text.AppendLine("  PvP: blue faction " + blue.faction + ", red faction " + red.faction + ", blue hostile to red " + blue.IsHostile(red) +
                                     ", red hostile to blue " + red.IsHostile(blue) + ", distance " + Vector3.Distance(blue.transform.position, red.transform.position).ToString("0") + " m");
                     text.AppendLine("  PvP: red parts " + FactionCounts(red) + "; blue parts " + FactionCounts(blue));
-                    text.AppendLine("  PvP breach: " + PvpBreach.Describe(red) + "; " + DescribeCharges());
+                    text.AppendLine("  PvP hack: BLUE door access to RED " + PvpHack.HasAccess(0, red) + "; " + PvpBoarding.DescribeAccess(red) + "; " + DescribeTerminals());
                 }
             }
             PlayerControlledShip game = ClientGame.Current != null ? ClientGame.Current.PlayerShip : null;

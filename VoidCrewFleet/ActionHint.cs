@@ -11,7 +11,7 @@ namespace VoidCrewFleet
     internal static class ActionHint
     {
         public const int PunchPriority = 0;
-        public const int BreachPriority = 10;
+        public const int HackPriority = 10;
 
         private static readonly Dictionary<string, KeyValuePair<int, string>> Texts = new Dictionary<string, KeyValuePair<int, string>>();
         private static UIDocument _document;

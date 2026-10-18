@@ -36,17 +36,14 @@ namespace VoidCrewFleet
         /// <summary>Client to host: an enemy completed an enhancement panel. Data: panel view id.</summary>
         Sabotage = 30,
 
-        /// <summary>Client to host: attach the held breaching charge to an enemy airlock. Data: charge view, airlock controller view, airlock index, pose (7 floats, door space).</summary>
-        BreachAttach = 40,
+        /// <summary>Client to host: plug the held hacking terminal into an enemy airlock's outside panel. Data: terminal view, ship view, airlock index.</summary>
+        HackPlug = 40,
 
-        /// <summary>Host to the attacher: the charge is on the door; destroy the one in your hands. Data: charge view.</summary>
-        BreachTaken = 41,
+        /// <summary>Host to the hacker: the terminal is in the panel; destroy the one in your hands. Data: terminal view.</summary>
+        HackTaken = 41,
 
-        /// <summary>Client to host: arm an attached charge. Data: airlock controller view, airlock index.</summary>
-        BreachArm = 42,
-
-        /// <summary>Client to host: the ship's own crew pulls a charge off its airlock. Data: airlock controller view, airlock index.</summary>
-        BreachDefuse = 43
+        /// <summary>Client to host: the ship's own crew pulls a terminal out of its airlock panel. Data: ship view, airlock index.</summary>
+        HackPull = 42
     }
 
     /// <summary>

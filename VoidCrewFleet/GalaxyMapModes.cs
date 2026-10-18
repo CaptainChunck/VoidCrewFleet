@@ -89,8 +89,8 @@ namespace VoidCrewFleet
                 "<i>Fleet missions give no XP or rewards (Void Crew's modding rules).</i>");
             _battleInfo = ContextInfo.Create(icon, "FLEET BATTLE",
                 "<b>PvP</b>: two crews, one ship each, starting on opposite sides of an asteroid field full of objectives that pay out alloys for upgrades and ammo. " +
-                "Pick your team before the match; the host balances and confirms the teams. Board through open airlocks (or blast one open with a breaching " +
-                "charge from the fabricator), sabotage enemy systems at their " +
+                "Pick your team before the match; the host balances and confirms the teams. Board through open airlocks, or hack one with a hacking " +
+                "terminal from the fabricator to open the enemy's doors for five minutes. Sabotage enemy systems at their " +
                 "enhancement panels, and destroy the enemy ship to win.\n<i>No XP or rewards (Void Crew's modding rules).</i>");
             _fleetInfo.hideFlags = HideFlags.DontUnloadUnusedAsset;
             _battleInfo.hideFlags = HideFlags.DontUnloadUnusedAsset;

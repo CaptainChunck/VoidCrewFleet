@@ -7,7 +7,6 @@ using CG.Network;
 using CG.Objects;
 using CG.Ship.Hull;
 using CG.Ship.Object;
-using CG.Ship.Repair;
 using Client.Player.Interactions;
 using ResourceAssets;
 using RuntimeAssets;
@@ -17,23 +16,24 @@ using UnityEngine;
 namespace VoidCrewFleet
 {
     /// <summary>
-    /// The PvP item "Airlock Breaching Charge": the Hull Repair Plate's model under an item GUID of its own. Every client
+    /// The PvP item "Airlock Hacking Terminal": the Data Shard's model under an item GUID of its own. Every client
     /// registers it at start-up, the way the game registers the items of its own mod bundles, and the fabricators of both
     /// ships offer it in PvP. Printing, the network spawn, carrying, storing and the end tally are the game's own code. This
-    /// class adds the item, its fabricator entry and a model of it for the door; <see cref="PvpBreach"/> does the attaching.
+    /// class adds the item, its fabricator entry and a model of it for the panel; <see cref="PvpHack"/> does the hacking.
     /// </summary>
-    internal static class BreachCharge
+    internal static class HackTerminal
     {
-        public const string Feature = "PvP breaching charge";
+        public const string Feature = "PvP hacking terminal";
         public const int DefaultCost = 10;
 
         /// <summary>The item's GUID, the same on every client (same family as the plugin's other GUIDs).</summary>
-        public static readonly GUIDUnion Guid = new GUIDUnion("f1ee7c0de5f1ee7c0de5f1ee7c0de5b1");
-        private static readonly GUIDUnion PlateGuid = new GUIDUnion("072d0f489605db34ab5f970f055ce9ee");
+        public static readonly GUIDUnion Guid = new GUIDUnion("f1ee7c0de5f1ee7c0de5f1ee7c0de5b2");
+        /// <summary>The model: Data Shard: Minefield (an inert little cartridge until a shard reader takes it).</summary>
+        private static readonly GUIDUnion ModelGuid = new GUIDUnion("d2427729f742ec04d98aa89b0575e9e0");
 
-        private const string Header = "AIRLOCK BREACHING CHARGE";
-        private const string Body = "PvP: carry it to the outer door of an enemy airlock and hold Fire to attach it, then hold Fire on it to arm it. " +
-                                    "The blast forces both airlock doors open and vents the enemy ship's air. Their crew can pull it off before it blows.";
+        private const string Header = "AIRLOCK HACKING TERMINAL";
+        private const string Body = "PvP: plug it into the control panel outside an enemy airlock (hold Fire on the panel). After a one-minute hack, " +
+                                    "your whole team can open that ship's doors for five minutes, except its cockpit. Their crew can pull it out while it hacks.";
 
         private static readonly MethodInfo AddPrintableMethod = GameMember.Method(typeof(CraftData), "AddCraftableAsPrintable");
         private static readonly MethodInfo SetupCategoriesMethod = GameMember.Method(typeof(CraftData), "SetupCategories");
@@ -49,7 +49,7 @@ namespace VoidCrewFleet
             return carryable != null && carryable.assetGuid == Guid;
         }
 
-        /// <summary>What the local player holds, when it is a breaching charge.</summary>
+        /// <summary>What the local player holds, when it is a hacking terminal.</summary>
         public static CarryableObject LocalHeld
         {
             get
@@ -80,16 +80,16 @@ namespace VoidCrewFleet
                     Registered = true;
                     return;
                 }
-                CarryableDef plateDef = ResourceAssetContainer<CarryableContainer, CarryableObject, CarryableDef>.Instance.GetAssetDefById(PlateGuid, false);
-                CarryableObject plate = plateDef != null ? plateDef.Asset : null;
-                if (plate == null)
+                CarryableDef modelDef = ResourceAssetContainer<CarryableContainer, CarryableObject, CarryableDef>.Instance.GetAssetDefById(ModelGuid, false);
+                CarryableObject model = modelDef != null ? modelDef.Asset : null;
+                if (model == null)
                 {
-                    Log.Warn("Breaching charge: the game's Hull Repair Plate wasn't found, so there is no breaching charge.");
+                    Log.Warn("Hacking terminal: the game's Data Shard wasn't found, so there is no hacking terminal.");
                     return;
                 }
 
-                // The new item's prefab: an inactive copy of the plate's (inactive, so none of its own code ever runs on it).
-                GameObject source = plate.gameObject;
+                // The new item's prefab: an inactive copy of the shard's (inactive, so none of its own code ever runs on it).
+                GameObject source = model.gameObject;
                 bool wasActive = source.activeSelf;
                 if (wasActive) source.SetActive(false);
                 try
@@ -101,7 +101,7 @@ namespace VoidCrewFleet
                     if (wasActive) source.SetActive(true);
                 }
                 UnityEngine.Object.DontDestroyOnLoad(_template);
-                _template.name = "VCF_BreachCharge";
+                _template.name = "VCF_HackTerminal";
                 _template.GetComponent<CarryableObject>().ContainerGuid = Guid;
 
                 // Effect None: never part of the game's check of which mod assets the host and a joining player have (Fleet
@@ -109,8 +109,8 @@ namespace VoidCrewFleet
                 // listed among the mod assets in the main menu.
                 if (!RuntimeAssetsRegister.Instance.HasAsset(Guid)) RuntimeAssetsRegister.Instance.RegisterAsset(Guid, _template, SessionModificationEffect.None, null);
 
-                IResourceAssetContextInfo plateInfo = Objects.GetContext(PlateGuid);
-                RuntimeAssetConverter.RegisterCarryableToContainers(Guid, Header, Body, plateInfo != null ? plateInfo.Icon : null);
+                IResourceAssetContextInfo modelInfo = Objects.GetContext(ModelGuid);
+                RuntimeAssetConverter.RegisterCarryableToContainers(Guid, Header, Body, modelInfo != null ? modelInfo.Icon : null);
                 SetCost(DefaultCost);
                 ResourceAssetContainer<CarryableContainer, CarryableObject, CarryableDef>.Instance.GetAssetDefById(Guid)
                     .SetPurchaseCategory(PurchasableItemSubCategory.Resources_Support);
@@ -122,12 +122,12 @@ namespace VoidCrewFleet
                 if (context != null) context.hideFlags |= HideFlags.DontUnloadUnusedAsset;
 
                 Registered = true;
-                Log.Info("The Airlock Breaching Charge is ready (PvP fabricators offer it).");
+                Log.Info("The Airlock Hacking Terminal is ready (PvP fabricators offer it).");
                 Describe();
             }
             catch (Exception e)
             {
-                Log.Failure("Adding the breaching charge item", e);
+                Log.Failure("Adding the hacking terminal item", e);
             }
         }
 
@@ -154,7 +154,7 @@ namespace VoidCrewFleet
                 var names = new System.Collections.Generic.List<string>();
                 foreach (Component component in components)
                     if (component != null) names.Add(component.gameObject.name + ":" + component.GetType().Name);
-                Log.Verbose("Breaching charge model: " + string.Join(", ", names.ToArray()));
+                Log.Verbose("Hacking terminal model: " + string.Join(", ", names.ToArray()));
             }
             catch
             {
@@ -172,7 +172,7 @@ namespace VoidCrewFleet
             try
             {
                 FleetPlan plan = FleetSession.Current;
-                SetCost(plan != null ? Mathf.Clamp(plan.BreachCost, 1, 60) : DefaultCost);
+                SetCost(plan != null ? Mathf.Clamp(plan.HackCost, 1, 60) : DefaultCost);
                 CraftData shop = __instance.CraftingData;
                 if (!shop.Craftables.ContainsKey(Guid)) shop.TryAddItem(Guid);
                 PurchasableItem item;
@@ -181,11 +181,11 @@ namespace VoidCrewFleet
                 // An entry of the shop, not a blueprint someone found.
                 item.SharedSessionUnlocked = false;
                 item.IsUnlocked = true;
-                Log.InfoOnce("breach shop", "PvP fabricators offer the Airlock Breaching Charge for " + item.CraftingRules.Creation.Amount + " alloys.");
+                Log.InfoOnce("hack shop", "PvP fabricators offer the Airlock Hacking Terminal for " + item.CraftingRules.Creation.Amount + " alloys.");
             }
             catch (Exception e)
             {
-                Log.Failure("Adding the breaching charge to a fabricator", e);
+                Log.Failure("Adding the hacking terminal to a fabricator", e);
             }
         }
 
@@ -202,11 +202,11 @@ namespace VoidCrewFleet
             return item;
         }
 
-        /// <summary>It is not a repair plate: hull breaches don't take it.</summary>
+        /// <summary>It is not a real data shard: no socket takes it except storage shelves.</summary>
         [GamePatch(Feature, "CG.Ship.Hull.CarryablesSocket", "DoesAccept", PatchKind.Postfix)]
         private static void DoesAcceptPostfix(CarryablesSocket __instance, CarryableObject carryable, ref bool __result)
         {
-            if (__result && Is(carryable) && __instance.GetComponentInParent<HullBreach>() != null) __result = false;
+            if (__result && Is(carryable) && __instance.GetComponentInParent<CarryablesShelf>() == null) __result = false;
         }
 
         /// <summary>The Nano Copy Matrix can't duplicate it.</summary>
@@ -237,12 +237,12 @@ namespace VoidCrewFleet
         // ---------------------------------------------------------------- its look on a door
 
         /// <summary>
-        /// A local copy of the item's model (meshes only: no physics, no network), to put on a door: its flat side lies on
-        /// the root's XY plane, its back at the root, facing the root's forward (out of the door).
+        /// A local copy of the item's model (meshes only: no physics, no network), to put on a panel: its flat side lies on
+        /// the root's XY plane, its back at the root, facing the root's forward (out of the panel).
         /// </summary>
         public static GameObject BuildModel()
         {
-            var root = new GameObject("VCF_BreachChargeModel");
+            var root = new GameObject("VCF_HackTerminalModel");
             if (_template == null) return root;
             var pivot = new GameObject("Pivot");
             pivot.transform.SetParent(root.transform, false);
@@ -271,7 +271,7 @@ namespace VoidCrewFleet
                 copy.sharedMaterials = renderer.sharedMaterials;
                 copy.renderingLayerMask = renderer.renderingLayerMask;
             }
-            // Its bounds in its own space: turn the thinnest axis to forward, centre it, and set its back on the door.
+            // Its bounds in its own space: turn the thinnest axis to forward, centre it, and set its back on the panel.
             var local = new Bounds();
             bool first = true;
             foreach (GameObject part in parts)

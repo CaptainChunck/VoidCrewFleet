@@ -36,6 +36,28 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- one list for all ships
 
+        /// <summary>
+        /// A clone tube's synced state can name an occupant whose character this client hasn't loaded yet (someone was
+        /// in a tube while this player loaded in, more likely with more players and two ships). The game's healing state
+        /// then throws, which cut the rest of the character set-up short. Without the occupant there is nothing to heal
+        /// here yet: drop that one error and let the set-up carry on.
+        /// </summary>
+        [GamePatch(Feature, "CloneTubeHealing", "OnEnter", PatchKind.Finalizer)]
+        private static Exception HealingEnterFinalizer(Exception __exception, CloneTube cloneTube)
+        {
+            if (!(__exception is NullReferenceException) || cloneTube == null) return __exception;
+            try
+            {
+                if (cloneTube.GetOccupant() != null) return __exception;
+            }
+            catch
+            {
+                return __exception;
+            }
+            Log.WarnOnce("tube occupant", "A clone tube's occupant hadn't loaded yet on this client; skipped its healing set-up.");
+            return null;
+        }
+
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "RegisterCloneTubes", PatchKind.Prefix)]
         private static bool RegisterPrefix(List<CloneTube> cts, ref List<CloneTube> ___clonetubes)
         {

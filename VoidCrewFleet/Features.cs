@@ -27,7 +27,7 @@ namespace VoidCrewFleet
             PvpMarkers.Feature,
             PvpVoice.Feature,
             PvpTurrets.Feature,
-            BreachCharge.Feature
+            HackTerminal.Feature
         };
 
         public static void Listen()
@@ -39,15 +39,15 @@ namespace VoidCrewFleet
             PvpSabotage.Listen();
             PvpPunch.Listen();
             PvpTurrets.Listen();
-            PvpBreach.Listen();
+            PvpHack.Listen();
             FleetRuntime.Frame += PvpPunch.Frame;
             FleetRuntime.Frame += PvpTurrets.Frame;
-            FleetRuntime.Frame += PvpBreach.Frame;
+            FleetRuntime.Frame += PvpHack.Frame;
             FleetRuntime.Frame += PvpVoice.Frame;
             FleetRuntime.Frame += ShipResources.Frame;
             ShipDeath.ShipLost += ShipResources.OnShipLost;
             CloneTubes.HoldSpawns = () => PvpTeams.Choosing;
-            FleetRuntime.Slow += BreachCharge.EnsureRegistered;
+            FleetRuntime.Slow += HackTerminal.EnsureRegistered;
             FleetRuntime.Slow += HubFleet.Poll;
             FleetRuntime.Slow += ShipSpawn.KeepCrewsUpToDate;
             FleetRuntime.Slow += PvpTeamScreen.Tick;
@@ -55,7 +55,7 @@ namespace VoidCrewFleet
             FleetRuntime.Slow += PvpCombat.KeepHostility;
             FleetRuntime.Slow += PvpMatch.Tick;
             FleetRuntime.Slow += PvpSabotage.Apply;
-            FleetRuntime.Slow += PvpBreach.Tick;
+            FleetRuntime.Slow += PvpHack.Tick;
             FleetRuntime.Slow += PvpMarkers.Tick;
             FleetRuntime.Slow += ShipMarkers.Tick;
             FleetRuntime.Slow += HelmIsolation.Tick;
