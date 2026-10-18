@@ -1,0 +1,168 @@
+using System;
+using System.Collections.Generic;
+using ExitGames.Client.Photon;
+using Photon.Pun;
+using Photon.Realtime;
+
+namespace VoidCrewFleet
+{
+    /// <summary>Kinds of message the plugin sends; the first element of every event's content.</summary>
+    internal enum Msg : byte
+    {
+        /// <summary>Host to everyone: show a notice. Data: text.</summary>
+        Notice = 1,
+
+        /// <summary>Client to host, in the hub: switch two ships on or off. Data: bool.</summary>
+        HubTwoShips = 2,
+
+        /// <summary>Client to host, in the hub: the second ship's loadout. Data: GUID hex.</summary>
+        HubShipB = 3,
+
+        /// <summary>Client to host, in the hub: choose a fleet mission variant. Data: byte (HubVariant).</summary>
+        HubVariant = 4,
+
+        /// <summary>Client to host, PvP team screen: the team this player wants. Data: team.</summary>
+        TeamRequest = 10,
+
+        /// <summary>Client to host, PvP team screen (host only): move a player. Data: actor, team.</summary>
+        TeamMove = 11,
+
+        /// <summary>Attacker to the victim's client: you were punched. Data: damage, attacker position.</summary>
+        Punch = 20,
+
+        /// <summary>Host to the victim's client: an enemy ship's turret hit you. Data: damage, turret position.</summary>
+        TurretHit = 21,
+
+        /// <summary>Client to host: an enemy completed an enhancement panel. Data: panel view id.</summary>
+        Sabotage = 30,
+
+        /// <summary>Client to host: attach the held breaching charge to an enemy airlock. Data: charge view, airlock controller view, airlock index, pose (7 floats, door space).</summary>
+        BreachAttach = 40,
+
+        /// <summary>Host to the attacher: the charge is on the door; destroy the one in your hands. Data: charge view.</summary>
+        BreachTaken = 41,
+
+        /// <summary>Client to host: arm an attached charge. Data: airlock controller view, airlock index.</summary>
+        BreachArm = 42,
+
+        /// <summary>Client to host: the ship's own crew pulls a charge off its airlock. Data: airlock controller view, airlock index.</summary>
+        BreachDefuse = 43
+    }
+
+    /// <summary>
+    /// The plugin's own network messages, all on one Photon event code. The game uses event codes 0-10, Opsive's PUN
+    /// add-on 155-160 and Photon itself 200 and up, so 173 is free. Senders are checked by the handlers: only the host
+    /// may send host messages, and a client's request is only ever about that client.
+    /// </summary>
+    internal static class Net
+    {
+        public const byte EventCode = 173;
+
+        private static readonly Dictionary<Msg, Action<int, object[]>> Handlers = new Dictionary<Msg, Action<int, object[]>>();
+        private static bool _listening;
+
+        /// <summary>Registers a handler. Listening itself starts once the game has set up Photon (FleetRuntime).</summary>
+        public static void On(Msg type, Action<int, object[]> handler)
+        {
+            Handlers[type] = handler;
+        }
+
+        public static void StartListening()
+        {
+            if (_listening) return;
+            try
+            {
+                PhotonNetwork.NetworkingClient.EventReceived += OnEvent;
+                _listening = true;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Listening for Void Crew Fleet messages", e);
+            }
+        }
+
+        /// <summary>To the host. On the host itself the handler runs right away (sender = the host's actor number).</summary>
+        public static void ToHost(Msg type, params object[] data)
+        {
+            if (PhotonNetwork.IsMasterClient)
+            {
+                Dispatch(type, PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : -1, data ?? new object[0]);
+                return;
+            }
+            Send(type, data, new RaiseEventOptions { Receivers = ReceiverGroup.MasterClient });
+        }
+
+        public static void ToAll(Msg type, params object[] data)
+        {
+            Send(type, data, new RaiseEventOptions { Receivers = ReceiverGroup.All });
+        }
+
+        public static void ToOthers(Msg type, params object[] data)
+        {
+            Send(type, data, new RaiseEventOptions { Receivers = ReceiverGroup.Others });
+        }
+
+        public static void ToActor(int actor, Msg type, params object[] data)
+        {
+            if (PhotonNetwork.LocalPlayer != null && PhotonNetwork.LocalPlayer.ActorNumber == actor)
+            {
+                Dispatch(type, actor, data ?? new object[0]);
+                return;
+            }
+            Send(type, data, new RaiseEventOptions { TargetActors = new[] { actor } });
+        }
+
+        private static void Send(Msg type, object[] data, RaiseEventOptions options)
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom) return;
+                var content = new object[(data != null ? data.Length : 0) + 1];
+                content[0] = (byte)type;
+                if (data != null) Array.Copy(data, 0, content, 1, data.Length);
+                PhotonNetwork.RaiseEvent(EventCode, content, options, SendOptions.SendReliable);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Sending a Void Crew Fleet message (" + type + ")", e);
+            }
+        }
+
+        private static void OnEvent(EventData photonEvent)
+        {
+            if (photonEvent == null || photonEvent.Code != EventCode) return;
+            var content = photonEvent.CustomData as object[];
+            if (content == null || content.Length == 0 || !(content[0] is byte)) return;
+            var data = new object[content.Length - 1];
+            Array.Copy(content, 1, data, 0, data.Length);
+            Dispatch((Msg)(byte)content[0], photonEvent.Sender, data);
+        }
+
+        private static void Dispatch(Msg type, int sender, object[] data)
+        {
+            Action<int, object[]> handler;
+            if (!Handlers.TryGetValue(type, out handler)) return;
+            try
+            {
+                handler(sender, data);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Handling a Void Crew Fleet message (" + type + ")", e);
+            }
+        }
+
+        /// <summary>True when the sender of a message is the room's host.</summary>
+        public static bool FromHost(int sender)
+        {
+            Player master = PhotonNetwork.MasterClient;
+            return master != null && master.ActorNumber == sender;
+        }
+
+        public static T Get<T>(object[] data, int index, T fallback)
+        {
+            if (data == null || index < 0 || index >= data.Length || !(data[index] is T)) return fallback;
+            return (T)data[index];
+        }
+    }
+}

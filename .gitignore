@@ -1,0 +1,20 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userprefs
+
+# Never commit game or BepInEx binaries; the build references them from the local install
+*.dll
+*.pdb
+*.exe
+
+# Packaged uploads (tools/package.ps1)
+dist/
+
+# Local design notes (contain local paths and game-code excerpts)
+docs/

@@ -1,0 +1,15 @@
+using System.Reflection;
+using System.Runtime.InteropServices;
+
+[assembly: AssemblyTitle("Void Crew Fleet")]
+[assembly: AssemblyDescription("BepInEx plugin for Void Crew: two player ships, up to 16 players, a two-ship mission and a PvP mode")]
+[assembly: AssemblyConfiguration("")]
+[assembly: AssemblyCompany("CaptainChunck")]
+[assembly: AssemblyProduct("VoidCrewFleet")]
+[assembly: AssemblyCopyright("Copyright © CaptainChunck 2026")]
+[assembly: AssemblyTrademark("")]
+[assembly: AssemblyCulture("")]
+[assembly: ComVisible(false)]
+[assembly: Guid("b7d3f2a9-4c1e-4f6b-8a25-3e9d0c7f1a64")]
+[assembly: AssemblyVersion("0.1.0.0")]
+[assembly: AssemblyFileVersion("0.1.0.0")]
