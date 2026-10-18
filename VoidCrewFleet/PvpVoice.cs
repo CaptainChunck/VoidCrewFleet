@@ -125,7 +125,7 @@ namespace VoidCrewFleet
             if (!PvpTeams.Locked) return true;
             int speakerTeam = FleetShips.CrewSlot(speakerPlayer.ActorNumber);
             bool teammate = myTeam >= 0 && speakerTeam == myTeam;
-            Player speaker = ClientGame.Current != null ? ClientGame.Current.GetPlayerCharacterByActorNumber(speakerPlayer.ActorNumber) : null;
+            Player speaker = FleetShips.CharacterOf(speakerPlayer.ActorNumber);
             if (speaker == null || speaker.IsDead || listener == null || listener.IsDead) return teammate;
             PlayerControlledShip speakerShip = FleetShips.InteriorAt(speaker.transform.position);
             PlayerControlledShip listenerShip = FleetShips.InteriorAt(listener.transform.position);

@@ -121,6 +121,9 @@ namespace VoidCrewFleet
         private static readonly HashSet<long> LockedPanels = new HashSet<long>();
         private static object _roomData;
 
+        /// <summary>A breaching charge action is under the local player's aim (Fire belongs to it, not to punching).</summary>
+        public static bool Busy { get; private set; }
+
         private static Step _holding;
         private static long _holdTarget;
         private static float _holdStart;
@@ -447,7 +450,7 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- the local player's actions
 
-        private static InputAction Fire()
+        internal static InputAction Fire()
         {
             InputService service = ServiceBase<InputService>.Instance;
             return service != null && service.InputActionReferences != null && service.InputActionReferences.Fire1 != null
@@ -455,7 +458,7 @@ namespace VoidCrewFleet
                 : null;
         }
 
-        private static string FireName(InputAction fire)
+        internal static string FireName(InputAction fire)
         {
             string name = null;
             try
@@ -477,6 +480,7 @@ namespace VoidCrewFleet
             bool pressed = fire != null && fire.IsPressed();
             if (!pressed) _needRelease = false;
 
+            Busy = step != Step.None;
             if (step == Step.None)
             {
                 _holding = Step.None;
@@ -530,13 +534,12 @@ namespace VoidCrewFleet
         private static Step FindStep(out long target)
         {
             target = 0;
-            Camera camera = Camera.main;
             LocalPlayer me = LocalPlayer.Instance;
-            if (camera == null || me == null) return Step.None;
+            Vector3 eye;
+            Vector3 aim;
+            if (me == null || !Aim.Get(out eye, out aim)) return Step.None;
             int myTeam = FleetShips.CrewSlot(FleetShips.LocalActor);
             if (myTeam < 0) return Step.None;
-            Vector3 eye = camera.transform.position;
-            Vector3 aim = camera.transform.forward;
             CarryableObject held = me.Payload;
 
             // An attached charge in sight: arm it (the enemy's) or pull it off (our own). Not with an item in hand that Fire
@@ -735,7 +738,7 @@ namespace VoidCrewFleet
         private static bool Near(int actor, Component door, float reach)
         {
             if (door == null) return false;
-            Player player = ClientGame.Current != null ? ClientGame.Current.GetPlayerCharacterByActorNumber(actor) : null;
+            Player player = FleetShips.CharacterOf(actor);
             if (player == null) return false;
             Vector3 point;
             Vector3 outward;

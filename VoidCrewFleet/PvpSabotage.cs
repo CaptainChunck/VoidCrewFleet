@@ -153,7 +153,7 @@ namespace VoidCrewFleet
                 if (panel == null) return;
                 PlayerControlledShip ship = FleetShips.OwnerOf(panel);
                 if (!PvpBoarding.IsEnemyOf(sender, ship) || panel.State == EnhancementState.Disabled) return;
-                Player saboteur = ClientGame.Current != null ? ClientGame.Current.GetPlayerCharacterByActorNumber(sender) : null;
+                Player saboteur = FleetShips.CharacterOf(sender);
                 if (saboteur == null || Vector3.Distance(saboteur.transform.position, panel.InteractableTransform.position) > MaxReach)
                 {
                     Log.Warn("PvP: ignored a sabotage request from player " + sender + ", who is not at that panel.");

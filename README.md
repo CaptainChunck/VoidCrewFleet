@@ -44,7 +44,8 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
   - Enemy players can come aboard only through an open airlock.
   - They can't open your airlocks or use anything on your ship, except its **System Enhancement panels**.
   - An enemy who completes a panel's minigame shuts that system down for **120 seconds**.
-- **Fighting aboard:** punch enemy players with **V** (five punches knock one out).
+- **Fighting aboard:** punch enemy players with **V**, or with **Fire** when your hands are empty. Five punches knock
+  one out, and it aims where you look, VR included.
 - **Turrets vs. players:** point defenses and B.R.A.I.N. auto-turrets shoot enemy players floating in open space near
   the ship.
 - **Proximity voice** is forced on. You hear players on the same ship, or within 50 m in open space.
@@ -72,7 +73,7 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
 | Two ships | ShipSpacing | 160 | Distance between the two ships at the start and after a jump (m). |
 | Fleet Pilgrimage | EnemyMultiplier | 1.6 | How many more enemies the Fleet Pilgrimage sends (host). |
 | PvP | StartDistance | 3600 | How far apart the PvP ships start (m). |
-| PvP | PunchKey | V | The punch key. |
+| PvP | PunchKey | V | The punch key (Fire with empty hands also punches). |
 | PvP | BreachChargeCost | 10 | The breaching charge's fabricator price in alloys (host). |
 | Diagnostics | VerboseLogging | false | More detail in the BepInEx log. |
 | Diagnostics | AutoTest | Off | Developer self-test; leave it Off to play. |

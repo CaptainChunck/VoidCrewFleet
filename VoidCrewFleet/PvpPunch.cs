@@ -66,12 +66,16 @@ namespace VoidCrewFleet
             {
                 Keyboard keyboard = Keyboard.current;
                 Key key = Settings.PunchKey.Value;
-                if (keyboard != null && key != Key.None && keyboard[key].wasPressedThisFrame) TryPunch();
+                if (keyboard != null && key != Key.None && keyboard[key].wasPressedThisFrame) TryPunch(false);
+                // Fire punches too (a mouse button, or the VR controller's trigger), with empty hands and an enemy in reach.
+                InputAction fire = PvpBreach.Fire();
+                if (fire != null && fire.WasPressedThisFrame() && !PvpBreach.Busy && HandsEmpty()) TryPunch(true);
                 if (Time.unscaledTime >= _nextHint)
                 {
                     _nextHint = Time.unscaledTime + HintSeconds;
                     Player target = CanPunch() ? FindTarget() : null;
-                    ShowHint(target != null ? Settings.PunchKey.Value.ToString().ToUpperInvariant() + "  PUNCH " + NameOf(target).ToUpperInvariant() : null);
+                    string keys = Settings.PunchKey.Value.ToString().ToUpperInvariant() + (HandsEmpty() ? " OR " + PvpBreach.FireName(fire) : "");
+                    ShowHint(target != null ? keys + "  PUNCH " + NameOf(target).ToUpperInvariant() : null);
                 }
             }
             catch (Exception e)
@@ -91,11 +95,19 @@ namespace VoidCrewFleet
             return Camera.main != null;
         }
 
-        private static void TryPunch()
+        private static bool HandsEmpty()
+        {
+            LocalPlayer me = LocalPlayer.Instance;
+            return me != null && me.Payload == null;
+        }
+
+        /// <param name="onlyAtSomeone">From Fire: punch only when an enemy is in reach (a click elsewhere isn't a punch).</param>
+        private static void TryPunch(bool onlyAtSomeone)
         {
             if (Time.unscaledTime < _nextPunch || !CanPunch()) return;
-            _nextPunch = Time.unscaledTime + CooldownSeconds;
             Player target = FindTarget();
+            if (target == null && onlyAtSomeone) return;
+            _nextPunch = Time.unscaledTime + CooldownSeconds;
             Shake(0.25f);
             if (target == null)
             {
@@ -109,12 +121,11 @@ namespace VoidCrewFleet
         /// <summary>The enemy player in front of the camera within reach and in plain sight, nearest to the aim first.</summary>
         private static Player FindTarget()
         {
-            Camera camera = Camera.main;
             ClientGame game = ClientGame.Current;
             LocalPlayer me = LocalPlayer.Instance;
-            if (camera == null || game == null || me == null) return null;
-            Vector3 eye = camera.transform.position;
-            Vector3 aim = camera.transform.forward;
+            Vector3 eye;
+            Vector3 aim;
+            if (game == null || me == null || !Aim.Get(out eye, out aim)) return null;
             Player best = null;
             float bestScore = float.MaxValue;
             foreach (Player player in game.Players)
@@ -182,7 +193,7 @@ namespace VoidCrewFleet
                 if (me == null || me.IsDead || (me.InteractionState.ActiveModes & InteractionMode.InCloneTube) != 0) return;
                 float last;
                 if (LastHitFrom.TryGetValue(sender, out last) && Time.unscaledTime - last < CooldownSeconds * 0.5f) return;
-                Player attacker = ClientGame.Current != null ? ClientGame.Current.GetPlayerCharacterByActorNumber(sender) : null;
+                Player attacker = FleetShips.CharacterOf(sender);
                 Vector3 from = attacker != null ? attacker.transform.position : Net.Get(data, 1, me.transform.position);
                 float distance = Vector3.Distance(from, me.transform.position);
                 if (distance > Reach + 3f)

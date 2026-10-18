@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using CG.Game;
 using CG.Game.Player;
 using CG.Objects;
 using CG.Ship.Hull;
@@ -371,6 +372,23 @@ namespace VoidCrewFleet
         {
             int slot = Slot(ship);
             return slot == 0 ? "ship 1" : (slot == 1 ? "ship 2" : "a ship");
+        }
+
+        /// <summary>
+        /// A player's character by actor number, or null. Unlike the game's own lookup it skips characters that are
+        /// already destroyed (which throws while a match ends).
+        /// </summary>
+        public static Player CharacterOf(int actor)
+        {
+            ClientGame game = ClientGame.Current;
+            if (game == null || game.Players == null) return null;
+            foreach (Player player in game.Players)
+            {
+                if (player == null) continue;
+                PhotonView view = player.photonView;
+                if (view != null && (view.OwnerActorNr == actor || view.CreatorActorNr == actor)) return player;
+            }
+            return null;
         }
     }
 }

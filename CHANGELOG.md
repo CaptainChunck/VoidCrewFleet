@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1
+- **Punching works in VR.** It aims where you look (the game's own interaction ray, which the VR UI Fix points with
+  your head) instead of the camera's mouse-look direction.
+- **Fire punches too** (mouse button or VR controller), with empty hands and an enemy in reach. V still works.
+- **Hub mission panel:** with two ships it names both slots (SHIP 1 / SHIP 2, or BLUE / RED in Fleet Battle), and it
+  shows FLEET PILGRIMAGE or FLEET BATTLE instead of STANDARD.
+- **End of a PvP match:** fixed an error from proximity voice when a player's character was already gone.
+
 ## 0.1.0
 
 First release.
