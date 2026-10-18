@@ -113,6 +113,82 @@ namespace VoidCrewFleet
             _editingShipB = false;
         }
 
+        // ---------------------------------------------------------------- the hub's mission panel
+
+        private static Label _flowQuestLabel;
+        private static Label _flowShipLabel;
+        private static string _gameQuestText;
+        private static string _gameShipText;
+        private static bool _flowSubscribed;
+
+        /// <summary>The hub's mission panel ("STANDARD / NO SHIP SELECTED") names both ships when there are two.</summary>
+        [GamePatch(Feature, "HUBFlowDisplay", "ShipSelected", PatchKind.Postfix)]
+        private static void FlowShipPostfix(Label ___selectedShipLabel)
+        {
+            _flowShipLabel = ___selectedShipLabel;
+            _gameShipText = ___selectedShipLabel != null ? ___selectedShipLabel.text : null;
+            WatchFleet();
+            RefreshFlow();
+        }
+
+        /// <summary>... and the fleet mission (FLEET PILGRIMAGE, FLEET BATTLE), which the game shows as the mission it runs on.</summary>
+        [GamePatch(Feature, "HUBFlowDisplay", "QuestSelected", PatchKind.Postfix)]
+        private static void FlowQuestPostfix(Label ___selectedQuestLabel)
+        {
+            _flowQuestLabel = ___selectedQuestLabel;
+            _gameQuestText = ___selectedQuestLabel != null ? ___selectedQuestLabel.text : null;
+            WatchFleet();
+            RefreshFlow();
+        }
+
+        private static void WatchFleet()
+        {
+            if (_flowSubscribed) return;
+            HubFleet.Changed += RefreshFlow;
+            _flowSubscribed = true;
+        }
+
+        private static void RefreshFlow()
+        {
+            try
+            {
+                bool two = Available && HubFleet.PlannedMode != FleetMode.OneShip;
+                bool pvp = HubFleet.Variant == HubVariant.FleetBattle;
+                if (_flowShipLabel != null && _flowShipLabel.panel != null && _gameShipText != null)
+                {
+                    _flowShipLabel.text = !two
+                        ? _gameShipText
+                        : Slot(pvp ? "<color=#5AA9FF>BLUE</color>" : "SHIP 1", _gameShipText) + "\n" +
+                          Slot(pvp ? "<color=#FF5A4F>RED</color>" : "SHIP 2", HubFleet.ChosenShipB.IsNull ? "SAME AS SHIP 1" : FlowName(HubFleet.ShipBDef, HubFleet.ShipBName));
+                }
+                if (_flowQuestLabel != null && _flowQuestLabel.panel != null && _gameQuestText != null)
+                {
+                    string variant = !Available ? null
+                        : HubFleet.Variant == HubVariant.FleetPilgrimage ? "FLEET PILGRIMAGE"
+                        : HubFleet.Variant == HubVariant.FleetBattle ? "FLEET BATTLE (PVP)" : null;
+                    _flowQuestLabel.text = variant != null ? "<b>" + variant + "</b>" : _gameQuestText;
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Showing both ships on the hub's mission panel", e);
+            }
+        }
+
+        private static string Slot(string name, string ship)
+        {
+            return "<color=#C9B27A>" + name + "</color>  " + ship;
+        }
+
+        /// <summary>A loadout the way the panel names ship 1's: "<b>SHIP</b>: LOADOUT".</summary>
+        private static string FlowName(ShipLoadoutDataDef def, string fallback)
+        {
+            if (def != null && def.ShipContextInfo != null && def.ContextInfo != null)
+                return ("<b>" + def.ShipContextInfo.HeaderText + "</b>: " + def.ContextInfo.HeaderText).ToUpperInvariant();
+            string text = def != null ? HubFleet.DescribeLoadout(def) : fallback;
+            return string.IsNullOrEmpty(text) ? "-" : text.ToUpperInvariant();
+        }
+
         // ---------------------------------------------------------------- the bar
 
         private static void EnsureBar()

@@ -188,6 +188,8 @@ namespace VoidCrewFleet
                 Fail("no mission is selected");
                 yield break;
             }
+            Screenshot("hub");
+            yield return new WaitForSeconds(0.5f);
             Log.Info("[autotest] Planned: " + HubFleet.PlannedMode + ", ship 2 = " + HubFleet.DescribeLoadout(HubFleet.ShipBDef) + ".");
             hub.StartQuest(hub.SelectedQuest, HubQuestManager.SessionStartType.Fresh, hub.QuestSeed, hub.ChallengeSeed);
         }
