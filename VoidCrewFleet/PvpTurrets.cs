@@ -21,8 +21,9 @@ namespace VoidCrewFleet
     /// - Point defenses pick their targets and play their bursts on every client. When there's no missile to shoot, an
     ///   enemy player in range, in the turret's arc and in sight becomes the target. The host deals the hit.
     /// - Auto-turrets (run by the host): when there's no ship to shoot, an enemy player becomes the turret's target. The
-    ///   turret aims and fires as it does at a ship. The game's bullets pass through people, so while the turret is on
-    ///   target the player takes damage.
+    ///   turret aims and fires as it does at a ship. The game's bullets pass through people, so each shot the turret fires
+    ///   while on target may hit the player instead, as the game's EVA hunters roll for their hits: likely up close, much
+    ///   less so far away.
     /// - The damage goes to the hit player's own game, like a punch.
     /// Auto-turrets against the enemy SHIP: the game's turret logic was made for NPC ships and misbehaved against a player
     /// ship, so in PvP the host runs that step itself:
@@ -40,7 +41,24 @@ namespace VoidCrewFleet
 
         private const float PlayerRange = 250f;
         private const float PointDefenseHit = 0.25f;
-        private const float AutoTurretDamagePerSecond = 0.4f;
+
+        // An auto-turret's shots at a player (a full-health player has 1 health). Each shot it fires while on target hits with
+        // a chance falling from HitChanceClose (within HitChanceCloseRange) to HitChanceFar (at PlayerRange), as the game's
+        // EVA hunters roll for their hits. A hit takes AutoTurretDamagePerSecond divided by the gun's shots a second, so a
+        // turret whose every shot hit would take that much a second. Up close one turret takes about 0.17 a second (a boarder
+        // lasts ~6 s, ~3 s against two; it was 2.5 s and ~1 s), at 250 m about 0.05.
+        private const float AutoTurretDamagePerSecond = 0.25f;
+        private const float HitChanceClose = 0.7f;
+        private const float HitChanceCloseRange = 25f;
+        private const float HitChanceFar = 0.2f;
+
+        /// <summary>The gun's shots a second are read within these bounds (so one hit never takes more than 0.25).</summary>
+        private const float MinFireRate = 1f;
+        private const float MaxFireRate = 30f;
+
+        /// <summary>A shot counts at the player while the turret was on target this recently (its last physics step).</summary>
+        private const float OnTargetSeconds = 0.1f;
+
         private const float OnTargetDelta = 2.5f;
         private const float SendSeconds = 0.25f;
         private const int SightMask = 134222848; // the auto-turret's own occlusion test: ship hulls and objects
@@ -54,6 +72,17 @@ namespace VoidCrewFleet
         private const int ShotMask = (1 << 10) | (1 << 12);
         private static readonly RaycastHit[] SightHits = new RaycastHit[16];
         private static readonly Dictionary<int, Vector3> HullCentres = new Dictionary<int, Vector3>();
+
+        /// <summary>Host: an auto-turret on target at an enemy player (kept by the gun's instance ID).</summary>
+        private struct PlayerAim
+        {
+            public int Actor;
+            public Vector3 Muzzle;
+            public float Distance;
+            public float LastOnTarget;
+        }
+
+        private static readonly Dictionary<int, PlayerAim> OnPlayer = new Dictionary<int, PlayerAim>();
 
         private static readonly Dictionary<int, float> PendingDamage = new Dictionary<int, float>();
         private static readonly Dictionary<int, Vector3> PendingFrom = new Dictionary<int, Vector3>();
@@ -194,13 +223,15 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// Host, every physics step of an auto-turret whose target is a player: aim and fire at the player (the game's own
-        /// step would drop a target that isn't a ship), and hurt the player while on target.
+        /// step would drop a target that isn't a ship); while it is on target, its shots may hit the player (BarrelShootPostfix).
         /// </summary>
         [GamePatch(Feature, "AutoShootingTurretController", "FixedUpdate", PatchKind.Prefix)]
         private static bool AutoTurretStepPrefix(AutoShootingTurretController __instance, CompositeWeaponModule ___turret, WeaponTarget ___activeTarget,
                                                  WeaponTarget ___noTarget, ref WeaponPivot ___activePivot, ref WeaponBarrelProjectile ___activeBarrel,
                                                  BulletMagazine ___magazine, float ___trackingSpeed, TargetLockComponent ___targetLockComponent, ref bool ___reloading)
         {
+            // On target at a player only until a step says otherwise.
+            if (OnPlayer.Count > 0 && (object)___turret != null) OnPlayer.Remove(___turret.GetInstanceID());
             var enemyShip = ___activeTarget.TargetedUnit as PlayerControlledShip;
             if (enemyShip != null && PvpCombat.Active)
                 return ShipStep(__instance, ___turret, enemyShip, ___noTarget, ref ___activePivot, ref ___activeBarrel, ___trackingSpeed, ___targetLockComponent, ref ___reloading);
@@ -232,8 +263,8 @@ namespace VoidCrewFleet
                 bool canFire = ___magazine == null || (!___magazine.IsReloading && ___magazine.AvailableShotsLeft >= 1);
                 if (delta.magnitude < OnTargetDelta && canFire)
                 {
+                    OnPlayer[___turret.GetInstanceID()] = new PlayerAim { Actor = actor, Muzzle = muzzle, Distance = Vector3.Distance(aim, muzzle), LastOnTarget = Time.time };
                     ___turret.SendInput(WeaponActionType.Primary, true);
-                    AddDamage(actor, AutoTurretDamagePerSecond * Time.fixedDeltaTime, muzzle);
                 }
                 else if (delta.magnitude > OnTargetDelta * 2f || !canFire) ___turret.SendInput(WeaponActionType.Primary, false);
                 return false;
@@ -242,6 +273,30 @@ namespace VoidCrewFleet
             {
                 Log.Failure("An auto-turret shooting at a player", e);
                 return true;
+            }
+        }
+
+        /// <summary>Host: a gun fires a shot. From an auto-turret on target at an enemy player, it may hit them: the closer, the likelier.</summary>
+        [GamePatch(Feature, "Gameplay.CompositeWeapons.WeaponBarrelBase", "Shoot", PatchKind.Postfix)]
+        private static void BarrelShootPostfix(WeaponBarrelBase __instance, int __result)
+        {
+            if (OnPlayer.Count == 0 || __result <= 0) return;
+            try
+            {
+                CompositeWeaponModule gun = __instance.WeaponBase;
+                PlayerAim aim;
+                if ((object)gun == null || !OnPlayer.TryGetValue(gun.GetInstanceID(), out aim)) return;
+                if (Time.time - aim.LastOnTarget > OnTargetSeconds || !PvpCombat.Active || !PhotonNetwork.IsMasterClient) return;
+                float chance = Mathf.Lerp(HitChanceClose, HitChanceFar, Mathf.InverseLerp(HitChanceCloseRange, PlayerRange, aim.Distance));
+                if (UnityEngine.Random.value >= chance) return;
+                float rate = gun.FireRate != null ? gun.FireRate.Value : MinFireRate;
+                if (!(rate >= MinFireRate)) rate = MinFireRate;
+                if (rate > MaxFireRate) rate = MaxFireRate;
+                AddDamage(aim.Actor, AutoTurretDamagePerSecond / rate, aim.Muzzle);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("An auto-turret's shot at a player", e);
             }
         }
 
@@ -443,6 +498,7 @@ namespace VoidCrewFleet
         /// <summary>Host, every frame: sends the damage gathered for each player a few times a second.</summary>
         public static void Frame()
         {
+            if (OnPlayer.Count > 0 && !PvpCombat.Active) OnPlayer.Clear();
             if (PendingDamage.Count == 0 || Time.unscaledTime < _nextSend) return;
             _nextSend = Time.unscaledTime + SendSeconds;
             if (!PvpCombat.Active || !PhotonNetwork.IsMasterClient)

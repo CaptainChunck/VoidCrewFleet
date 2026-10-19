@@ -17,7 +17,8 @@ namespace VoidCrewFleet
     /// - The game's "Immersive Voice Chat" route (each voice played at the speaker's body) is forced on for the match,
     ///   without touching the player's saved setting, and turned back to their choice afterwards.
     /// - The game never makes anyone inaudible (beyond about 28 m a voice turns into full-volume radio), so each client
-    ///   turns every remote voice up or down itself, every frame, with a short fade.
+    ///   turns every remote voice up or down itself: who can be heard is worked out a few times a second, and each voice
+    ///   fades toward that every frame.
     /// - A player without a body (waiting to respawn) is heard by their own team only, like a team radio. Before the teams
     ///   are confirmed everyone hears everyone.
     /// - Nobody sees the talking indicator of a player they can't hear.
@@ -30,11 +31,15 @@ namespace VoidCrewFleet
         private const float FadePerSecond = 5f;
         private const int VivoxLow = -50;
 
+        /// <summary>How often who-hears-whom is worked out (about 7 times a second); the fade runs every frame.</summary>
+        private const float AudibilitySeconds = 0.15f;
+
         private static readonly Dictionary<string, float> Volumes = new Dictionary<string, float>();
         private static readonly Dictionary<string, bool> Audibility = new Dictionary<string, bool>();
+        private static readonly Dictionary<string, int> ActorOfVoice = new Dictionary<string, int>();
         private static readonly HashSet<string> LoweredInVivox = new HashSet<string>();
         private static bool _on;
-        private static float _nextVivoxPass;
+        private static float _nextAudibility;
 
         public static bool Active
         {
@@ -80,7 +85,10 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- who hears whom
 
-        /// <summary>Every frame: each remote voice fades toward audible or silent for the local player.</summary>
+        /// <summary>
+        /// Every frame: each remote voice fades toward audible or silent for the local player. Who is audible is worked out a
+        /// few times a second, and straight away for a voice that has just started.
+        /// </summary>
         public static void Frame()
         {
             if (!Active)
@@ -96,39 +104,72 @@ namespace VoidCrewFleet
             }
             VivoxTapManager manager = VivoxTapManager.Instance;
             if (manager == null) return;
-            Player listener = LocalPlayer.Instance;
-            int myTeam = FleetShips.CrewSlot(FleetShips.LocalActor);
+            if (Time.unscaledTime >= _nextAudibility || HasNewVoice(manager))
+            {
+                _nextAudibility = Time.unscaledTime + AudibilitySeconds;
+                UpdateAudibility(manager);
+            }
             float step = Time.unscaledDeltaTime * FadePerSecond;
             foreach (KeyValuePair<string, EventInstance> pair in manager.FmodEvents)
             {
                 EventInstance voice = pair.Value;
                 if (!voice.isValid()) continue;
-                bool audible = Audible(pair.Key, listener, myTeam);
-                Audibility[pair.Key] = audible;
+                bool audible;
+                Audibility.TryGetValue(pair.Key, out audible);
                 float current;
                 if (!Volumes.TryGetValue(pair.Key, out current)) current = 1f;
                 float next = Mathf.MoveTowards(current, audible ? 1f : 0f, step);
                 Volumes[pair.Key] = next;
                 voice.setVolume(next);
             }
-            if (Time.unscaledTime >= _nextVivoxPass)
-            {
-                _nextVivoxPass = Time.unscaledTime + 0.25f;
-                GateUntapped(manager, listener, myTeam);
-            }
         }
 
-        private static bool Audible(string cloudId, Player listener, int myTeam)
+        private static bool HasNewVoice(VivoxTapManager manager)
         {
-            Photon.Realtime.Player speakerPlayer = VoipService.CloudIDToPlayer(cloudId);
-            if (speakerPlayer == null) return false;
-            if (!PvpTeams.Locked) return true;
-            int speakerTeam = FleetShips.CrewSlot(speakerPlayer.ActorNumber);
+            foreach (string cloudId in manager.FmodEvents.Keys)
+            {
+                if (!Audibility.ContainsKey(cloudId)) return true;
+            }
+            return false;
+        }
+
+        /// <summary>A few times a second: who the local player can hear, for every remote voice (played at a body or by Vivox).</summary>
+        private static void UpdateAudibility(VivoxTapManager manager)
+        {
+            // Whose voice is whose, from one look at the room. (The game's own lookup sorts the player list on every call, and
+            // warns in the log about a voice whose player has left.)
+            ActorOfVoice.Clear();
+            foreach (Photon.Realtime.Player player in PhotonNetwork.PlayerList)
+            {
+                string cloudId;
+                try
+                {
+                    cloudId = VoipService.PlayerToCloudID(player);
+                }
+                catch
+                {
+                    continue;
+                }
+                if (!string.IsNullOrEmpty(cloudId) && !ActorOfVoice.ContainsKey(cloudId)) ActorOfVoice[cloudId] = player.ActorNumber;
+            }
+            Player listener = LocalPlayer.Instance;
+            PlayerControlledShip listenerShip = listener != null && !listener.IsDead ? FleetShips.InteriorAt(listener.transform.position) : null;
+            int myTeam = FleetShips.CrewSlot(FleetShips.LocalActor);
+            bool locked = PvpTeams.Locked;
+            foreach (string cloudId in manager.FmodEvents.Keys) Audibility[cloudId] = Audible(cloudId, listener, listenerShip, myTeam, locked);
+            GateUntapped(manager, listener, listenerShip, myTeam, locked);
+        }
+
+        private static bool Audible(string cloudId, Player listener, PlayerControlledShip listenerShip, int myTeam, bool locked)
+        {
+            int actor;
+            if (!ActorOfVoice.TryGetValue(cloudId, out actor)) return false;
+            if (!locked) return true;
+            int speakerTeam = FleetShips.CrewSlot(actor);
             bool teammate = myTeam >= 0 && speakerTeam == myTeam;
-            Player speaker = FleetShips.CharacterOf(speakerPlayer.ActorNumber);
+            Player speaker = FleetShips.CharacterOf(actor);
             if (speaker == null || speaker.IsDead || listener == null || listener.IsDead) return teammate;
             PlayerControlledShip speakerShip = FleetShips.InteriorAt(speaker.transform.position);
-            PlayerControlledShip listenerShip = FleetShips.InteriorAt(listener.transform.position);
             if (speakerShip != null || listenerShip != null) return speakerShip == listenerShip;
             return Vector3.Distance(speaker.transform.position, listener.transform.position) <= OpenSpaceRange;
         }
@@ -137,7 +178,7 @@ namespace VoidCrewFleet
         /// A participant whose voice is not going through the game's taps (no body tap running) is played by Vivox itself:
         /// turn them down there instead.
         /// </summary>
-        private static void GateUntapped(VivoxTapManager manager, Player listener, int myTeam)
+        private static void GateUntapped(VivoxTapManager manager, Player listener, PlayerControlledShip listenerShip, int myTeam, bool locked)
         {
             try
             {
@@ -152,7 +193,7 @@ namespace VoidCrewFleet
                     if (string.IsNullOrEmpty(id) || id == self) continue;
                     GameObject tap;
                     bool tapped = manager.enabled && manager.Taps.TryGetValue(id, out tap) && tap != null && manager.FmodEvents.ContainsKey(id);
-                    bool lower = !tapped && !Audible(id, listener, myTeam);
+                    bool lower = !tapped && !Audible(id, listener, listenerShip, myTeam, locked);
                     if (!tapped) Audibility[id] = !lower;
                     if (lower && LoweredInVivox.Add(id)) participant.SetLocalVolume(VivoxLow);
                     else if (!lower && LoweredInVivox.Remove(id)) participant.SetLocalVolume(0);
@@ -196,6 +237,8 @@ namespace VoidCrewFleet
             LoweredInVivox.Clear();
             Volumes.Clear();
             Audibility.Clear();
+            ActorOfVoice.Clear();
+            _nextAudibility = 0f;
             EnforceTaps();
             Log.Info("PvP: proximity voice is off.");
         }

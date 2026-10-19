@@ -25,7 +25,9 @@ namespace VoidCrewFleet
     /// keeps faction 1 and the RED team gets faction 5, a faction of its own, on every client. With that:
     /// - the ships' guns, missiles and point defence treat the other ship as an enemy, and NPCs attack both;
     /// - an enemy ship's shields stop shots (the game lets player shots through every player shield), and a shot on an
-    ///   enemy turret or module hits that ship's hull, the way NPC shots on a player ship do;
+    ///   enemy turret or module hits that ship's hull, the way NPC shots on a player ship do; a piercing round stops there;
+    /// - a shot on an enemy shield does the same whoever fires it (the host or another gunner), with the helm's
+    ///   target-lock bonus when that ship is locked;
     /// - gunners who are not the host damage the enemy hull with module defects, as the host's own shots do;
     /// - a missile belongs to the ship whose launcher fired it (the game gives it "the player ship"), also in co-op;
     /// - the host marks the ships hostile to each other, so auto turrets engage and the enemy ship is scanned.
@@ -42,6 +44,15 @@ namespace VoidCrewFleet
 
         private static readonly MethodInfo ImpactDamageReceiverMethod = GameMember.Method(typeof(WeaponProjectile), "ImpactDamageReceiver");
         private static readonly FieldInfo DamageReceivedField = GameMember.Field(typeof(OrbitObject), "DamageReceived");
+        private static readonly FieldInfo BarrelDamageTypeField = GameMember.Field(typeof(WeaponBarrelBase), "modifiedDamageType");
+
+        /// <summary>The enemy shield a shot is hitting right now (while the game applies the hit), with the shot's damage and gun.</summary>
+        private static ShieldDamagable _shieldShot;
+        private static float _shieldShotDamage;
+        private static CompositeWeaponModule _shieldShotWeapon;
+
+        /// <summary>The shot whose latest hit this mod resolved on the enemy ship (its shield, or a part passed to its hull).</summary>
+        private static WeaponProjectile _stoppedShot;
 
         private static float _nextFullWalk;
         private static readonly HashSet<int> HostilityToldTo = new HashSet<int>();
@@ -144,11 +155,13 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// A ship gun's shot hits something of the other ship: its shield absorbs the shot (the game lets player shots pass
-        /// every player shield), and a turret, module or socket passes the hit to the ship's hull.
+        /// every player shield), and a turret, module or socket passes the hit to the ship's hull. A shot on the shield of a
+        /// ship the gun's helm has locked gets the target-lock bonus, as a shot on its hull does.
         /// </summary>
         [GamePatch(Feature, "Gameplay.CompositeWeapons.WeaponProjectile", "TryHit", PatchKind.Prefix)]
         private static bool TryHitPrefix(WeaponProjectile __instance, RaycastHit hit, ref IHitReceiver hitReceiver, float localWeaponDamageModifier, ref bool __result)
         {
+            _stoppedShot = null;
             if (!Active) return true;
             try
             {
@@ -164,17 +177,102 @@ namespace VoidCrewFleet
                 {
                     __result = false;
                     if (!shield.Valid() || ImpactDamageReceiverMethod == null) return false;
-                    ImpactDamageReceiverMethod.Invoke(__instance, new object[] { shield, hit.point, hit.normal, localWeaponDamageModifier });
+                    float modifier = localWeaponDamageModifier * LockBonus(__instance.SourceWeapon, shooter, target);
+                    _shieldShot = shield;
+                    _shieldShotDamage = modifier * __instance.Damage;
+                    _shieldShotWeapon = __instance.SourceWeapon;
+                    try
+                    {
+                        ImpactDamageReceiverMethod.Invoke(__instance, new object[] { shield, hit.point, hit.normal, modifier });
+                    }
+                    finally
+                    {
+                        _shieldShot = null;
+                        _shieldShotWeapon = null;
+                    }
+                    _stoppedShot = __instance;
                     __result = true;
                     return false;
                 }
-                if (hitReceiver is CellModule || hitReceiver is CarryableObject || hitReceiver is CarryablesSocket) hitReceiver = target;
+                if (hitReceiver is CellModule || hitReceiver is CarryableObject || hitReceiver is CarryablesSocket)
+                {
+                    hitReceiver = target;
+                    _stoppedShot = __instance;
+                }
             }
             catch (Exception e)
             {
                 Log.Failure("Resolving a hit on the enemy ship", e);
             }
             return true;
+        }
+
+        /// <summary>
+        /// The helm's target-lock damage bonus, as the game's TryHit gives a shot at a locked target. The game looks up the
+        /// object hit, and a shield is never locked itself: here the shield's ship counts.
+        /// </summary>
+        private static float LockBonus(CompositeWeaponModule weapon, PlayerControlledShip shooter, PlayerControlledShip target)
+        {
+            TargetLockComponent locks = weapon.TargetLockComponent;
+            if (locks == null || !locks.IsTargetLocked(target)) return 1f;
+            CG.Ship.Modules.Helm helm = shooter.GetModule<CG.Ship.Modules.Helm>();
+            return helm != null && helm.TargetLockDamage != null ? helm.TargetLockDamage.Value : 1f;
+        }
+
+        /// <summary>
+        /// A piercing round stops where this mod resolved its hit on the enemy ship: in its shield, or at the part whose hit
+        /// went to the hull. (The game lets it go on through the hull, so one round hit that hull again with every part behind.)
+        /// </summary>
+        [GamePatch(Feature, "Gameplay.CompositeWeapons.PenetratingWeaponProjectile", "CanPenetrate", PatchKind.Postfix)]
+        private static void CanPenetratePostfix(PenetratingWeaponProjectile __instance, ref bool __result)
+        {
+            if ((object)_stoppedShot == null) return;
+            if (ReferenceEquals(_stoppedShot, __instance)) __result = false;
+            _stoppedShot = null;
+        }
+
+        /// <summary>
+        /// A gunner who is not the host hits the enemy shield. The game would send the host the damage already multiplied
+        /// against the shield's defence type, and the ship as the attacker; instead the host gets the shot's own damage and
+        /// the gun that fired, and applies the hit exactly as it applies its own guns' (SendDamagePrefix).
+        /// </summary>
+        [GamePatch(Feature, "ProjectileDamageDistributor", "SendDamageToHost", PatchKind.Prefix)]
+        private static void SendToHostPrefix(ref float damage, int targetIndex, ref int source)
+        {
+            if ((object)_shieldShot == null) return;
+            try
+            {
+                if (targetIndex != _shieldShot.GetViewID()) return;
+                damage = _shieldShotDamage;
+                int weapon = _shieldShotWeapon != null ? _shieldShotWeapon.GetViewID() : 0;
+                if (weapon != 0) source = weapon;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Sending a hit on the enemy shield to the host", e);
+            }
+        }
+
+        /// <summary>
+        /// The damage type a gun's shots carry: the gunner's empowered type on its barrels, else the gun's own. (Damage types
+        /// are assets that live as long as the game, so plain reference checks do.)
+        /// </summary>
+        private static DamageType ShotDamageType(OrbitObject attacker)
+        {
+            var weapon = attacker as CompositeWeaponModule;
+            if (weapon == null) return DefaultDamageType;
+            CompositeWeaponModule.CompositeWeaponOutsideElements elements = weapon.ActiveOutsideElementCollection;
+            if (BarrelDamageTypeField != null && elements != null && elements.Barrels != null)
+            {
+                foreach (WeaponBarrelBase barrel in elements.Barrels)
+                {
+                    if (barrel == null) continue;
+                    DamageType empowered = GameMember.Read<DamageType>(BarrelDamageTypeField, barrel, null);
+                    if ((object)empowered != null) return empowered;
+                }
+            }
+            DamageType own = weapon.DamageType;
+            return (object)own != null ? own : DefaultDamageType;
         }
 
         private struct EnemyHit
@@ -185,8 +283,10 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// Host: damage reported by a gunner who is not the host. A shield hit is absorbed the way the host's own hits are
-        /// (what it can't hold goes to the hull); a hull hit also counts toward module defects, like the host's hits.
+        /// Host: damage reported by a gunner who is not the host. A shield hit (the shot's own damage, from the gun that
+        /// fired: SendToHostPrefix) is applied exactly as the host's own guns apply theirs: the shield absorbs its share, and
+        /// what it can't hold goes to the hull with the gun's damage type. A hull hit also counts toward module defects, like
+        /// the host's hits.
         /// </summary>
         [GamePatch(Feature, "ProjectileDamageDistributor", "SendDamageData", PatchKind.Prefix)]
         private static void SendDamagePrefix(int[] targets, float[] damage, int sourceId, out List<EnemyHit> __state)
@@ -207,7 +307,7 @@ namespace VoidCrewFleet
                     if (shield != null)
                     {
                         if (FleetShips.OwnerOf(shield) == attackerShip) continue;
-                        shield.ApplyHitDamage(damage[i], attacker, DefaultDamageType, shield.transform.position, Quaternion.identity, true);
+                        shield.ApplyHitDamage(damage[i], attacker, ShotDamageType(attacker), shield.transform.position, Quaternion.identity);
                         damage[i] = 0f;
                         continue;
                     }

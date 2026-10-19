@@ -48,11 +48,23 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>
+        /// The first ship to start dying (or a forfeit) decides the match. The host announces every ship's death in turn, so
+        /// every client sees the same one first; a ship that starts dying after that changes nothing.
+        /// </summary>
         private static void OnShipLost(PlayerControlledShip ship)
         {
             if (!FleetSession.IsPvP) return;
             int slot = FleetShips.Slot(ship);
             if (slot < 0) return;
+            int decided = LoserSlot;
+            if (decided >= 0)
+            {
+                if (decided != slot)
+                    Log.Info("PvP: the " + PvpTeams.TeamName(slot) + " ship is destroyed too, after the match was decided; the " + PvpTeams.TeamName(1 - decided) +
+                             " team still wins.");
+                return;
+            }
             _loserSlot = slot;
             Notice.Show("The " + PvpTeams.TeamName(slot) + " ship is destroyed: the " + PvpTeams.TeamName(1 - slot) + " team wins!");
             if (PhotonNetwork.IsMasterClient) EndSoon(slot, EndDelaySeconds);
@@ -63,6 +75,7 @@ namespace VoidCrewFleet
         {
             if (_ending || FleetRuntime.Instance == null) return;
             _ending = true;
+            _loserSlot = loser;
             try
             {
                 PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyLoser, loser } });
@@ -91,8 +104,8 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// A few times a second: a new match forgets the last one; the host finishes a match a previous host had decided,
-        /// and makes a team that has lost all its players forfeit.
+        /// A few times a second: a new match forgets the last one; every client notes which teams have had players; the host
+        /// finishes a match a previous host had decided, and makes a team that has lost all its players forfeit.
         /// </summary>
         public static void Tick()
         {
@@ -105,7 +118,20 @@ namespace VoidCrewFleet
                 TeamHadPlayers[0] = TeamHadPlayers[1] = false;
                 _emptyTeam = -1;
             }
-            if (!FleetSession.IsPvP || !PhotonNetwork.IsMasterClient || !PvpTeams.Locked || GameSessionManager.InHub) return;
+            if (!FleetSession.IsPvP || !PvpTeams.Locked || GameSessionManager.InHub) return;
+
+            // Every client keeps this, not only the host: when the host leaves, the player who takes over still knows that a
+            // team now empty had players, and declares its forfeit.
+            Dictionary<int, int> teams = FleetShips.CrewMap();
+            int empty = -1;
+            for (int team = 0; team < 2; team++)
+            {
+                int count = PvpTeams.Count(teams, team);
+                if (count > 0) TeamHadPlayers[team] = true;
+                else if (TeamHadPlayers[team]) empty = team;
+            }
+
+            if (!PhotonNetwork.IsMasterClient) return;
             ClientGame game = ClientGame.Current;
             if (game == null || game.GameState == ClientGameState.Ended || _ending) return;
 
@@ -116,14 +142,6 @@ namespace VoidCrewFleet
                 return;
             }
 
-            Dictionary<int, int> teams = FleetShips.CrewMap();
-            int empty = -1;
-            for (int team = 0; team < 2; team++)
-            {
-                int count = PvpTeams.Count(teams, team);
-                if (count > 0) TeamHadPlayers[team] = true;
-                else if (TeamHadPlayers[team]) empty = team;
-            }
             if (empty < 0)
             {
                 _emptyTeam = -1;
