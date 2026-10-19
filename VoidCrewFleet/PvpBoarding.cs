@@ -56,26 +56,26 @@ namespace VoidCrewFleet
         /// <summary>The local player's team (0 BLUE, 1 RED), or -1 when not on a team.</summary>
         private static int LocalTeam
         {
-            get { return FleetShips.CrewSlot(FleetShips.LocalActor); }
+            get { return FleetShips.TeamOfActor(FleetShips.LocalActor); }
         }
 
-        /// <summary>True for the other team's ship, seen from the local player.</summary>
+        /// <summary>True for a ship of the other team, seen from the local player (a team's own ships are friendly).</summary>
         public static bool IsEnemyShip(PlayerControlledShip ship)
         {
             if (ship == null || !PvpCombat.Active) return false;
             int mine = LocalTeam;
             if (mine < 0) return false;
             int slot = FleetShips.Slot(ship);
-            return slot >= 0 && slot != mine;
+            return slot >= 0 && FleetShips.TeamOfSlot(slot) != mine;
         }
 
         /// <summary>True when a player of this actor is on the other team from this ship.</summary>
         public static bool IsEnemyOf(int actor, PlayerControlledShip ship)
         {
             if (ship == null || !PvpCombat.Active) return false;
-            int team = FleetShips.CrewSlot(actor);
+            int team = FleetShips.TeamOfActor(actor);
             int slot = FleetShips.Slot(ship);
-            return team >= 0 && slot >= 0 && team != slot;
+            return team >= 0 && slot >= 0 && team != FleetShips.TeamOfSlot(slot);
         }
 
         /// <summary>The ship a thing on board belongs to; a carried or loose item goes by the socket or ship holding it.</summary>
@@ -407,7 +407,7 @@ namespace VoidCrewFleet
                 PlayerControlledShip ship = FleetShips.OwnerOf(__instance);
                 if (!IsEnemyOf(info.Sender.ActorNumber, ship)) return true;
                 AbstractDoor door = ____shipDoors != null && index >= 0 && index < ____shipDoors.Count ? ____shipDoors[index] : null;
-                if (door != null && !PvpHack.IsCockpitDoor(door) && PvpHack.HasAccess(FleetShips.CrewSlot(info.Sender.ActorNumber), ship)) return true;
+                if (door != null && !PvpHack.IsCockpitDoor(door) && PvpHack.HasAccess(FleetShips.TeamOfActor(info.Sender.ActorNumber), ship)) return true;
                 // Tell the requester the door's real state, which undoes its own early open.
                 if (____shipDoors != null && index >= 0 && index < ____shipDoors.Count)
                     __instance.GetComponent<PhotonView>().RPC("NotifyClientOfOutcome", info.Sender, ____shipDoors[index].IsOpen, index);
@@ -443,7 +443,7 @@ namespace VoidCrewFleet
             {
                 PlayerControlledShip ship = FleetShips.OwnerOf(__instance);
                 if (!IsEnemyOf(info.Sender.ActorNumber, ship)) return true;
-                if (accessAllows && PvpHack.HasAccess(FleetShips.CrewSlot(info.Sender.ActorNumber), ship)) return true;
+                if (accessAllows && PvpHack.HasAccess(FleetShips.TeamOfActor(info.Sender.ActorNumber), ship)) return true;
                 Log.Info("PvP: refused an airlock control of " + FleetShips.Describe(FleetShips.OwnerOf(__instance)) + " to enemy player " + info.Sender.ActorNumber + ".");
                 return false;
             }

@@ -16,9 +16,9 @@ namespace VoidCrewFleet
     /// The player ships of the session and who crews which. The game has one "player ship" (ClientGame.PlayerShip); this
     /// keeps the real list:
     /// - every PlayerControlledShip that exists, registered as it wakes;
-    /// - each ship's slot (0 = ship 1, 1 = ship 2), published by the host when it spawns them (room property), with the
-    ///   spawn order (root view ID, allocated in sequence by Photon) as the fallback;
-    /// - which slot each player belongs to (room property written by the host).
+    /// - each ship's slot (0 = ship 1 ... 5 = ship 6), published by the host when it spawns them (room property), with the
+    ///   spawn order (root view ID, allocated in sequence by Photon) as the fallback until then;
+    /// - each player's team, slot and state (room property written by the host).
     /// With fewer than two ships every answer is the game's own, so one-ship sessions behave exactly as without the mod.
     /// </summary>
     internal static class FleetShips
@@ -31,6 +31,9 @@ namespace VoidCrewFleet
         private static readonly List<PlayerControlledShip> Registered = new List<PlayerControlledShip>();
         private static readonly Dictionary<int, PlayerControlledShip> OwnerCache = new Dictionary<int, PlayerControlledShip>();
         private static readonly Dictionary<int, float> NotOnShip = new Dictionary<int, float>();
+
+        /// <summary>Each ship's slot once known (so a ship lost from the middle of the list doesn't shift the others).</summary>
+        private static readonly Dictionary<int, int> KnownSlots = new Dictionary<int, int>();
 
         /// <summary>True when more than one player ship exists: only then does anything here differ from the game.</summary>
         public static bool Active
@@ -71,10 +74,13 @@ namespace VoidCrewFleet
         public static void Unregister(PlayerControlledShip ship)
         {
             bool hadTwo = Registered.Count > 1;
+            // Its slot stays known: the other ships keep theirs.
+            Slot(ship);
             Registered.Remove(ship);
             OwnerCache.Clear();
             NotOnShip.Clear();
             Prune();
+            if (Registered.Count == 0) KnownSlots.Clear();
             // One ship left: the game's own "player ship" becomes that ship (it may still point at the lost one).
             if (!hadTwo || Registered.Count != 1) return;
             try
@@ -102,29 +108,61 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- slots
 
+        /// <summary>The host's own latest ship list: the room property only updates here after a round trip to the server.</summary>
+        private static int[] _hostShips;
+        private static string _hostShipsRoom;
+
         private static int[] PublishedShips()
         {
+            if (_hostShips != null)
+            {
+                if (PhotonNetwork.IsMasterClient && PhotonNetwork.CurrentRoom != null && PhotonNetwork.CurrentRoom.Name == _hostShipsRoom) return _hostShips;
+                _hostShips = null;
+            }
             object value;
             if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null || !PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeyShips, out value)) return null;
             return value as int[];
         }
 
-        /// <summary>Host: the ships of this mission, ship 1 first.</summary>
-        public static void PublishShips(PlayerControlledShip shipA, PlayerControlledShip shipB)
+        /// <summary>
+        /// Host: the ships of this mission by slot (ship 1 first). It is written once, when they spawn: a lost ship keeps
+        /// its place, so the others keep their slots.
+        /// </summary>
+        public static void PublishShips(IList<PlayerControlledShip> bySlot)
         {
-            if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null) return;
-            PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyShips, new[] { ViewId(shipA), ViewId(shipB) } } });
+            if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null || bySlot == null) return;
+            var views = new int[bySlot.Count];
+            for (int i = 0; i < views.Length; i++) views[i] = ViewId(bySlot[i]);
+            KnownSlots.Clear();
+            _hostShips = views;
+            _hostShipsRoom = PhotonNetwork.CurrentRoom.Name;
+            PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyShips, views } });
+        }
+
+        /// <summary>How many ships this mission started with (lost ones included); 1 without published ships.</summary>
+        public static int PublishedCount
+        {
+            get
+            {
+                int[] published = PublishedShips();
+                return published != null && published.Length > 0 ? published.Length : 1;
+            }
         }
 
         /// <summary>Host: forget the ships and crews (back in the hub, or a one-ship mission).</summary>
         public static void ClearRoom()
         {
             _hostCrew = null;
+            _hostShips = null;
+            KnownSlots.Clear();
             if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null) return;
+            // Empty here at once (the room's copy changes after a round trip).
+            _hostCrew = new int[0];
+            _hostCrewRoom = PhotonNetwork.CurrentRoom.Name;
             PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyShips, null }, { KeyCrew, null }, { "VCF_ResStart", null } });
         }
 
-        /// <summary>0 for ship 1, 1 for ship 2, -1 when the ship is unknown.</summary>
+        /// <summary>A ship's slot: 0 for ship 1 up to 5 for ship 6; -1 when the ship is unknown.</summary>
         public static int Slot(PlayerControlledShip ship)
         {
             if (ship == null) return -1;
@@ -133,8 +171,14 @@ namespace VoidCrewFleet
             if (published != null)
             {
                 int index = Array.IndexOf(published, view);
-                if (index >= 0) return index;
+                if (index >= 0)
+                {
+                    KnownSlots[view] = index;
+                    return index;
+                }
             }
+            int known;
+            if (KnownSlots.TryGetValue(view, out known)) return known;
             // Not published yet (or a client ahead of the room property): spawn order.
             Prune();
             int lower = 0;
@@ -147,6 +191,7 @@ namespace VoidCrewFleet
 
         public static PlayerControlledShip BySlot(int slot)
         {
+            if (slot < 0) return null;
             Prune();
             foreach (PlayerControlledShip ship in Registered)
             {
@@ -155,12 +200,66 @@ namespace VoidCrewFleet
             return null;
         }
 
+        /// <summary>Whether a slot's ship exists and isn't dying.</summary>
+        public static bool IsAlive(int slot)
+        {
+            PlayerControlledShip ship = BySlot(slot);
+            try
+            {
+                return ship != null && !ship.StartedDeath;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>The slots whose ships exist and aren't dying, lowest first.</summary>
+        public static List<int> AliveSlots()
+        {
+            var slots = new List<int>();
+            Prune();
+            foreach (PlayerControlledShip ship in Registered)
+            {
+                int slot = Slot(ship);
+                bool dying;
+                try
+                {
+                    dying = ship.StartedDeath;
+                }
+                catch
+                {
+                    dying = true;
+                }
+                if (slot >= 0 && !dying && !slots.Contains(slot)) slots.Add(slot);
+            }
+            slots.Sort();
+            return slots;
+        }
+
+        /// <summary>The team of a slot: 0 BLUE / 1 RED in a team match (a PvP mission, or the hub with FLEET BATTLE), 0 otherwise.</summary>
+        public static int TeamOfSlot(int slot)
+        {
+            return FleetSlots.TeamOf(slot, FleetApi.IsTeamMatch);
+        }
+
+        /// <summary>The living ships of a team (PvP), lowest slot first; every living ship outside PvP.</summary>
+        public static List<int> AliveSlotsOfTeam(int team)
+        {
+            List<int> slots = AliveSlots();
+            if (FleetSession.IsPvP) slots.RemoveAll(s => TeamOfSlot(s) != team);
+            return slots;
+        }
+
         // ---------------------------------------------------------------- crews
+
+        private const int EntrySize = 4;
 
         /// <summary>The host's own latest crew list: the room property only updates after a round trip to the server.</summary>
         private static int[] _hostCrew;
         private static string _hostCrewRoom;
 
+        /// <summary>The room's crew list, flat: actor, team, slot, state for each player the host has placed.</summary>
         private static int[] Crew()
         {
             if (_hostCrew != null)
@@ -175,56 +274,113 @@ namespace VoidCrewFleet
             return value as int[];
         }
 
-        /// <summary>The slot a player crews, or -1 when the host has not placed them yet.</summary>
-        public static int CrewSlot(int actor)
+        /// <summary>Every placed player's entry, by actor number.</summary>
+        public static Dictionary<int, CrewEntry> Crews()
         {
-            int[] crew = Crew();
-            if (crew == null) return -1;
-            for (int i = 0; i + 1 < crew.Length; i += 2)
-            {
-                if (crew[i] == actor) return crew[i + 1];
-            }
-            return -1;
-        }
-
-        public static Dictionary<int, int> CrewMap()
-        {
-            var map = new Dictionary<int, int>();
+            var map = new Dictionary<int, CrewEntry>();
             int[] crew = Crew();
             if (crew == null) return map;
-            for (int i = 0; i + 1 < crew.Length; i += 2) map[crew[i]] = crew[i + 1];
+            for (int i = 0; i + EntrySize - 1 < crew.Length; i += EntrySize)
+            {
+                map[crew[i]] = new CrewEntry { Actor = crew[i], Team = crew[i + 1], Slot = crew[i + 2], State = (CrewState)crew[i + 3] };
+            }
             return map;
         }
 
-        /// <summary>Host: who crews which ship.</summary>
-        public static void PublishCrew(Dictionary<int, int> map)
+        /// <summary>A player's entry; false when the host hasn't placed them.</summary>
+        public static bool TryGetEntry(int actor, out CrewEntry entry)
+        {
+            int[] crew = Crew();
+            if (crew != null)
+            {
+                for (int i = 0; i + EntrySize - 1 < crew.Length; i += EntrySize)
+                {
+                    if (crew[i] != actor) continue;
+                    entry = new CrewEntry { Actor = actor, Team = crew[i + 1], Slot = crew[i + 2], State = (CrewState)crew[i + 3] };
+                    return true;
+                }
+            }
+            entry = new CrewEntry { Actor = actor, Team = -1, Slot = -1, State = CrewState.Playing };
+            return false;
+        }
+
+        /// <summary>The slot a player crews; -1 when the host has not placed them yet, or they are a spectator.</summary>
+        public static int CrewSlot(int actor)
+        {
+            CrewEntry entry;
+            return TryGetEntry(actor, out entry) && entry.State == CrewState.Playing ? entry.Slot : -1;
+        }
+
+        /// <summary>A player's team (0 in co-op), spectators included; -1 when they have none.</summary>
+        public static int TeamOfActor(int actor)
+        {
+            CrewEntry entry;
+            return TryGetEntry(actor, out entry) ? entry.Team : -1;
+        }
+
+        /// <summary>Whether a player is a spectator (PvP: waiting for a seat, or their ship was destroyed).</summary>
+        public static bool IsSpectator(int actor)
+        {
+            CrewEntry entry;
+            return TryGetEntry(actor, out entry) && entry.IsSpectator;
+        }
+
+        /// <summary>The playing players' ships: actor number to slot (spectators left out).</summary>
+        public static Dictionary<int, int> CrewMap()
+        {
+            var map = new Dictionary<int, int>();
+            foreach (CrewEntry entry in Crews().Values)
+            {
+                if (entry.State == CrewState.Playing && entry.Slot >= 0) map[entry.Actor] = entry.Slot;
+            }
+            return map;
+        }
+
+        /// <summary>Host: everyone's team, ship and state.</summary>
+        public static void PublishCrew(Dictionary<int, CrewEntry> crews)
         {
             if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null) return;
-            var flat = new int[map.Count * 2];
+            var flat = new int[crews.Count * EntrySize];
             int i = 0;
-            foreach (KeyValuePair<int, int> pair in map)
+            foreach (CrewEntry entry in crews.Values)
             {
-                flat[i++] = pair.Key;
-                flat[i++] = pair.Value;
+                flat[i++] = entry.Actor;
+                flat[i++] = entry.Team;
+                flat[i++] = entry.Slot;
+                flat[i++] = (int)entry.State;
             }
             _hostCrew = flat;
             _hostCrewRoom = PhotonNetwork.CurrentRoom.Name;
             PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyCrew, flat } });
         }
 
+        /// <summary>Host: nobody has a ship or a team (the hub's picks start over).</summary>
+        public static void ClearCrews()
+        {
+            if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null) return;
+            PublishCrew(new Dictionary<int, CrewEntry>());
+        }
+
+        /// <summary>A playing entry on a ship (its team from the slot).</summary>
+        public static CrewEntry Playing(int actor, int slot)
+        {
+            return new CrewEntry { Actor = actor, Team = TeamOfSlot(slot), Slot = slot, State = CrewState.Playing };
+        }
+
+        /// <summary>How many players crew a ship (spectators not counted).</summary>
         public static int CrewCount(int slot)
         {
             int count = 0;
-            foreach (KeyValuePair<int, int> pair in CrewMap())
+            foreach (CrewEntry entry in Crews().Values)
             {
-                if (pair.Value == slot) count++;
+                if (entry.State == CrewState.Playing && entry.Slot == slot) count++;
             }
             return count;
         }
 
         // ---------------------------------------------------------------- whose ship
 
-        /// <summary>The ship a player crews (their team's ship); null before they are placed.</summary>
+        /// <summary>The ship a player crews; null before they are placed, or for a spectator.</summary>
         public static PlayerControlledShip ShipOfActor(int actor)
         {
             int slot = CrewSlot(actor);
@@ -257,15 +413,22 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>The ship a spectator is watching (set by the spectator view), or null.</summary>
+        public static PlayerControlledShip Watched;
+
         /// <summary>
-        /// The ship the local player's screen is about (HUD, helm warnings, markers, ship status). In co-op it is the ship
-        /// they are aboard (or flying), else their own crew's ship; in PvP always their own team's ship, so a boarder doesn't
-        /// see the enemy ship's state. Then ship 1, then whichever ship is left.
+        /// The ship the local player's screen is about (HUD, helm warnings, markers, ship status):
+        /// - a spectator's: the ship they are watching;
+        /// - in co-op: the ship they are aboard (or flying), else their own crew's ship;
+        /// - in PvP: always their own ship, so a boarder doesn't see an enemy ship's state; without one, their team's first
+        ///   living ship;
+        /// - then the lowest living slot, then whichever ship is left.
         /// </summary>
         public static PlayerControlledShip ViewShip
         {
             get
             {
+                if (Watched != null && Registered.Contains(Watched)) return Watched;
                 PlayerControlledShip aboard;
                 try
                 {
@@ -278,10 +441,24 @@ namespace VoidCrewFleet
                 if (aboard != null && !FleetSession.IsPvP) return aboard;
                 PlayerControlledShip ship = LocalShip;
                 if (ship != null) return ship;
-                ship = aboard;
-                if (ship != null) return ship;
-                ship = BySlot(0);
-                if (ship != null) return ship;
+                if (FleetSession.IsPvP)
+                {
+                    int team = TeamOfActor(LocalActor);
+                    if (team >= 0)
+                    {
+                        foreach (int slot in AliveSlotsOfTeam(team))
+                        {
+                            ship = BySlot(slot);
+                            if (ship != null) return ship;
+                        }
+                    }
+                }
+                if (aboard != null) return aboard;
+                foreach (int slot in AliveSlots())
+                {
+                    ship = BySlot(slot);
+                    if (ship != null) return ship;
+                }
                 Prune();
                 return Registered.Count > 0 ? Registered[0] : null;
             }
@@ -387,10 +564,12 @@ namespace VoidCrewFleet
             return null;
         }
 
+        /// <summary>"ship 3" outside PvP, "RED 2" in it; "a ship" when unknown. For logs and notices.</summary>
         public static string Describe(PlayerControlledShip ship)
         {
             int slot = Slot(ship);
-            return slot == 0 ? "ship 1" : (slot == 1 ? "ship 2" : "a ship");
+            if (slot < 0) return "a ship";
+            return FleetSession.IsPvP ? FleetSlots.Name(slot, true) : "ship " + (slot + 1);
         }
 
         /// <summary>

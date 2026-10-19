@@ -17,7 +17,7 @@ using UnityEngine.UIElements;
 namespace VoidCrewFleet
 {
     /// <summary>
-    /// Rooms of up to 16 players (8 per ship). The game caps rooms at 6 in four places and breaks above that in two:
+    /// Rooms of up to 24 players (8 per ship). The game caps rooms at 6 in four places and breaks above that in two:
     /// - the Photon room (6 at creation) and the three player-limit sliders (main menu host panel, ESC-menu lobby
     ///   panel, hub matchmaking terminal), one of which writes its clamped value back to the room whenever it opens;
     /// - the Steam lobby used for invites and join-by-friend (6 members);
@@ -26,7 +26,10 @@ namespace VoidCrewFleet
     /// </summary>
     internal static class PlayerCap
     {
-        public const string Feature = "16-player rooms";
+        public const string Feature = "24-player rooms";
+
+        /// <summary>The largest room the plugin allows (three ships of eight).</summary>
+        public const int MaxRoom = 24;
 
         private static readonly FieldInfo ClampedMax = GameMember.Field(typeof(ClampedSetting<int>), "max");
         private static readonly PropertyInfo SliderHighValue = GameMember.Property(typeof(SliderIntSettingEntryVE), "HighValue");
@@ -37,12 +40,12 @@ namespace VoidCrewFleet
         /// <summary>The largest room this player hosts.</summary>
         public static int Limit
         {
-            get { return Mathf.Clamp(Settings.MaxPlayers.Value, 4, 16); }
+            get { return Mathf.Clamp(Settings.MaxPlayers.Value, 4, MaxRoom); }
         }
 
         // ---------------------------------------------------------------- the room
 
-        /// <summary>A new room starts at the full size; the host can lower it with the sliders, which now go to 16.</summary>
+        /// <summary>A new room starts at the full size; the host can lower it with the sliders, which now go to 24.</summary>
         [GamePatch(Feature, "PhotonService", "OnCreatedRoom", PatchKind.Postfix)]
         private static void OnCreatedRoomPostfix()
         {
@@ -58,7 +61,7 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>Every slider and menu sets the room size through this; keep it within 1..16.</summary>
+        /// <summary>Every slider and menu sets the room size through this; keep it within 1..24.</summary>
         [GamePatch(Feature, "PhotonService", "SetCurrentRoomPlayerLimit", PatchKind.Prefix)]
         private static void SetLimitPrefix(ref int limit)
         {
@@ -91,7 +94,7 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// Lets a 1..6 player-limit setting and its slider go to 16, and shows <paramref name="value"/> without telling the
+        /// Lets a 1..6 player-limit setting and its slider go to 24, and shows <paramref name="value"/> without telling the
         /// room (the game's terminal would otherwise write the old clamp, 6, back to the room when it opens).
         /// </summary>
         private static void RaiseSlider(IntSetting setting, SliderIntSettingEntryVE slider, int value, string where)

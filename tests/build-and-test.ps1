@@ -30,6 +30,17 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+Write-Output "== Building the crew rules tests"
+& $csc -nologo -target:exe -platform:x64 "-out:$(Join-Path $out 'CrewRulesTest.exe')" (Join-Path $PSScriptRoot "OfflineChecks\CrewRulesTest.cs") (Join-Path $root "VoidCrewFleet\CrewRules.cs") (Join-Path $root "VoidCrewFleet\RosterRules.cs")
+if ($LASTEXITCODE -ne 0) {
+    Write-Output "CREW RULES TESTS BUILD FAILED"
+    exit 1
+}
+& (Join-Path $out "CrewRulesTest.exe")
+if ($LASTEXITCODE -ne 0) {
+    exit 1
+}
+
 Write-Output "== Running the offline checks"
 & (Join-Path $out "FleetCheck.exe") (Join-Path $root "VoidCrewFleet\bin\Release\VoidCrewFleet.dll") (Join-Path $VoidCrewDir "Void Crew_Data\Managed")
 exit $LASTEXITCODE

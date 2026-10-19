@@ -26,6 +26,9 @@ namespace VoidCrewFleet
         /// <summary>Slow work registered by features, a few times a second.</summary>
         public static event Action Slow;
 
+        /// <summary>Per-frame work after the game's animation (poses on the character models).</summary>
+        public static event Action Late;
+
         private void Awake()
         {
             Instance = this;
@@ -44,6 +47,11 @@ namespace VoidCrewFleet
             if (Time.unscaledTime < _nextPoll) return;
             _nextPoll = Time.unscaledTime + PollSeconds;
             Run(Slow, "periodic");
+        }
+
+        private void LateUpdate()
+        {
+            if (GameReady) Run(Late, "late");
         }
 
         private static bool CheckReady()

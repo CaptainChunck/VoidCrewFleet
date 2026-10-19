@@ -27,6 +27,8 @@ namespace VoidCrewFleet
             PvpMarkers.Feature,
             PvpVoice.Feature,
             PvpTurrets.Feature,
+            Spectator.Feature,
+            FleetReturn.Feature,
             HackTerminal.Feature,
             PvpArena.Feature
         };
@@ -46,11 +48,17 @@ namespace VoidCrewFleet
             FleetRuntime.Frame += PvpHack.Frame;
             FleetRuntime.Frame += PvpVoice.Frame;
             FleetRuntime.Frame += ShipResources.Frame;
+            FleetRuntime.Frame += Spectator.Frame;
+            FleetRuntime.Late += FistPose.Late;
             ShipDeath.ShipLost += ShipResources.OnShipLost;
+            ShipDeath.ShipLost += Spectator.OnShipLost;
+            ShipDeath.ShipLost += FleetReturn.OnShipLost;
             CloneTubes.HoldSpawns = () => PvpTeams.Choosing;
             FleetRuntime.Slow += HackTerminal.EnsureRegistered;
             FleetRuntime.Slow += HubFleet.Poll;
-            FleetRuntime.Slow += ShipSpawn.KeepCrewsUpToDate;
+            FleetRuntime.Slow += PvpRoster.PublishLocalId;
+            FleetRuntime.Slow += PvpRoster.Tick;
+            FleetRuntime.Slow += CloneTubes.Recode;
             FleetRuntime.Slow += PvpTeams.KeepHubTeamsComplete;
             FleetRuntime.Slow += PvpTeamScreen.Tick;
             FleetRuntime.Slow += PvpCombat.KeepFactions;

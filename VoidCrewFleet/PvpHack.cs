@@ -462,7 +462,7 @@ namespace VoidCrewFleet
         public static bool LocalHasAccess(PlayerControlledShip ship)
         {
             ReadRoom();
-            return HasAccess(FleetShips.CrewSlot(FleetShips.LocalActor), ship);
+            return HasAccess(FleetShips.TeamOfActor(FleetShips.LocalActor), ship);
         }
 
         // ---------------------------------------------------------------- the room property
@@ -594,6 +594,7 @@ namespace VoidCrewFleet
                     shown.Materials = materials.ToArray();
                     Models[entry.Key] = shown;
                     if (FleetShips.Slot(ship) == FleetShips.CrewSlot(FleetShips.LocalActor)) BigWarning("THE ENEMY IS HACKING OUR AIRLOCK! PULL THEIR TERMINAL OUT OF THE OUTSIDE PANEL");
+                    else if (!PvpBoarding.IsEnemyShip(ship)) BigWarning("THE ENEMY IS HACKING " + FleetShips.Describe(ship) + "'S AIRLOCK!");
                 }
                 // A working pulse while it hacks.
                 SetGlow(shown, Mathf.Repeat(Time.time, 1f) < 0.5f);
@@ -660,7 +661,7 @@ namespace VoidCrewFleet
         /// <summary>The local team's hacks and door access, and the enemy's on our ship.</summary>
         private static string TimerText()
         {
-            int mine = FleetShips.CrewSlot(FleetShips.LocalActor);
+            int mine = FleetShips.TeamOfActor(FleetShips.LocalActor);
             if (mine < 0 || Entries.Count == 0) return null;
             double now = PhotonNetwork.Time;
             var lines = new List<string>();
@@ -670,17 +671,19 @@ namespace VoidCrewFleet
                 if (left <= 0) continue;
                 PlayerControlledShip ship = ShipOfView(entry.Ship);
                 int shipSlot = FleetShips.Slot(ship);
-                string shipName = PvpTeams.TeamName(shipSlot) + " SHIP";
+                if (shipSlot < 0) continue;
+                string shipName = FleetSlots.Name(shipSlot, true);
+                bool ours = FleetShips.TeamOfSlot(shipSlot) == mine;
                 // The game's colours: light blue for our own progress, light green for what we won, orange and red for threats.
                 if (entry.State == State.Hacking)
                 {
-                    if (entry.Team == mine) lines.Add("<color=#BDE7FB>HACKING THE " + shipName + "'S AIRLOCK  " + Clock(left) + "</color>");
-                    else if (shipSlot == mine) lines.Add("<color=#F6AE3C>ENEMY HACKING OUR AIRLOCK  " + Clock(left) + "</color>");
+                    if (entry.Team == mine) lines.Add("<color=#BDE7FB>HACKING " + shipName + "'S AIRLOCK  " + Clock(left) + "</color>");
+                    else if (ours) lines.Add("<color=#F6AE3C>ENEMY HACKING " + shipName + "'S AIRLOCK  " + Clock(left) + "</color>");
                 }
                 else
                 {
-                    if (entry.Team == mine) lines.Add("<color=#83C886>DOOR ACCESS TO THE " + shipName + "  " + Clock(left) + "</color>");
-                    else if (shipSlot == mine) lines.Add("<color=#EC1E24>THE ENEMY CAN OPEN OUR DOORS  " + Clock(left) + "</color>");
+                    if (entry.Team == mine) lines.Add("<color=#83C886>DOOR ACCESS TO " + shipName + "  " + Clock(left) + "</color>");
+                    else if (ours) lines.Add("<color=#EC1E24>THE ENEMY CAN OPEN " + shipName + "'S DOORS  " + Clock(left) + "</color>");
                 }
             }
             return lines.Count > 0 ? string.Join("\n", lines.ToArray()) : null;
@@ -720,7 +723,8 @@ namespace VoidCrewFleet
             string taken = null;
             Step step = PvpPunch.CanPunch() ? FindStep(out target, out taken) : Step.None;
             Busy = step != Step.None;
-            bool pressed = fire != null && fire.IsPressed();
+            // With the fists up, Fire punches.
+            bool pressed = fire != null && fire.IsPressed() && !PvpPunch.LocalStanceUp;
             if (!pressed) _needRelease = false;
             if (step == Step.None)
             {
@@ -766,8 +770,8 @@ namespace VoidCrewFleet
             Vector3 eye;
             Vector3 aim;
             if (me == null || !Aim.Get(out eye, out aim)) return Step.None;
-            int myTeam = FleetShips.CrewSlot(FleetShips.LocalActor);
-            if (myTeam < 0) return Step.None;
+            int myTeam = FleetShips.TeamOfActor(FleetShips.LocalActor);
+            if (myTeam < 0 || Spectator.WatchState(FleetShips.LocalActor) != CrewState.Playing) return Step.None;
             CarryableObject held = me.Payload;
 
             // An enemy terminal on our own airlock: pull it out (not with a usable item in hand, which Fire would use too).
@@ -777,7 +781,9 @@ namespace VoidCrewFleet
                 {
                     Entry entry;
                     if (shown.Value.Model == null || !Entries.TryGetValue(shown.Key, out entry)) continue;
-                    if (FleetShips.Slot(ShipOfView(entry.Ship)) != myTeam) continue;
+                    // Any ship of our own team: a teammate may pull an enemy terminal out of it.
+                    int slot = FleetShips.Slot(ShipOfView(entry.Ship));
+                    if (slot < 0 || FleetShips.TeamOfSlot(slot) != myTeam) continue;
                     if (!InSight(eye, aim, shown.Value.Model.transform.position)) continue;
                     target = shown.Key;
                     return Step.Pull;
@@ -786,15 +792,27 @@ namespace VoidCrewFleet
 
             // Holding a terminal, looking at the outside panel of an enemy airlock (from close by: nothing to do further off).
             if (!HackTerminal.Is(held)) return Step.None;
-            PlayerControlledShip enemy = null;
-            foreach (PlayerControlledShip ship in FleetShips.All)
-            {
-                if (PvpBoarding.IsEnemyShip(ship)) enemy = ship;
-            }
-            if (enemy == null || FarFrom(enemy, eye)) return Step.None;
-            Airlock[] airlocks = AirlocksOf(enemy);
-            int view = FleetShips.ViewId(enemy);
             float bestAngle = AimAngle;
+            foreach (PlayerControlledShip enemy in FleetShips.All)
+            {
+                // Every enemy ship close enough: the airlock panel aimed at most directly wins.
+                if (!PvpBoarding.IsEnemyShip(enemy) || FarFrom(enemy, eye)) continue;
+                Airlock[] airlocks = AirlocksOf(enemy);
+                int view = FleetShips.ViewId(enemy);
+                FindPanel(airlocks, view, eye, aim, ref bestAngle, ref target);
+            }
+            if (target == 0) return Step.None;
+            Entry hack;
+            if (!Entries.TryGetValue(target, out hack)) return Step.Plug;
+            // Being hacked, or hacked already: nothing to plug in there.
+            taken = TakenText(hack);
+            target = 0;
+            return Step.None;
+        }
+
+        /// <summary>The outside panel of one ship's airlocks most directly aimed at, in reach and in sight; better than bestAngle.</summary>
+        private static void FindPanel(Airlock[] airlocks, int view, Vector3 eye, Vector3 aim, ref float bestAngle, ref long target)
+        {
             for (int i = 0; i < airlocks.Length; i++)
             {
                 Outside outside = OutsideOf(airlocks[i]);
@@ -809,13 +827,6 @@ namespace VoidCrewFleet
                 bestAngle = angle;
                 target = KeyOf(view, i);
             }
-            if (target == 0) return Step.None;
-            Entry hack;
-            if (!Entries.TryGetValue(target, out hack)) return Step.Plug;
-            // Being hacked, or hacked already: nothing to plug in there.
-            taken = TakenText(hack);
-            target = 0;
-            return Step.None;
         }
 
         /// <summary>True when a point is further than NearShip from a ship's rooms, so none of its airlock panels is in reach.</summary>
@@ -1041,15 +1052,15 @@ namespace VoidCrewFleet
                     State = State.Hacking,
                     Until = PhotonNetwork.Time + HackSeconds,
                     Actor = sender,
-                    Team = FleetShips.CrewSlot(sender),
+                    Team = FleetShips.TeamOfActor(sender),
                     Position = ship.transform.InverseTransformPoint(point),
                     Rotation = Quaternion.Inverse(ship.transform.rotation) * rotation
                 };
                 WriteRoom();
                 Net.ToActor(sender, Msg.HackTaken, itemView);
                 Log.Info("PvP: " + NameOf(sender) + " started hacking an airlock of " + FleetShips.Describe(ship) + ".");
-                Notice.ShowAll(NameOf(sender) + " (" + PvpTeams.TeamName(FleetShips.CrewSlot(sender)) + ") is hacking the " + PvpTeams.TeamName(FleetShips.Slot(ship)) +
-                               " ship's airlock: one minute to pull the terminal out!");
+                Notice.ShowAll(NameOf(sender) + " (" + PvpTeams.TeamName(FleetShips.TeamOfActor(sender)) + ") is hacking " + FleetShips.Describe(ship) +
+                               "'s airlock: one minute to pull the terminal out!");
             });
 
             Net.On(Msg.HackTaken, (sender, data) =>
@@ -1071,11 +1082,12 @@ namespace VoidCrewFleet
                 PlayerControlledShip ship = ShipOfView(entry.Ship);
                 Vector3 outward = Vector3.forward;
                 AirlockButtonPanel panel = airlock != null ? OutsidePanel(airlock, out outward) : null;
-                if (ship == null || FleetShips.CrewSlot(sender) != FleetShips.Slot(ship) || !Near(sender, panel, HostReach)) return;
+                if (ship == null || Spectator.WatchState(sender) != CrewState.Playing || FleetShips.TeamOfActor(sender) != FleetShips.TeamOfSlot(FleetShips.Slot(ship)) ||
+                    !Near(sender, panel, HostReach)) return;
                 Entries.Remove(key);
                 WriteRoom();
                 Log.Info("PvP: " + NameOf(sender) + " pulled a hacking terminal out of " + FleetShips.Describe(ship) + "'s airlock.");
-                Notice.ShowAll(NameOf(sender) + " pulled the hacking terminal out of the " + PvpTeams.TeamName(FleetShips.Slot(ship)) + " ship's airlock.");
+                Notice.ShowAll(NameOf(sender) + " pulled the hacking terminal out of " + FleetShips.Describe(ship) + "'s airlock.");
             });
         }
 
@@ -1117,13 +1129,13 @@ namespace VoidCrewFleet
                         entry.State = State.Access;
                         entry.Until = now + AccessSeconds;
                         Log.Info("PvP: " + PvpTeams.TeamName(entry.Team) + " hacked an airlock of " + FleetShips.Describe(ship) + ".");
-                        Notice.ShowAll(PvpTeams.TeamName(entry.Team) + " hacked the " + PvpTeams.TeamName(FleetShips.Slot(ship)) + " ship's airlock: " +
+                        Notice.ShowAll(PvpTeams.TeamName(entry.Team) + " hacked " + FleetShips.Describe(ship) + "'s airlock: " +
                                        PvpTeams.TeamName(entry.Team) + " can open its doors for five minutes!");
                     }
                     else
                     {
                         Entries.Remove(entry.Key);
-                        Notice.ShowAll(PvpTeams.TeamName(entry.Team) + "'s door access to the " + PvpTeams.TeamName(FleetShips.Slot(ship)) + " ship is over.");
+                        Notice.ShowAll(PvpTeams.TeamName(entry.Team) + "'s door access to " + FleetShips.Describe(ship) + " is over.");
                     }
                     changed = true;
                 }

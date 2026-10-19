@@ -63,7 +63,7 @@ namespace VoidCrewFleet
 
         private static int _dispensingSlot = -1;
 
-        /// <summary>A ship's homunculus dispenser spawns that ship's homunculus (the game takes ship 1's loadout's).</summary>
+        /// <summary>A ship's homunculus dispenser spawns that ship's homunculus (the game takes ship 1's loadout's for every ship).</summary>
         [GamePatch(Feature, "CG.Ship.Hull.HomunculusAndBiomassSocket", "DispenseHomunculusNow", PatchKind.Prefix)]
         private static void DispensePrefix(UnityEngine.Component __instance)
         {
@@ -79,12 +79,14 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "GameSession", "get_Homunculus", PatchKind.Postfix)]
         private static void HomunculusPostfix(GameSession __instance, ref ResourceAssets.CarryableRef __result)
         {
-            if (_dispensingSlot != 1) return;
+            if (_dispensingSlot < 1) return;
             FleetPlan plan = FleetSession.Current;
-            if (plan == null) return;
-            // Ship 2: its own loadout's homunculus, else the mission's own override, else the default one. The session copies
-            // ship 1's loadout homunculus into its override, which isn't the mission's: ship 2 doesn't take that one.
-            if (!plan.ShipBHomunculus.IsNull) __result = new ResourceAssets.CarryableRef(plan.ShipBHomunculus);
+            ShipPlan ship = plan != null ? plan.Ship(_dispensingSlot) : null;
+            if (ship == null) return;
+            // Ships 2-6: their own loadout's homunculus (a copy of ship 1 has ship 1's), else the mission's own override, else
+            // the default one. The session copies ship 1's loadout homunculus into its override, which isn't the mission's:
+            // another ship doesn't take that one.
+            if (!ship.Homunculus.IsNull) __result = new ResourceAssets.CarryableRef(ship.Homunculus);
             else if (!__instance.HomunculusOverride.IsNull && !IsShipAHomunculus(__instance)) __result = new ResourceAssets.CarryableRef(__instance.HomunculusOverride);
             else __result = DataTable<DefaultAssetTable>.Instance.DefaultHomunculus;
         }

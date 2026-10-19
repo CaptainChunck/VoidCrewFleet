@@ -183,9 +183,9 @@ namespace VoidCrewFleet
                 entries.Add(drain != null && drain.IsOn.Value ? 1 : 0);
                 WriteRoom(entries);
 
-                int team = FleetShips.CrewSlot(sender);
-                Notice.ShowAll("SABOTAGE! The " + PvpTeams.TeamName(team) + " team switched off the " + PvpTeams.TeamName(FleetShips.Slot(ship)) +
-                               " ship's " + Describe(panel) + " for " + DisableSeconds + " seconds.");
+                int team = FleetShips.TeamOfActor(sender);
+                Notice.ShowAll("SABOTAGE! The " + PvpTeams.TeamName(team) + " team switched off " + FleetShips.Describe(ship) + "'s " + Describe(panel) + " for " +
+                               DisableSeconds + " seconds.");
                 Apply();
             });
         }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using CG;
 using CG.Game;
@@ -14,6 +15,7 @@ using CG.Space.Projectiles;
 using CG.Utils;
 using Gameplay.CompositeWeapons;
 using Gameplay.Damage;
+using Gameplay.Utilities;
 using Photon.Pun;
 using UnityEngine;
 
@@ -21,25 +23,27 @@ namespace VoidCrewFleet
 {
     /// <summary>
     /// Ship against ship. The game tells friend from foe by one number per object, its faction: the same faction never
-    /// hurts itself, and every player-side object is faction 1. In PvP the BLUE team (ship 1, its parts and its crew)
+    /// hurts itself, and every player-side object is faction 1. In PvP the BLUE team (its ships, their parts and its crew)
     /// keeps faction 1 and the RED team gets faction 5, a faction of its own, on every client. With that:
-    /// - the ships' guns, missiles and point defence treat the other ship as an enemy, and NPCs attack both;
+    /// - the ships' guns, missiles and point defence treat the other team's ships as enemies, and NPCs attack both teams; a
+    ///   team's own ships can't hurt each other, as in co-op;
     /// - an enemy ship's shields stop shots (the game lets player shots through every player shield), and a shot on an
     ///   enemy turret or module hits that ship's hull, the way NPC shots on a player ship do; a piercing round stops there;
     /// - a shot on an enemy shield does the same whoever fires it (the host or another gunner), with the helm's
     ///   target-lock bonus when that ship is locked;
     /// - gunners who are not the host damage the enemy hull with module defects, as the host's own shots do;
     /// - a missile belongs to the ship whose launcher fired it (the game gives it "the player ship"), also in co-op;
-    /// - the host marks the ships hostile to each other, so auto turrets engage and the enemy ship is scanned.
+    /// - the host marks every BLUE ship and every RED ship hostile to each other, so auto turrets engage and enemy ships
+    ///   are scanned.
     /// </summary>
     internal static class PvpCombat
     {
         public const string Feature = "PvP ship combat";
 
-        /// <summary>The game's own player faction: the BLUE team (ship 1).</summary>
+        /// <summary>The game's own player faction: the BLUE team (ships 1, 3 and 5).</summary>
         public const int BlueFaction = 1;
 
-        /// <summary>The RED team (ship 2): hostile to BLUE, to every NPC faction, and every NPC to it.</summary>
+        /// <summary>The RED team (ships 2, 4 and 6): hostile to BLUE, to every NPC faction, and every NPC to it.</summary>
         public const int RedFaction = 5;
 
         private static readonly MethodInfo ImpactDamageReceiverMethod = GameMember.Method(typeof(WeaponProjectile), "ImpactDamageReceiver");
@@ -58,26 +62,71 @@ namespace VoidCrewFleet
         private static readonly HashSet<int> HostilityToldTo = new HashSet<int>();
         private static int _hostilityShips;
 
-        /// <summary>A PvP match with both ships in the world.</summary>
+        /// <summary>A PvP match with its ships in the world.</summary>
         public static bool Active
         {
             get { return FleetSession.IsPvP && FleetShips.Active; }
         }
 
+        public static int FactionOfTeam(int team)
+        {
+            return team == 1 ? RedFaction : BlueFaction;
+        }
+
         public static int FactionOfSlot(int slot)
         {
-            return slot == 1 ? RedFaction : BlueFaction;
+            return FactionOfTeam(FleetShips.TeamOfSlot(slot));
         }
 
         /// <summary>The faction of the team a player is on (BLUE until they are on a team).</summary>
         public static int FactionOfActor(int actor)
         {
-            return FactionOfSlot(FleetShips.CrewSlot(actor));
+            return FactionOfTeam(FleetShips.TeamOfActor(actor));
+        }
+
+        /// <summary>Whether two player ships are on different teams (PvP).</summary>
+        public static bool Enemies(PlayerControlledShip a, PlayerControlledShip b)
+        {
+            if (a == null || b == null || a == b) return false;
+            int slotA = FleetShips.Slot(a);
+            int slotB = FleetShips.Slot(b);
+            return slotA >= 0 && slotB >= 0 && FleetShips.TeamOfSlot(slotA) != FleetShips.TeamOfSlot(slotB);
         }
 
         private static DamageType DefaultDamageType
         {
             get { return DataTable<DamageTypesTable>.Instance.defaultDamageType; }
+        }
+
+        // ---------------------------------------------------------------- tougher hulls
+
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<OrbitObject, object> Toughened =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<OrbitObject, object>();
+
+        /// <summary>
+        /// PvP: every ship's hull has HullMultiplier times the game's hit points (4 by default), so a fight lasts. The game
+        /// sets a new object's hit points to its maximum right after this, on every client, so the bigger maximum is also
+        /// where every ship starts, and the HUD's hull bar reads the same on every screen.
+        /// </summary>
+        [GamePatch(Feature, "GameSession", "ApplyGlobalOrbitObjectSpawnProperties", PatchKind.Postfix)]
+        private static void SpawnPropertiesPostfix(OrbitObject target)
+        {
+            try
+            {
+                if (!(target is PlayerControlledShip) || !FleetSession.IsPvP) return;
+                FleetPlan plan = FleetSession.Current;
+                float times = plan != null ? plan.HullMultiplier : 1f;
+                object done;
+                if (times <= 1f || Toughened.TryGetValue(target, out done)) return;
+                Toughened.Add(target, true);
+                target.MaxHitPoints.AddModifier(FloatModifier.ScalarModifier(times));
+                Log.Info("PvP: " + FleetShips.Describe((PlayerControlledShip)target) + "'s hull has " + times + " times the hit points (" +
+                         target.MaxHitPointsValue.ToString("0") + ").");
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Making a PvP ship's hull tougher", e);
+            }
         }
 
         // ---------------------------------------------------------------- factions, on every client
@@ -170,7 +219,8 @@ namespace VoidCrewFleet
                 PlayerControlledShip target = FleetShips.OwnerOf(component);
                 if (target == null) return true;
                 PlayerControlledShip shooter = FleetShips.OwnerOf(__instance.SourceWeapon);
-                if (shooter == null || shooter == target) return true;
+                // A team's own ships: the game's own handling (same faction, so no damage).
+                if (!Enemies(shooter, target)) return true;
 
                 var shield = hitReceiver as ShieldDamagable;
                 if (shield != null)
@@ -306,13 +356,13 @@ namespace VoidCrewFleet
                     var shield = view.GetComponent<ShieldDamagable>();
                     if (shield != null)
                     {
-                        if (FleetShips.OwnerOf(shield) == attackerShip) continue;
+                        if (!Enemies(attackerShip, FleetShips.OwnerOf(shield))) continue;
                         shield.ApplyHitDamage(damage[i], attacker, ShotDamageType(attacker), shield.transform.position, Quaternion.identity);
                         damage[i] = 0f;
                         continue;
                     }
                     var ship = view.GetComponent<PlayerControlledShip>();
-                    if (ship == null || ship == attackerShip) continue;
+                    if (ship == null || !Enemies(attackerShip, ship)) continue;
                     if (__state == null) __state = new List<EnemyHit>();
                     __state.Add(new EnemyHit { Ship = ship, Damage = damage[i], Attacker = attacker });
                 }
@@ -413,37 +463,45 @@ namespace VoidCrewFleet
         // ---------------------------------------------------------------- the ships are enemies from the start
 
         /// <summary>
-        /// Host, a few times a second: once the teams are confirmed, each ship is hostile to the other, as an NPC ship is
-        /// once it has been shot. Auto turrets then engage the enemy ship and it counts as scanned (lockable). Players who
-        /// join later are told too (the game doesn't keep that message for them).
+        /// Host, a few times a second: once the teams are confirmed, every BLUE ship and every RED ship are hostile to each
+        /// other, as an NPC ship is once it has been shot. Auto turrets then engage enemy ships and they count as scanned
+        /// (lockable). Players who join later are told too (the game doesn't keep that message for them).
         /// </summary>
         public static void KeepHostility()
         {
             if (!Active || !PhotonNetwork.IsMasterClient || !PvpTeams.Locked) return;
-            PlayerControlledShip blue = FleetShips.BySlot(0);
-            PlayerControlledShip red = FleetShips.BySlot(1);
-            if (blue == null || red == null || blue.faction == red.faction) return;
             try
             {
-                int pair = FleetShips.ViewId(blue) * 31 + FleetShips.ViewId(red);
-                if (pair != _hostilityShips)
+                var ships = new List<PlayerControlledShip>(FleetShips.All);
+                int signature = 17;
+                foreach (PlayerControlledShip ship in ships.OrderBy(FleetShips.ViewId)) signature = signature * 31 + FleetShips.ViewId(ship);
+                if (signature != _hostilityShips)
                 {
-                    _hostilityShips = pair;
+                    // Players in the room now are told by SetAggressiveTowards itself; only later joiners need the message.
+                    _hostilityShips = signature;
                     HostilityToldTo.Clear();
                     foreach (Photon.Realtime.Player player in PhotonNetwork.PlayerList) HostilityToldTo.Add(player.ActorNumber);
                 }
-                if (!blue.IsHostile(red)) blue.SetAggressiveTowards(red);
-                if (!red.IsHostile(blue)) red.SetAggressiveTowards(blue);
+                var pairs = new List<KeyValuePair<PlayerControlledShip, PlayerControlledShip>>();
+                foreach (PlayerControlledShip a in ships)
+                {
+                    foreach (PlayerControlledShip b in ships)
+                    {
+                        if (!Enemies(a, b) || a.faction == b.faction || a.StartedDeath || b.StartedDeath) continue;
+                        pairs.Add(new KeyValuePair<PlayerControlledShip, PlayerControlledShip>(a, b));
+                        if (!a.IsHostile(b)) a.SetAggressiveTowards(b);
+                    }
+                }
                 foreach (Photon.Realtime.Player player in PhotonNetwork.PlayerList)
                 {
                     if (player.IsLocal || !HostilityToldTo.Add(player.ActorNumber)) continue;
-                    blue.photonView.RPC("NotifyAggressiveTowards", player, red.ViewID);
-                    red.photonView.RPC("NotifyAggressiveTowards", player, blue.ViewID);
+                    foreach (KeyValuePair<PlayerControlledShip, PlayerControlledShip> pair in pairs)
+                        pair.Key.photonView.RPC("NotifyAggressiveTowards", player, pair.Value.ViewID);
                 }
             }
             catch (Exception e)
             {
-                Log.Failure("Making the ships enemies", e);
+                Log.Failure("Making the teams' ships enemies", e);
             }
         }
     }

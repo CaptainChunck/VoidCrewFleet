@@ -36,7 +36,7 @@ namespace VoidCrewFleet
 
         private static int LocalTeam
         {
-            get { return FleetShips.CrewSlot(FleetShips.LocalActor); }
+            get { return FleetShips.TeamOfActor(FleetShips.LocalActor); }
         }
 
         private static bool Relative
@@ -47,7 +47,7 @@ namespace VoidCrewFleet
         private static bool IsEnemyActor(int actor)
         {
             int mine = LocalTeam;
-            int theirs = FleetShips.CrewSlot(actor);
+            int theirs = FleetShips.TeamOfActor(actor);
             return mine >= 0 && theirs >= 0 && mine != theirs;
         }
 
@@ -58,7 +58,7 @@ namespace VoidCrewFleet
         private static void AffiliationPostfix(OrbitObject obj, ref ObjectMarkerData.EAffiliation __result)
         {
             if (obj == null || !Relative) return;
-            int own = PvpCombat.FactionOfSlot(LocalTeam);
+            int own = PvpCombat.FactionOfTeam(LocalTeam);
             if (obj.faction == own) __result = ObjectMarkerData.EAffiliation.Ally;
             else if (obj.faction == 0) __result = ObjectMarkerData.EAffiliation.Neutral;
             else __result = ObjectMarkerData.EAffiliation.Enemy;
@@ -83,26 +83,29 @@ namespace VoidCrewFleet
             Providers.Add(new WeakReference(__instance));
         }
 
-        /// <summary>The game marks every sector object except player ships; the enemy ship is marked like an NPC ship.</summary>
+        /// <summary>
+        /// The game marks every sector object except player ships; every other ship is marked like an NPC ship: an enemy
+        /// team's as an enemy, the player's own team's other ships as allies (their own ship isn't marked).
+        /// </summary>
         [GamePatch(Feature, "UI.ObjectMarker.SectorMarkersProvider", "OnSectorObjectAdded", PatchKind.Postfix)]
         private static void ObjectAddedPostfix(SectorMarkersProvider __instance, CG.Utils.IBaseObject baseObject)
         {
             var ship = baseObject as PlayerControlledShip;
-            if (ship != null) MarkEnemyShip(__instance, ship);
+            if (ship != null) MarkShip(__instance, ship);
         }
 
-        private static void MarkEnemyShip(SectorMarkersProvider provider, PlayerControlledShip ship)
+        private static void MarkShip(SectorMarkersProvider provider, PlayerControlledShip ship)
         {
             try
             {
-                if (provider == null || ship == null || AddMarkerMethod == null || !Relative || !PvpBoarding.IsEnemyShip(ship)) return;
-                if (!provider.CanAddNewMarkers || provider.Markers.ContainsKey(ship)) return;
+                if (provider == null || ship == null || AddMarkerMethod == null || !Relative || ship == FleetShips.LocalShip) return;
+                if (!provider.CanAddNewMarkers || provider.Markers.ContainsKey(ship) || ship.StartedDeath) return;
                 AddMarkerMethod.Invoke(provider, new object[] { ship, new OrbitObjectMarker(ship) });
-                Log.Info("PvP: the enemy ship (" + FleetShips.Describe(ship) + ") is marked.");
+                Log.Info("PvP: " + FleetShips.Describe(ship) + " is marked (" + (PvpBoarding.IsEnemyShip(ship) ? "enemy" : "ally") + ").");
             }
             catch (Exception e)
             {
-                Log.Failure("Marking the enemy ship", e);
+                Log.Failure("Marking a ship", e);
             }
         }
 
@@ -135,7 +138,7 @@ namespace VoidCrewFleet
                 {
                     var provider = reference.Target as SectorMarkersProvider;
                     if (provider == null) continue;
-                    foreach (PlayerControlledShip ship in FleetShips.All) MarkEnemyShip(provider, ship);
+                    foreach (PlayerControlledShip ship in FleetShips.All) MarkShip(provider, ship);
                 }
             }
             UpdateNameTags();

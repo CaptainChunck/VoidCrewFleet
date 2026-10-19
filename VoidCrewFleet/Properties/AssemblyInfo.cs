@@ -2,7 +2,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 
 [assembly: AssemblyTitle("Void Crew Fleet")]
-[assembly: AssemblyDescription("BepInEx plugin for Void Crew: two player ships, up to 16 players, a two-ship mission and a PvP mode")]
+[assembly: AssemblyDescription("BepInEx plugin for Void Crew: up to six player ships, up to 24 players, a fleet mission and a PvP mode")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("CaptainChunck")]
 [assembly: AssemblyProduct("VoidCrewFleet")]

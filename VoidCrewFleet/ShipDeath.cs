@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using CG.Game;
 using CG.Game.Player;
 using CG.Space;
@@ -12,11 +13,13 @@ namespace VoidCrewFleet
     /// <summary>
     /// A ship's destruction. The game announces "the player ship is dying" with no ship attached, and everything listening
     /// reacts: every death sequence plays, everyone dies, every clone tube closes, the mission fails, and the host destroys
-    /// "the" player ship. With two ships only what concerns the dying ship reacts:
+    /// "the" player ship. With several ships only what concerns the dying ship reacts:
     /// - its own death sequence, clone tubes and destruction;
     /// - characters aboard it (or of its crew, floating outside) die with it, and only their screens show it;
     /// - the mission only counts the ships as lost when no ship is left (co-op), and PvP decides the winner itself;
-    /// - in co-op the dead ship's crew moves to the other ship and respawns there.
+    /// - everyone given that ship in the lobby (co-op and PvP) can't be re-cloned for the rest of the mission: they play on
+    ///   while their character lives (aboard another ship), then watch the remaining ships (Spectator);
+    /// - the host may carry on with the ships that are left, or take everyone back to the hub (FleetReturn).
     /// </summary>
     internal static class ShipDeath
     {
@@ -48,7 +51,15 @@ namespace VoidCrewFleet
             {
                 Log.Failure("Reacting to a destroyed ship", e);
             }
-            if (PhotonNetwork.IsMasterClient && FleetSession.Mode == FleetMode.TwoShips) MoveCrewOff(__instance);
+            if (!PhotonNetwork.IsMasterClient) return;
+            try
+            {
+                HandleCrew(__instance);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Moving a destroyed ship's crew", e);
+            }
         }
 
         [GamePatch(Feature, "CG.Space.PlayerControlledShip", "NetPublishShipDeathBegan", PatchKind.Finalizer)]
@@ -57,38 +68,61 @@ namespace VoidCrewFleet
             Dying = null;
         }
 
-        /// <summary>Host, co-op: the crew of a destroyed ship joins the other ship's crew (and respawns there).</summary>
-        private static void MoveCrewOff(PlayerControlledShip dying)
+        /// <summary>The living ships other than the dying one.</summary>
+        private static List<int> SurvivingSlots(PlayerControlledShip dying)
+        {
+            List<int> alive = FleetShips.AliveSlots();
+            alive.Remove(FleetShips.Slot(dying));
+            return alive;
+        }
+
+        /// <summary>
+        /// Host: a destroyed ship's crew can't be re-cloned for the rest of the mission. They are DEAD from now on: they play on
+        /// while their character lives (aboard another ship), then watch. The roster does it when it runs; this is the same
+        /// without one. With no ship left, the mission ends the game's own way (co-op); in PvP a team's last ship decides the
+        /// match (PvpMatch).
+        /// </summary>
+        private static void HandleCrew(PlayerControlledShip dying)
         {
             int deadSlot = FleetShips.Slot(dying);
-            PlayerControlledShip survivor = null;
-            foreach (PlayerControlledShip ship in FleetShips.All)
+            List<int> alive = SurvivingSlots(dying);
+            if (deadSlot < 0 || alive.Count == 0) return;
+            if (!PvpRoster.OnShipLost(deadSlot)) FleetShips.PublishCrew(CrewRules.LoseShip(FleetShips.Crews(), deadSlot));
+            if (!FleetSession.IsPvP)
             {
-                if (ship != dying && ship != null && !ship.StartedDeath) survivor = ship;
+                int left = alive.Count;
+                Notice.ShowAll(FleetSlots.Name(deadSlot, false) + " is lost! Its crew can't be re-cloned this mission: they play on while they live, then watch. The fleet carries on with " +
+                               left + (left == 1 ? " ship." : " ships."));
             }
-            if (survivor == null || deadSlot < 0) return;
-            int liveSlot = FleetShips.Slot(survivor);
-            Dictionary<int, int> crews = FleetShips.CrewMap();
-            var moved = new List<int>();
-            foreach (KeyValuePair<int, int> pair in crews)
+            if (FleetSession.IsPvP && !TeamFightsOn(FleetShips.TeamOfSlot(deadSlot), dying)) return;
+            FleetReturn.ShipWasLost();
+        }
+
+        /// <summary>PvP: whether a team still has a living ship other than the dying one.</summary>
+        public static bool TeamFightsOn(int team, PlayerControlledShip dying)
+        {
+            foreach (int slot in SurvivingSlots(dying))
             {
-                if (pair.Value == deadSlot) moved.Add(pair.Key);
+                if (FleetShips.TeamOfSlot(slot) == team) return true;
             }
-            foreach (int actor in moved) crews[actor] = liveSlot;
-            FleetShips.PublishCrew(crews);
-            Notice.ShowAll(FleetShips.Describe(dying) + " is lost. Its crew will be re-cloned aboard " + FleetShips.Describe(survivor) + ".");
+            return false;
         }
 
         // ---------------------------------------------------------------- who dies with the ship
 
-        /// <summary>A character dies with a ship when aboard it, or when they crew it and are not aboard another ship.</summary>
+        /// <summary>
+        /// A character dies with a ship when aboard it, or when it is their ship and they are not aboard another one (out in
+        /// space). Their ship is the one they were given, even once the host has marked its crew DEAD (the host does that
+        /// before the others hear of it).
+        /// </summary>
         public static bool DiesWith(Player character, PlayerControlledShip ship)
         {
             if (character == null || ship == null) return false;
             PlayerControlledShip aboard = FleetShips.AboardShip(character);
             if (aboard != null) return aboard == ship;
             int actor = character.photonView != null && character.photonView.Owner != null ? character.photonView.Owner.ActorNumber : -1;
-            return FleetShips.ShipOfActor(actor) == ship;
+            CrewEntry entry;
+            return FleetShips.TryGetEntry(actor, out entry) && entry.State != CrewState.Waiting && entry.Slot >= 0 && FleetShips.BySlot(entry.Slot) == ship;
         }
 
         private static bool LocalDies
@@ -119,13 +153,43 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
+        /// Whether the local player's side still has a ship besides the dying one: in co-op any ship, in PvP one of their own
+        /// team's (a player without a team has none).
+        /// </summary>
+        private static bool SideFightsOn
+        {
+            get
+            {
+                if (!FleetSession.IsPvP) return AnotherShipSurvives;
+                int team = FleetShips.TeamOfActor(FleetShips.LocalActor);
+                return team >= 0 && TeamFightsOn(team, Dying);
+            }
+        }
+
+        /// <summary>
         /// Whether the local player gets the game's full "ship lost" ending: the death camera, the fade to black, the HUD
-        /// and markers switched off. Only for players who die with the ship when the game is over for them; in co-op, while
-        /// another ship survives, they just die (the normal death screen) and are re-cloned aboard it.
+        /// and markers switched off. For players who die with the ship when the game is over for them, and for the ship's
+        /// own crew, who watch the rest of the mission afterwards (Spectator). Anyone else who dies with it (a visitor from
+        /// another ship, or a PvP boarder) just dies (the normal death screen) and is re-cloned on their own ship.
         /// </summary>
         private static bool LocalGameOver
         {
-            get { return LocalDies && (FleetSession.IsPvP || !AnotherShipSurvives); }
+            get
+            {
+                if (!LocalDies) return false;
+                if (OwnCrewOfDying) return true;
+                return !SideFightsOn;
+            }
+        }
+
+        /// <summary>The local player crews the dying ship (or did, as a spectator of it).</summary>
+        private static bool OwnCrewOfDying
+        {
+            get
+            {
+                CrewEntry entry;
+                return Dying != null && FleetShips.TryGetEntry(FleetShips.LocalActor, out entry) && entry.Slot >= 0 && entry.Slot == FleetShips.Slot(Dying);
+            }
         }
 
         // ---------------------------------------------------------------- the listeners
@@ -142,6 +206,13 @@ namespace VoidCrewFleet
             if (own != null && own != Dying) return false;
             if (own == null) Log.WarnOnce("death sequence owner", "A ship death sequence could not tell which ship it belongs to.");
             if (LocalGameOver) return true;
+            // Not the end for this player, but they are aboard (visiting from another ship, or boarding it): they die in the
+            // explosion, when the sequence would have killed them, and are re-cloned on their own ship.
+            if (LocalDies && FleetRuntime.Instance != null)
+            {
+                float killAt = __instance.startExplodeDelay + __instance.startStageTwoDelay + __instance.startStageThreeDelay + __instance.disableRenderersDelay;
+                FleetRuntime.Instance.StartCoroutine(DieWithShipLater(Dying, killAt));
+            }
             if (PhotonNetwork.IsMasterClient && FleetRuntime.Instance != null)
             {
                 float delay = __instance.startExplodeDelay + __instance.startStageTwoDelay + __instance.startStageThreeDelay + __instance.disableRenderersDelay +
@@ -149,6 +220,23 @@ namespace VoidCrewFleet
                 FleetRuntime.Instance.StartCoroutine(DestroyLater(Dying, delay));
             }
             return false;
+        }
+
+        private static IEnumerator DieWithShipLater(PlayerControlledShip ship, float delay)
+        {
+            yield return new WaitForSeconds(delay);
+            try
+            {
+                LocalPlayer me = LocalPlayer.Instance;
+                if (me == null || me.IsDead || ship == null) yield break;
+                if (FleetShips.AboardShip(me) != ship) yield break;
+                Log.Info("The local player dies with " + FleetShips.Describe(ship) + ".");
+                me.Die(DeathCause.Explosion);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Dying with a lost ship", e);
+            }
         }
 
         private static IEnumerator DestroyLater(PlayerControlledShip ship, float delay)
@@ -193,15 +281,15 @@ namespace VoidCrewFleet
         private static readonly System.Reflection.MethodInfo ForceEndMessage = GameMember.Method(typeof(CG.Client.Audio.VoiceController), "ForceEndMessage");
 
         /// <summary>
-        /// The ship AI's voice stops for players who die with a ship. The game also mutes it for good; in co-op, while
-        /// another ship survives, the crew moves there and must still hear it, so only the current line stops.
+        /// The ship AI's voice stops for players who die with a ship. The game also mutes it for good; while their side has
+        /// another ship, they still play (or watch) there and must hear it, so only the current line stops.
         /// </summary>
         [GamePatch(Feature, "CG.Client.Audio.VoiceController", "PlayerShipDeathInitiated", PatchKind.Prefix)]
         private static bool VoicePrefix(CG.Client.Audio.VoiceController __instance)
         {
             if (!Filtering) return true;
             if (!LocalDies) return false;
-            if (FleetSession.IsPvP || !AnotherShipSurvives || ForceEndMessage == null) return true;
+            if (!SideFightsOn || ForceEndMessage == null) return true;
             try
             {
                 ForceEndMessage.Invoke(__instance, null);
@@ -231,6 +319,24 @@ namespace VoidCrewFleet
         private static bool DestroyedConditionPrefix()
         {
             return !Filtering || (!FleetSession.IsPvP && !AnotherShipSurvives);
+        }
+
+        /// <summary>
+        /// The mission's "your ship has been destroyed" end (a scenario rule on any player ship's destruction, when the ship's
+        /// wreck is removed): in co-op only when no other ship is left; in PvP never (PvpMatch ends the match when a team has
+        /// no ships left).
+        /// </summary>
+        [GamePatch(Feature, "CG.Game.Scenarios.Conditions.SpaceObjectDestruction", "OnSpaceObjectDestroyed", PatchKind.Prefix)]
+        private static bool ObjectDestroyedConditionPrefix(object orbitObject)
+        {
+            var ship = orbitObject as PlayerControlledShip;
+            if (ship == null || FleetSession.ShipCount < 2) return true;
+            if (FleetSession.IsPvP) return false;
+            foreach (PlayerControlledShip other in FleetShips.All)
+            {
+                if (other != null && other != ship && !other.StartedDeath) return false;
+            }
+            return true;
         }
     }
 }
