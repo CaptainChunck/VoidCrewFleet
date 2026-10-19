@@ -1,10 +1,12 @@
 using Photon.Pun;
+using UnityEngine;
 
 namespace VoidCrewFleet
 {
     /// <summary>
-    /// The Fleet Pilgrimage's extra enemies. Two-ship missions already set the game's difficulty for one ship's crew; the
-    /// Fleet Pilgrimage then multiplies (Settings > Fleet Pilgrimage > EnemyMultiplier):
+    /// The Fleet Pilgrimage's extra enemies. Fleet missions already set the game's difficulty for one ship's crew; the
+    /// Fleet Pilgrimage then multiplies (Settings > Fleet Pilgrimage > EnemyMultiplier, set for two ships; each further ship
+    /// adds as much again, so 1.6 becomes 2.2 with three ships):
     /// - the size of every enemy group the game allows to scale (scripted encounters and waves);
     /// - how many units the game's AI Director keeps in the fight (each unit counts for less of its "intensity" budget).
     /// Spawning only happens on the host, so this only acts there.
@@ -24,7 +26,12 @@ namespace VoidCrewFleet
 
         private static float Multiplier
         {
-            get { return Settings.EnemyMultiplier != null ? Settings.EnemyMultiplier.Value : 1.6f; }
+            get
+            {
+                float twoShips = Settings.EnemyMultiplier != null ? Settings.EnemyMultiplier.Value : 1.6f;
+                int ships = Mathf.Max(2, FleetSession.ShipCount);
+                return 1f + (twoShips - 1f) * (ships - 1);
+            }
         }
 
         [GamePatch(Feature, "Gameplay.MissionDifficulty.DifficultyState", "GetSpawnGroupAmountMultiplier", PatchKind.Postfix)]

@@ -240,7 +240,7 @@ namespace VoidCrewFleet
                 {
                     _nextDrop = Time.unscaledTime + SupplyDropSeconds;
                     SpawnUtils.SpawnCarePackage(AlloyCluster, 2, preset.DropSpot);
-                    Notice.ShowAll("A supply drop of alloys is arriving between the ships. Shoot it open and grab the alloys!");
+                    Notice.ShowAll("A supply drop of alloys is arriving between the teams. Shoot it open and grab the alloys!");
                     Log.Info("PvP arena: a supply drop is arriving at " + preset.DropSpot + ".");
                 }
             }
@@ -268,12 +268,23 @@ namespace VoidCrewFleet
             for (int step = 1; step <= 20; step++)
             {
                 Vector3 candidate = position + outward * (100f * step);
-                if (Physics.CheckSphere(candidate, Clearance, Rocks, QueryTriggerInteraction.Ignore)) continue;
+                if (Physics.CheckSphere(candidate, Clearance, Rocks, QueryTriggerInteraction.Ignore) || NearAnotherShip(ship, candidate)) continue;
                 ship.Platform.Teleport(candidate, ship.transform.rotation);
                 Log.Info("PvP arena: moved " + FleetShips.Describe(ship) + " " + (100 * step) + " m out of the rocks.");
                 return;
             }
             Log.Warn("PvP arena: " + FleetShips.Describe(ship) + " starts near rocks and no clear spot was found nearby.");
+        }
+
+        /// <summary>Whether a spot is closer than a team's own spacing to another ship (so a ship moved out of rocks doesn't land on a teammate).</summary>
+        private static bool NearAnotherShip(PlayerControlledShip ship, Vector3 spot)
+        {
+            float clear = ShipSpawn.TeamSpacing * 0.8f;
+            foreach (PlayerControlledShip other in FleetShips.All)
+            {
+                if (other != null && other != ship && (other.transform.position - spot).sqrMagnitude < clear * clear) return true;
+            }
+            return false;
         }
 
         /// <summary>For the self-test.</summary>

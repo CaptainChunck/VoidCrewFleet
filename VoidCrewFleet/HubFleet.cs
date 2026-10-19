@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
+using System.Text;
 using CG.Game.Player;
 using CG.GameLoopStateMachine.GameStates;
 using Client.Utils;
@@ -17,33 +19,37 @@ namespace VoidCrewFleet
     /// <summary>The fleet missions offered on the hub's galaxy map, on top of the game's own.</summary>
     internal enum HubVariant : byte
     {
-        /// <summary>One of the game's own missions (with one or two ships, as the ship terminal says).</summary>
+        /// <summary>One of the game's own missions (with one to three ships, as the FLEET panel says).</summary>
         None = 0,
 
-        /// <summary>The standard Pilgrimage for two ships: more enemies, more objectives per sector.</summary>
+        /// <summary>The standard Pilgrimage for two or three ships: more enemies per sector.</summary>
         FleetPilgrimage = 1,
 
-        /// <summary>PvP: two crews, one ship each.</summary>
+        /// <summary>PvP: two teams of one to three ships each.</summary>
         FleetBattle = 2
     }
 
     /// <summary>
     /// The fleet choices made in the hub, kept as room properties that only the host writes (other players ask the host
     /// through Net). The game's own ship selection (HubShipManager, and the Ship Customizer's CUSTOM on top of it) stays
-    /// ship 1; ship 2 is this plugin's own. When the host starts a mission the choices are frozen into the mission's
-    /// FleetPlan (FleetSession), which reaches every client inside the game's session data.
+    /// ship 1; ships 2-6 are this plugin's. The host also decides how many ships there are and may force each ship's type.
+    /// When the host starts a mission the choices are frozen into the mission's FleetPlan (FleetSession), which reaches
+    /// every client inside the game's session data.
     /// </summary>
     internal static class HubFleet
     {
         public const string Feature = "Two ships in the hub";
 
-        public const int MaxCrewPerShip = 8;
+        public const int MaxCrewPerShip = FleetSlots.MaxCrewPerShip;
 
         private const string KeyOn = "VCF_On";
-        private const string KeyTwo = "VCF_Two";
-        private const string KeyShipB = "VCF_ShipB";
+        private const string KeyCount = "VCF_Count";
+        private const string KeyPerTeam = "VCF_PerTeam";
         private const string KeyVariant = "VCF_Var";
-        private const string KeyShipBName = "VCF_ShipBName";
+        private const string KeyMirror = "VCF_Mirror";
+        private const string KeyType = "VCF_Type";
+        private const string KeyLoad = "VCF_Load";
+        private const string KeyLoadName = "VCF_LoadName";
 
         private static bool _applyingVariant;
         private static string _lastSignature;
@@ -53,11 +59,45 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- reading the room
 
+        /// <summary>
+        /// The host's own latest writes, for a few seconds: the room's properties only change here once the server has sent
+        /// them back, and a choice is often read again right after it is made.
+        /// </summary>
+        private static readonly Dictionary<string, KeyValuePair<object, float>> HostLatest = new Dictionary<string, KeyValuePair<object, float>>();
+        private static string _hostLatestRoom;
+
         private static bool TryGet(string key, out object value)
         {
             value = null;
-            return PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null && PhotonNetwork.CurrentRoom.CustomProperties != null &&
-                   PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(key, out value) && value != null;
+            if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return false;
+            KeyValuePair<object, float> latest;
+            if (PhotonNetwork.IsMasterClient && PhotonNetwork.CurrentRoom.Name == _hostLatestRoom && HostLatest.TryGetValue(key, out latest) &&
+                Time.unscaledTime - latest.Value < 3f)
+            {
+                value = latest.Key;
+                return value != null;
+            }
+            return PhotonNetwork.CurrentRoom.CustomProperties != null && PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(key, out value) && value != null;
+        }
+
+        private static int GetInt(string key, int fallback)
+        {
+            object value;
+            return TryGet(key, out value) && value is int ? (int)value : fallback;
+        }
+
+        private static GUIDUnion GetGuid(string key)
+        {
+            object value;
+            if (!TryGet(key, out value) || !(value is string) || string.IsNullOrEmpty((string)value)) return GUIDUnion.Empty();
+            try
+            {
+                return new GUIDUnion((string)value);
+            }
+            catch
+            {
+                return GUIDUnion.Empty();
+            }
         }
 
         /// <summary>True when the room's host runs this plugin with the same network protocol (and its fleet choices exist).</summary>
@@ -70,19 +110,9 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>Whether the game's own missions are flown with two ships: off unless the host turned it on.</summary>
-        public static bool TwoShips
-        {
-            get
-            {
-                object value;
-                return TryGet(KeyTwo, out value) && value is bool && (bool)value;
-            }
-        }
-
         /// <summary>
-        /// Whether two-ship missions can run on this host: the patches they can't work without are in. After a game update
-        /// that breaks one of them, missions fall back to one ship instead of a half-working fleet.
+        /// Whether fleet missions can run on this host: the patches they can't work without are in. After a game update that
+        /// breaks one of them, missions fall back to one ship instead of a half-working fleet.
         /// </summary>
         public static bool FleetReady
         {
@@ -102,28 +132,82 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>The second ship's loadout as chosen; empty when nobody chose one (ship 1's loadout is used then).</summary>
-        public static GUIDUnion ChosenShipB
+        /// <summary>How many ships the game's own missions are flown with (1-3): one unless someone chose more.</summary>
+        public static int CoopShips
+        {
+            get { return Mathf.Clamp(GetInt(KeyCount, 1), 1, FleetSlots.MaxCoopShips); }
+        }
+
+        /// <summary>Fleet Battle: ships per team (1-3).</summary>
+        public static int ShipsPerTeam
+        {
+            get { return Mathf.Clamp(GetInt(KeyPerTeam, 1), 1, FleetSlots.MaxShipsPerTeam); }
+        }
+
+        /// <summary>Fleet Battle: both teams' ship k have the same type (on unless the host turned it off).</summary>
+        public static bool MirrorTypes
         {
             get
             {
                 object value;
-                if (!TryGet(KeyShipB, out value) || !(value is string) || string.IsNullOrEmpty((string)value)) return GUIDUnion.Empty();
-                try
+                return !TryGet(KeyMirror, out value) || !(value is bool) || (bool)value;
+            }
+        }
+
+        /// <summary>How the next mission will be played, from the room's choices.</summary>
+        public static FleetMode PlannedMode
+        {
+            get
+            {
+                if (!HostHasFleet) return FleetMode.OneShip;
+                switch (Variant)
                 {
-                    return new GUIDUnion((string)value);
-                }
-                catch
-                {
-                    return GUIDUnion.Empty();
+                    case HubVariant.FleetBattle:
+                        return FleetMode.PvP;
+                    case HubVariant.FleetPilgrimage:
+                        return FleetMode.Coop;
+                    default:
+                        return CoopShips > 1 ? FleetMode.Coop : FleetMode.OneShip;
                 }
             }
         }
 
+        /// <summary>How many ships the next mission plans (before the room size raises it).</summary>
+        public static int PlannedShips
+        {
+            get
+            {
+                switch (PlannedMode)
+                {
+                    case FleetMode.PvP:
+                        return 2 * ShipsPerTeam;
+                    case FleetMode.Coop:
+                        return Mathf.Max(CoopShips, 2);
+                    default:
+                        return 1;
+                }
+            }
+        }
+
+        /// <summary>A ship's name for players: "SHIP 3", or "BLUE 2" / "RED 1" in Fleet Battle.</summary>
+        public static string ShipLabel(int slot)
+        {
+            return FleetSlots.Name(slot, FleetApi.IsTeamMatch);
+        }
+
         /// <summary>
-        /// A loadout by GUID: the game's, or the Ship Customizer's CUSTOM; null (without the game's error log) when neither
-        /// knows it.
+        /// The ship type the host forces for a slot, or empty for any. In Fleet Battle every ship has one (until the host sets
+        /// them, the team's k-th ship takes the terminal's k-th type).
         /// </summary>
+        public static GUIDUnion ForcedType(int slot)
+        {
+            if (slot < 0 || slot >= FleetSlots.MaxSlots) return GUIDUnion.Empty();
+            GUIDUnion type = GetGuid(KeyType + (slot + 1));
+            if (type.IsNull && PlannedMode == FleetMode.PvP) type = FleetSlots.DefaultTeamType(slot / 2 + 1);
+            return type;
+        }
+
+        /// <summary>A loadout by GUID: the game's, or the Ship Customizer's CUSTOM; null (without the game's error log) when neither knows it.</summary>
         public static ShipLoadoutDataDef LoadoutDef(GUIDUnion guid)
         {
             if (guid.IsNull) return null;
@@ -139,6 +223,16 @@ namespace VoidCrewFleet
             return def != null ? def : CustomizerLink.GetDef(guid);
         }
 
+        /// <summary>The type of a loadout, CUSTOM included (a CUSTOM loadout has its stand-in's type).</summary>
+        public static GUIDUnion TypeOf(ShipLoadoutDataDef def)
+        {
+            if (def == null) return GUIDUnion.Empty();
+            GUIDUnion type = FleetSlots.TypeOf(def);
+            if (!type.IsNull) return type;
+            ShipLoadoutDataDef standIn = CustomizerLink.GetStandIn(def.AssetGuid);
+            return standIn != null ? FleetSlots.TypeOf(standIn) : GUIDUnion.Empty();
+        }
+
         /// <summary>Ship 1's loadout as chosen at the terminal (the Customizer's CUSTOM included).</summary>
         public static ShipLoadoutDataDef ShipADef
         {
@@ -151,54 +245,82 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>For the terminal: ship 2's chosen loadout, or ship 1's (CUSTOM included) while none is chosen.</summary>
-        public static ShipLoadoutDataDef ShipBDef
+        /// <summary>The loadout chosen for a ship 2-6; empty when nobody chose one.</summary>
+        public static GUIDUnion ChosenLoadout(int slot)
         {
-            get
-            {
-                GUIDUnion chosen = ChosenShipB;
-                return !chosen.IsNull ? LoadoutDef(chosen) : ShipADef;
-            }
+            return slot >= 1 && slot < FleetSlots.MaxSlots ? GetGuid(KeyLoad + (slot + 1)) : GUIDUnion.Empty();
         }
 
-        /// <summary>Ship 2's name as the host described it, for players who can't look the loadout up (CUSTOM without the Customizer).</summary>
-        public static string ShipBName
+        /// <summary>A ship 2-6's chosen loadout as the host described it, for players who can't look it up (CUSTOM without the Customizer).</summary>
+        public static string ChosenName(int slot)
         {
-            get
-            {
-                object value;
-                return TryGet(KeyShipBName, out value) ? value as string : null;
-            }
+            object value;
+            return slot >= 1 && TryGet(KeyLoadName + (slot + 1), out value) ? value as string : null;
         }
 
-        /// <summary>How the next mission will be played, from the room's choices.</summary>
-        public static FleetMode PlannedMode
+        /// <summary>
+        /// Whether a ship 2-6 with nothing chosen copies ship 1 (co-op, when its type allows ship 1's); otherwise it gets its
+        /// forced type's default loadout.
+        /// </summary>
+        public static bool CopiesShip1(int slot)
         {
-            get
+            if (slot < 1 || PlannedMode == FleetMode.PvP || !ChosenLoadout(slot).IsNull) return false;
+            GUIDUnion type = ForcedType(slot);
+            return type.IsNull || type == TypeOf(ShipADef);
+        }
+
+        /// <summary>For the terminal and the lobby: what a ship spawns with if the mission started now.</summary>
+        public static ShipLoadoutDataDef ShipDef(int slot)
+        {
+            if (slot <= 0) return ShipADef;
+            GUIDUnion chosen = ChosenLoadout(slot);
+            if (!chosen.IsNull)
             {
-                if (!HostHasFleet) return FleetMode.OneShip;
-                switch (Variant)
-                {
-                    case HubVariant.FleetBattle:
-                        return FleetMode.PvP;
-                    case HubVariant.FleetPilgrimage:
-                        return FleetMode.TwoShips;
-                    default:
-                        return TwoShips ? FleetMode.TwoShips : FleetMode.OneShip;
-                }
+                ShipLoadoutDataDef def = LoadoutDef(chosen);
+                if (def != null) return def;
             }
+            if (CopiesShip1(slot)) return ShipADef;
+            GUIDUnion type = ForcedType(slot);
+            return FleetSlots.DefaultLoadout(type.IsNull ? TypeOf(ShipADef) : type);
+        }
+
+        /// <summary>A ship's name for the FLEET panel and lobby, as the host saw it when the def isn't known here.</summary>
+        public static string ShipDescription(int slot)
+        {
+            ShipLoadoutDataDef def = ShipDef(slot);
+            if (def != null) return DescribeLoadout(def);
+            string name = ChosenName(slot);
+            return string.IsNullOrEmpty(name) ? "-" : name;
         }
 
         // ---------------------------------------------------------------- asking the host
 
-        public static void RequestTwoShips(bool on)
+        public static void RequestShipCount(int ships)
         {
-            Net.ToHost(Msg.HubTwoShips, on);
+            Net.ToHost(Msg.HubShipCount, ships);
         }
 
-        public static void RequestShipB(GUIDUnion loadout)
+        public static void RequestLoadout(int slot, GUIDUnion loadout)
         {
-            Net.ToHost(Msg.HubShipB, loadout.AsHex());
+            Net.ToHost(Msg.HubShipLoadout, slot, loadout.AsHex());
+        }
+
+        /// <summary>Host only: force a ship's type (empty: any type, co-op only).</summary>
+        public static void RequestType(int slot, GUIDUnion type)
+        {
+            Net.ToHost(Msg.HubShipType, slot, type.AsHex());
+        }
+
+        /// <summary>Host only: Fleet Battle's ships per team.</summary>
+        public static void RequestShipsPerTeam(int ships)
+        {
+            Net.ToHost(Msg.HubShipsPerTeam, ships);
+        }
+
+        /// <summary>Host only: Fleet Battle's "both teams get the same ship types".</summary>
+        public static void RequestMirror(bool on)
+        {
+            Net.ToHost(Msg.HubMirror, on);
         }
 
         public static void RequestVariant(HubVariant variant)
@@ -209,24 +331,24 @@ namespace VoidCrewFleet
         /// <summary>Message handlers; called once at start-up.</summary>
         public static void Listen()
         {
-            Net.On(Msg.HubTwoShips, (sender, data) =>
+            Net.On(Msg.HubShipCount, (sender, data) =>
             {
                 if (!HostInHub()) return;
-                bool on = Net.Get(data, 0, true);
-                if (!on && Variant != HubVariant.None)
+                int ships = Mathf.Clamp(Net.Get(data, 0, 1), 1, FleetSlots.MaxCoopShips);
+                if (Variant == HubVariant.FleetBattle) return;
+                if (ships < 2 && Variant == HubVariant.FleetPilgrimage)
                 {
-                    Notice.ShowAll("Fleet missions always use two ships. Choose one of the game's own missions on the galaxy map to fly with one ship.");
-                    return;
+                    Net.ToActor(sender, Msg.Notice, "The Fleet Pilgrimage needs at least two ships. Choose one of the game's own missions on the galaxy map to fly with one ship.");
+                    ships = 2;
                 }
-                Set(KeyTwo, on);
-                if (Settings.TwoShips != null) Settings.TwoShips.Value = on;
-                Log.Info("Two ships: " + (on ? "on" : "off") + ".");
+                SetCoopShips(ships);
             });
-            Net.On(Msg.HubShipB, (sender, data) =>
+            Net.On(Msg.HubShipLoadout, (sender, data) =>
             {
                 if (!HostInHub()) return;
-                string hex = Net.Get<string>(data, 0, null);
-                if (string.IsNullOrEmpty(hex)) return;
+                int slot = Net.Get(data, 0, -1);
+                string hex = Net.Get<string>(data, 1, null);
+                if (slot < 1 || slot >= PlannedShips || string.IsNullOrEmpty(hex)) return;
                 GUIDUnion guid;
                 try
                 {
@@ -236,33 +358,56 @@ namespace VoidCrewFleet
                 {
                     return;
                 }
+                string refusal = CheckLoadout(slot, guid, sender);
+                if (refusal != null)
+                {
+                    Net.ToActor(sender, Msg.Notice, refusal);
+                    return;
+                }
                 ShipLoadoutDataDef def = LoadoutDef(guid);
-                if (def == null || def.Asset == null)
+                SetLoadout(slot, guid, def);
+                Log.Info(ShipLabel(slot) + " is now " + DescribeLoadout(def) + ".");
+            });
+            Net.On(Msg.HubShipType, (sender, data) =>
+            {
+                if (!HostInHub() || !Net.FromHost(sender)) return;
+                int slot = Net.Get(data, 0, -1);
+                string hex = Net.Get<string>(data, 1, "");
+                if (slot < 0 || slot >= FleetSlots.MaxSlots) return;
+                GUIDUnion type = GUIDUnion.Empty();
+                if (!string.IsNullOrEmpty(hex))
                 {
-                    Log.Warn("Ignored a ship 2 choice neither the game nor the Ship Customizer knows (" + hex + ").");
-                    Net.ToActor(sender, Msg.Notice, CustomizerLink.Installed && !CustomizerLink.Linked
-                        ? "Ship 2 can't have a CUSTOM loadout of its own with this version of Ship Customizer: update it, or leave ship 2 as a copy of ship 1."
-                        : "Ship 2 can't use that loadout.");
-                    return;
-                }
-                if (Variant == HubVariant.FleetBattle && FleetShips.CrewSlot(sender) != 1)
-                {
-                    Net.ToActor(sender, Msg.Notice, "Only RED players can change the RED ship (ship 2).");
-                    return;
-                }
-                if (CustomizerLink.IsCustom(guid))
-                {
-                    string refusal = CustomizerLink.CheckShip2(guid, sender);
-                    if (refusal != null)
+                    try
                     {
-                        Net.ToActor(sender, Msg.Notice, refusal);
+                        type = new GUIDUnion(hex);
+                    }
+                    catch
+                    {
                         return;
                     }
+                    if (!FleetSlots.Types.Contains(type)) return;
                 }
-                Set(KeyShipB, hex);
-                Set(KeyShipBName, DescribeLoadout(def));
-                CustomizerLink.SetShip2(guid);
-                Log.Info("Ship 2 is now " + DescribeLoadout(def) + ".");
+                if (type.IsNull && Variant == HubVariant.FleetBattle) return;
+                SetType(slot, type);
+                if (Variant == HubVariant.FleetBattle && MirrorTypes) SetType(slot ^ 1, type);
+                SaveTypes();
+            });
+            Net.On(Msg.HubShipsPerTeam, (sender, data) =>
+            {
+                if (!HostInHub() || !Net.FromHost(sender) || Variant != HubVariant.FleetBattle) return;
+                SetShipsPerTeam(Mathf.Clamp(Net.Get(data, 0, 1), 1, FleetSlots.MaxShipsPerTeam));
+            });
+            Net.On(Msg.HubMirror, (sender, data) =>
+            {
+                if (!HostInHub() || !Net.FromHost(sender)) return;
+                bool on = Net.Get(data, 0, true);
+                Set(KeyMirror, on);
+                if (on)
+                {
+                    // RED's ships take BLUE's types.
+                    for (int slot = 0; slot < FleetSlots.MaxSlots; slot += 2) SetType(slot + 1, ForcedType(slot));
+                    SaveTypes();
+                }
             });
             Net.On(Msg.HubVariant, (sender, data) =>
             {
@@ -275,30 +420,168 @@ namespace VoidCrewFleet
             });
         }
 
-        /// <summary>
-        /// Host: the Ship Customizer switched ship 2's CUSTOM off in the hub, because someone without it joined. Ship 2 takes
-        /// the game loadout that CUSTOM is built on.
-        /// </summary>
-        public static void Ship2CustomCancelled()
+        /// <summary>Host: null when this player may give a ship 2-6 this loadout now; otherwise why not.</summary>
+        private static string CheckLoadout(int slot, GUIDUnion guid, int sender)
         {
-            try
+            ShipLoadoutDataDef def = LoadoutDef(guid);
+            if (def == null || def.Asset == null)
             {
-                if (!HostInHub()) return;
-                GUIDUnion chosen = ChosenShipB;
-                if (chosen.IsNull || !CustomizerLink.IsCustom(chosen)) return;
-                ShipLoadoutDataDef standIn = CustomizerLink.GetStandIn(chosen);
-                Set(KeyShipB, standIn != null ? standIn.AssetGuid.AsHex() : "");
-                Set(KeyShipBName, standIn != null ? DescribeLoadout(standIn) : "");
-                Log.Info("Ship 2's CUSTOM loadout was switched off by Ship Customizer; ship 2 is now " +
-                         (standIn != null ? DescribeLoadout(standIn) : "a copy of ship 1") + ".");
+                Log.Warn("Ignored a " + ShipLabel(slot) + " choice neither the game nor the Ship Customizer knows (" + guid.AsHex() + ").");
+                return CustomizerLink.Installed && !CustomizerLink.CanCustomize(slot + 1)
+                    ? ShipLabel(slot) + " can't have a CUSTOM loadout of its own with this version of Ship Customizer: update it."
+                    : ShipLabel(slot) + " can't use that loadout.";
             }
-            catch (Exception e)
+            if (Variant == HubVariant.FleetBattle && FleetShips.TeamOfActor(sender) != FleetSlots.TeamOf(slot, true))
             {
-                Log.Failure("Switching ship 2 away from CUSTOM", e);
+                string team = PvpTeams.TeamName(FleetSlots.TeamOf(slot, true));
+                return "Only " + team + " players can change the " + ShipLabel(slot) + " ship.";
+            }
+            GUIDUnion type = ForcedType(slot);
+            if (!type.IsNull && TypeOf(def) != type)
+                return ShipLabel(slot) + " must be a " + FleetSlots.TypeName(type) + " (the host's choice).";
+            if (CustomizerLink.IsCustom(guid)) return CustomizerLink.CheckShip(slot + 1, guid, sender);
+            return null;
+        }
+
+        /// <summary>Host: a ship 2-6 uses this loadout (a game loadout, or CUSTOM already checked); the Customizer shares its layout.</summary>
+        private static void SetLoadout(int slot, GUIDUnion guid, ShipLoadoutDataDef def)
+        {
+            Set(KeyLoad + (slot + 1), guid.IsNull ? null : guid.AsHex());
+            Set(KeyLoadName + (slot + 1), def != null ? DescribeLoadout(def) : null);
+            CustomizerLink.SetShip(slot + 1, guid);
+        }
+
+        /// <summary>Host: the game's own missions are flown with this many ships. Confirmed crews are picked again.</summary>
+        private static void SetCoopShips(int ships)
+        {
+            int before = CoopShips;
+            Set(KeyCount, ships);
+            if (ships != before && PvpTeams.Locked && Variant != HubVariant.FleetBattle)
+            {
+                PvpTeams.Reset();
+                if (ships > 1) Notice.ShowAll("The fleet now has " + ships + " ships: pick your ships again.");
+            }
+            if (Settings.Ships != null) Settings.Ships.Value = ships;
+            // Players who picked a ship that is gone pick again (or are placed at the start).
+            Dictionary<int, CrewEntry> crews = FleetShips.Crews();
+            bool changed = false;
+            foreach (CrewEntry entry in crews.Values.ToList())
+            {
+                if (entry.Slot < ships) continue;
+                crews.Remove(entry.Actor);
+                changed = true;
+            }
+            if (changed) FleetShips.PublishCrew(crews);
+            Log.Info("Ships: " + ships + ".");
+        }
+
+        /// <summary>Host: a ship's forced type; a ship whose loadout is of another type gets that type's default.</summary>
+        private static void SetType(int slot, GUIDUnion type)
+        {
+            if (slot < 0 || slot >= FleetSlots.MaxSlots) return;
+            Set(KeyType + (slot + 1), type.IsNull ? null : type.AsHex());
+            if (type.IsNull) return;
+            if (slot == 0)
+            {
+                ShipLoadoutDataDef current = ShipADef;
+                if (current != null && TypeOf(current) == type) return;
+                ShipLoadoutDataDef standard = FleetSlots.DefaultLoadout(type);
+                if (standard == null || HubShipManager.Instance == null) return;
+                try
+                {
+                    HubShipManager.Instance.SelectShip(standard.AssetGuid.AsIntArray());
+                }
+                catch (Exception e)
+                {
+                    Log.Failure("Giving ship 1 the forced type's loadout", e);
+                }
+                return;
+            }
+            GUIDUnion chosen = ChosenLoadout(slot);
+            if (chosen.IsNull) return;
+            ShipLoadoutDataDef def = LoadoutDef(chosen);
+            if (def != null && TypeOf(def) == type) return;
+            // Back to "nothing chosen", which is the type's default loadout (or a copy of ship 1 of the same type).
+            SetLoadout(slot, GUIDUnion.Empty(), null);
+        }
+
+        /// <summary>Host: Fleet Battle's ships per team. Players on a ship that is gone move to their team's first ship.</summary>
+        private static void SetShipsPerTeam(int ships)
+        {
+            Set(KeyPerTeam, ships);
+            if (Settings.PvpShipsPerTeam != null) Settings.PvpShipsPerTeam.Value = ships;
+            Dictionary<int, CrewEntry> crews = FleetShips.Crews();
+            bool changed = false;
+            foreach (CrewEntry entry in crews.Values.ToList())
+            {
+                if (entry.Slot < 2 * ships) continue;
+                crews[entry.Actor] = new CrewEntry { Actor = entry.Actor, Team = entry.Team, Slot = entry.Team == 1 ? 1 : 0, State = CrewState.Playing };
+                changed = true;
+            }
+            if (changed) FleetShips.PublishCrew(crews);
+            Log.Info("Fleet Battle: " + ships + " ships per team.");
+        }
+
+        /// <summary>Host: remember the Fleet Battle ship types for the next lobby.</summary>
+        private static void SaveTypes()
+        {
+            if (Variant != HubVariant.FleetBattle || Settings.PvpShipTypes == null) return;
+            var hexes = new string[FleetSlots.MaxSlots];
+            for (int slot = 0; slot < hexes.Length; slot++) hexes[slot] = GetGuid(KeyType + (slot + 1)).AsHex();
+            Settings.PvpShipTypes.Value = string.Join(",", hexes);
+        }
+
+        /// <summary>Host, when FLEET BATTLE is chosen: the last ships per team and ship types, else the defaults.</summary>
+        private static void PublishSavedFleetBattle()
+        {
+            int perTeam = Settings.PvpShipsPerTeam != null ? Mathf.Clamp(Settings.PvpShipsPerTeam.Value, 1, FleetSlots.MaxShipsPerTeam) : 1;
+            Set(KeyPerTeam, perTeam);
+            string[] saved = Settings.PvpShipTypes != null && !string.IsNullOrEmpty(Settings.PvpShipTypes.Value) ? Settings.PvpShipTypes.Value.Split(',') : new string[0];
+            List<GUIDUnion> types = FleetSlots.Types;
+            for (int slot = 0; slot < FleetSlots.MaxSlots; slot++)
+            {
+                GUIDUnion type = GUIDUnion.Empty();
+                if (slot < saved.Length && !string.IsNullOrEmpty(saved[slot]))
+                {
+                    try
+                    {
+                        type = new GUIDUnion(saved[slot]);
+                    }
+                    catch
+                    {
+                        type = GUIDUnion.Empty();
+                    }
+                }
+                if (type.IsNull || !types.Contains(type)) type = FleetSlots.DefaultTeamType(slot / 2 + 1);
+                SetType(slot, type);
             }
         }
 
-        // ---------------------------------------------------------------- Fleet Battle starts from the host's seat
+        /// <summary>
+        /// Host: the Ship Customizer switched a ship's CUSTOM off in the hub, because someone without it joined. That ship
+        /// takes the game loadout CUSTOM is built on.
+        /// </summary>
+        public static void ShipCustomCancelled(int ship)
+        {
+            try
+            {
+                int slot = ship - 1;
+                if (!HostInHub() || slot < 1) return;
+                GUIDUnion chosen = ChosenLoadout(slot);
+                if (chosen.IsNull || !CustomizerLink.IsCustom(chosen)) return;
+                ShipLoadoutDataDef standIn = CustomizerLink.GetStandIn(chosen);
+                Set(KeyLoad + ship, standIn != null ? standIn.AssetGuid.AsHex() : null);
+                Set(KeyLoadName + ship, standIn != null ? DescribeLoadout(standIn) : null);
+                Log.Info(ShipLabel(slot) + "'s CUSTOM loadout was switched off by Ship Customizer; it is now " +
+                         (standIn != null ? DescribeLoadout(standIn) : "back to its default") + ".");
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Switching a ship away from CUSTOM", e);
+            }
+        }
+
+        // ---------------------------------------------------------------- starting from the ready room
 
         private static readonly FieldInfo ZoneChairsField = GameMember.Field(typeof(CG.Client.Quests.Behaviours.QuestStartZone), "takeoverChairs");
         private static readonly FieldInfo SeatChairField = GameMember.Field(typeof(SittingInChair), "chair");
@@ -306,6 +589,8 @@ namespace VoidCrewFleet
         private static float _lastSeatNotice = -100f;
 
         /// <summary>
+        /// Co-op with several ships: nothing starts before the host has confirmed the crews; then the game's own countdown
+        /// once everyone is seated.
         /// Host, FLEET BATTLE: the teams are already picked, so the host sitting in the ready room starts the match (the
         /// game's short countdown for "everyone is seated"); nobody else's seat counts. Before the teams are confirmed,
         /// sitting down starts nothing. Clients don't run their own countdown (it would count their own seat): they show the
@@ -314,7 +599,26 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "Gameplay.Quests.QuestStartProcess", "UpdateQuestProcess", PatchKind.Prefix)]
         private static bool StartCountdownPrefix(ref int playersInZoneCount)
         {
-            if (Variant != HubVariant.FleetBattle || !HostHasFleet) return true;
+            if (!HostHasFleet) return true;
+            if (Variant != HubVariant.FleetBattle)
+            {
+                // Co-op with several ships: the game's own countdown (everyone seated), once the host has confirmed the crews.
+                if (PlannedMode != FleetMode.Coop || PvpTeams.Locked) return true;
+                playersInZoneCount = 0;
+                try
+                {
+                    if (PhotonNetwork.IsMasterClient && HostSeatedInReadyRoom() && Time.unscaledTime - _lastSeatNotice > 10f)
+                    {
+                        _lastSeatNotice = Time.unscaledTime;
+                        Notice.Show("Confirm the crews first (CONFIRM CREWS on the crew screen; CREWS on the FLEET panel brings it back); then sit down here to start.");
+                    }
+                }
+                catch (Exception e)
+                {
+                    Log.Failure("Holding the co-op start for the crews", e);
+                }
+                return true;
+            }
             if (!PhotonNetwork.IsMasterClient) return false;
             try
             {
@@ -373,6 +677,12 @@ namespace VoidCrewFleet
             try
             {
                 if (!PhotonNetwork.InRoom || !PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null) return;
+                if (PhotonNetwork.CurrentRoom.Name != _hostLatestRoom)
+                {
+                    HostLatest.Clear();
+                    _hostLatestRoom = PhotonNetwork.CurrentRoom.Name;
+                }
+                HostLatest[key] = new KeyValuePair<object, float>(value, Time.unscaledTime);
                 PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { key, value } });
             }
             catch (Exception e)
@@ -384,13 +694,26 @@ namespace VoidCrewFleet
         /// <summary>Host: a fleet mission is chosen on the galaxy map (it is the standard Pilgrimage underneath).</summary>
         private static void SelectVariantAsHost(HubVariant variant)
         {
+            HubVariant before = Variant;
             Set(KeyVariant, (byte)variant);
+            if (before == HubVariant.FleetBattle || variant == HubVariant.FleetBattle)
+            {
+                // Ship picks mean other ships (and teams) in the other kind of mission: everyone picks again, and the lobby
+                // screen opens on every client when the new mission has several ships.
+                FleetShips.ClearCrews();
+                ClearTypes();
+                PvpTeams.Reset();
+            }
             if (variant == HubVariant.None) return;
             if (variant == HubVariant.FleetBattle)
             {
-                // Everyone picks a team now (the team screen opens on every client), under the host's last ship rules.
-                PvpTeams.Reset();
+                // Under the host's last ship rules, ships per team and ship types.
                 ShipRules.PublishSaved();
+                PublishSavedFleetBattle();
+            }
+            else if (CoopShips < 2)
+            {
+                SetCoopShips(2);
             }
             try
             {
@@ -402,7 +725,13 @@ namespace VoidCrewFleet
             {
                 _applyingVariant = false;
             }
-            Log.Info("Mission: " + (variant == HubVariant.FleetBattle ? "Fleet Battle (PvP)" : "Fleet Pilgrimage (two ships, more enemies)") + ".");
+            Log.Info("Mission: " + (variant == HubVariant.FleetBattle ? "Fleet Battle (PvP)" : "Fleet Pilgrimage (several ships, more enemies)") + ".");
+        }
+
+        /// <summary>Host: no forced types (co-op starts free; Fleet Battle sets its own).</summary>
+        private static void ClearTypes()
+        {
+            for (int slot = 0; slot < FleetSlots.MaxSlots; slot++) Set(KeyType + (slot + 1), null);
         }
 
         public static string DescribeLoadout(ShipLoadoutDataDef def)
@@ -433,17 +762,26 @@ namespace VoidCrewFleet
                 {
                     // Clients then treat the room as one without the plugin's fleet features.
                     Set(KeyOn, 0);
-                    Log.WarnOnce("fleet not ready", "Some of the patches two ships need didn't apply (a game update?), so missions use one ship.");
+                    Log.WarnOnce("fleet not ready", "Some of the patches several ships need didn't apply (a game update?), so missions use one ship.");
                     return;
                 }
                 Set(KeyOn, FleetPlan.Protocol);
-                // The host's last TWO SHIPS choice (off for a new player); later changes in this room are kept as they are.
-                object two;
-                if (!TryGet(KeyTwo, out two)) Set(KeyTwo, Settings.TwoShips != null && Settings.TwoShips.Value);
-                if (Variant != HubVariant.None) Set(KeyVariant, (byte)HubVariant.None);
-                // The Customizer forgets its ship 2 choice between missions; tell it again what the room's ship 2 uses.
-                if (!ChosenShipB.IsNull) CustomizerLink.SetShip2(ChosenShipB);
+                // The host's last ship count (one for a new player); later changes in this room are kept as they are.
+                object count;
+                if (!TryGet(KeyCount, out count)) Set(KeyCount, Settings.Ships != null ? Mathf.Clamp(Settings.Ships.Value, 1, FleetSlots.MaxCoopShips) : 1);
+                if (Variant != HubVariant.None)
+                {
+                    if (Variant == HubVariant.FleetBattle) ClearTypes();
+                    Set(KeyVariant, (byte)HubVariant.None);
+                }
+                // The Customizer forgets its ship choices between missions; tell it again what the room's ships use.
+                for (int slot = 1; slot < FleetSlots.MaxSlots; slot++)
+                {
+                    GUIDUnion chosen = ChosenLoadout(slot);
+                    if (!chosen.IsNull) CustomizerLink.SetShip(slot + 1, chosen);
+                }
                 FleetShips.ClearRoom();
+                PvpRoster.ClearRoom();
                 PvpTeams.Reset();
             }
             catch (Exception e)
@@ -457,7 +795,7 @@ namespace VoidCrewFleet
         private static void QuestSelectedPostfix()
         {
             if (_applyingVariant || !PhotonNetwork.IsMasterClient || Variant == HubVariant.None) return;
-            Set(KeyVariant, (byte)HubVariant.None);
+            SelectVariantAsHost(HubVariant.None);
         }
 
         /// <summary>
@@ -470,7 +808,7 @@ namespace VoidCrewFleet
             try
             {
                 if (!PhotonNetwork.IsMasterClient || Variant == HubVariant.None) return;
-                Set(KeyVariant, (byte)HubVariant.None);
+                SelectVariantAsHost(HubVariant.None);
                 PvpTeams.Reset();
             }
             catch (Exception e)
@@ -498,11 +836,18 @@ namespace VoidCrewFleet
                 }
 
                 FleetMode mode = PlannedMode;
+                int ships = PlannedShips;
                 int players = PhotonNetwork.PlayerList.Length;
-                if (mode == FleetMode.OneShip && players > MaxCrewPerShip && HostHasFleet)
+                if (mode != FleetMode.PvP && HostHasFleet)
                 {
-                    mode = FleetMode.TwoShips;
-                    Notice.ShowAll(players + " players is more than one ship's crew of " + MaxCrewPerShip + ", so this mission uses two ships.");
+                    int needed = Mathf.Min(FleetSlots.MaxCoopShips, Mathf.CeilToInt(players / (float)MaxCrewPerShip));
+                    if (needed > ships)
+                    {
+                        Notice.ShowAll(players + " players is more than " + ships + (ships == 1 ? " ship's" : " ships'") + " crews of " + MaxCrewPerShip +
+                                       ", so this mission uses " + needed + " ships.");
+                        ships = needed;
+                        mode = FleetMode.Coop;
+                    }
                 }
                 if (mode == FleetMode.OneShip)
                 {
@@ -510,31 +855,42 @@ namespace VoidCrewFleet
                     return;
                 }
 
-                GUIDUnion shipB;
-                string shipBName;
-                ShipLoadout shipBLoadout = PrepareShipB(gameSession, out shipB, out shipBName);
-                if (shipBLoadout == null)
-                {
-                    FleetSession.Attach(gameSession, null);
-                    Notice.ShowAll("Ship 2 could not be prepared, so this mission starts with one ship.");
-                    return;
-                }
                 var plan = new FleetPlan
                 {
                     Mode = mode,
                     ScaleEnemies = Variant == HubVariant.FleetPilgrimage,
-                    ShipB = shipB,
-                    ShipBName = shipBName,
-                    ShipBLoadout = shipBLoadout,
-                    ShipBAlloys = _shipBAlloys,
-                    ShipBHomunculus = shipBLoadout.HomunculusOverride != null && !shipBLoadout.HomunculusOverride.IsNull
-                        ? shipBLoadout.HomunculusOverride.AssetGuid
-                        : GUIDUnion.Empty(),
                     HackCost = Settings.HackTerminalCost.Value,
-                    Arena = Settings.PvpArena.Value
+                    Arena = Settings.PvpArena.Value,
+                    HullMultiplier = mode == FleetMode.PvP ? Mathf.Clamp(Settings.PvpHullMultiplier.Value, 1f, 10f) : 1f
                 };
+                bool pvp = mode == FleetMode.PvP;
+                plan.Ships.Add(PrepareShip1(gameSession, pvp));
+                for (int slot = 1; slot < ships; slot++)
+                {
+                    ShipPlan ship = PrepareShip(gameSession, slot, pvp);
+                    if (ship == null)
+                    {
+                        if (pvp)
+                        {
+                            // A Fleet Battle needs every ship: start as a normal mission instead of an uneven match.
+                            FleetSession.Attach(gameSession, null);
+                            Notice.ShowAll(ShipLabel(slot) + " could not be prepared, so this starts as a one-ship mission (details in the host's BepInEx log).");
+                            return;
+                        }
+                        Notice.ShowAll("Ship " + (slot + 1) + " could not be prepared, so this mission starts with " + slot + (slot == 1 ? " ship." : " ships."));
+                        break;
+                    }
+                    plan.Ships.Add(ship);
+                }
+                if (plan.Ships.Count < 2)
+                {
+                    FleetSession.Attach(gameSession, null);
+                    return;
+                }
                 FleetSession.Attach(gameSession, plan);
-                Log.Info("Starting a fleet mission: " + plan + "; ship 2 is " + shipBName + ".");
+                var names = new StringBuilder();
+                foreach (ShipPlan ship in plan.Ships) names.Append(names.Length > 0 ? "; " : "").Append(FleetSlots.Name(ship.Slot, pvp)).Append(": ").Append(ship.Name);
+                Log.Info("Starting a fleet mission: " + plan + ". " + names + ".");
             }
             catch (Exception e)
             {
@@ -545,47 +901,92 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// Ship 2's loadout for this mission: the one chosen for ship 2 when the mission's loadout rules allow it (a CUSTOM one
-        /// is built by the Ship Customizer), otherwise a copy of exactly what ship 1 spawns with. That copy includes ship 1's
-        /// CUSTOM loadout, or what the Customizer fell back to, because this prefix runs after the Customizer's.
+        /// Ship 1 is the game's own ship. When the host forced a type and ship 1's loadout isn't of it (a SELECT that slipped
+        /// through), it starts with that type's default loadout instead.
         /// </summary>
-        private static int _shipBAlloys = -2;
-
-        private static ShipLoadout PrepareShipB(GameSession session, out GUIDUnion guid, out string name)
+        private static ShipPlan PrepareShip1(GameSession session, bool pvp)
         {
-            _shipBAlloys = -2;
-            ShipLoadoutDataDef chosen = LoadoutDef(ChosenShipB);
+            var ship = new ShipPlan { Slot = 0, Team = 0, Type = ForcedType(0) };
+            ShipLoadoutDataDef def = LoadoutDef(session.ToLoadShipGuid) ?? ShipADef;
+            if (!ship.Type.IsNull && def != null && TypeOf(def) != ship.Type)
+            {
+                ShipLoadoutDataDef standard = FleetSlots.DefaultLoadout(ship.Type);
+                if (standard != null && standard.Asset != null && standard.Asset.ShipLoadout != null)
+                {
+                    session.ToLoadShipGuid = standard.AssetGuid;
+                    session.ToLoadShipData = ShipLoadout.FromJObject(standard.Asset.ShipLoadout.AsJObject());
+                    Notice.ShowAll(ShipLabel(0) + " must be a " + FleetSlots.TypeName(ship.Type) + ", so it starts with " + DescribeLoadout(standard) + ".");
+                    def = standard;
+                }
+            }
+            ship.Loadout = session.ToLoadShipGuid;
+            ship.Name = DescribeLoadout(def);
+            return ship;
+        }
+
+        /// <summary>
+        /// A ship 2-6's loadout for this mission: the one chosen for it when the mission's loadout rules allow it (a CUSTOM one
+        /// is built by the Ship Customizer); else, in co-op when its type allows ship 1's, a copy of exactly what ship 1 spawns
+        /// with (ship 1's CUSTOM included: this prefix runs after the Customizer's); else its type's default loadout. Null when
+        /// nothing can be used.
+        /// </summary>
+        private static ShipPlan PrepareShip(GameSession session, int slot, bool pvp)
+        {
+            var ship = new ShipPlan { Slot = slot, Team = FleetSlots.TeamOf(slot, pvp), Type = ForcedType(slot) };
+            ShipLoadoutDataDef chosen = LoadoutDef(ChosenLoadout(slot));
+            if (chosen != null && !ship.Type.IsNull && TypeOf(chosen) != ship.Type) chosen = null;
             if (chosen != null && !AllowedByQuest(session, chosen))
             {
-                Notice.ShowAll("This mission only allows certain loadouts, so ship 2 starts as a copy of ship 1.");
+                Notice.ShowAll("This mission only allows certain loadouts, so " + ShipLabel(slot) + " doesn't get " + DescribeLoadout(chosen) + ".");
                 chosen = null;
             }
             if (chosen != null && CustomizerLink.IsCustom(chosen.AssetGuid))
             {
-                ShipLoadout custom = CustomizerLink.BuildShip2(chosen.AssetGuid);
+                ShipLoadout custom = CustomizerLink.BuildShip(slot + 1, chosen.AssetGuid);
                 if (custom != null)
                 {
-                    guid = chosen.AssetGuid;
-                    name = DescribeLoadout(chosen);
+                    ship.Loadout = chosen.AssetGuid;
+                    ship.Name = DescribeLoadout(chosen);
+                    ship.Built = custom;
                     // Its CUSTOM starting alloys, or the game's own amount when it has none set.
-                    _shipBAlloys = Math.Max(-1, CustomizerLink.GetShip2Alloys(chosen.AssetGuid));
-                    return custom;
+                    ship.StartAlloys = Math.Max(-1, CustomizerLink.GetShipAlloys(slot + 1, chosen.AssetGuid));
+                    ship.Homunculus = HomunculusOf(custom);
+                    return ship;
                 }
                 // CUSTOM can't be used for this mission (the Customizer said why): its game loadout instead.
                 chosen = CustomizerLink.GetStandIn(chosen.AssetGuid);
             }
+
+            ShipLoadoutDataDef shipA = LoadoutDef(session.ToLoadShipGuid) ?? ShipADef;
+            GUIDUnion shipAType = TypeOf(shipA);
+            if (chosen == null && (pvp || (!ship.Type.IsNull && ship.Type != shipAType)))
+            {
+                ShipLoadoutDataDef standard = FleetSlots.DefaultLoadout(ship.Type.IsNull ? shipAType : ship.Type);
+                if (standard != null && AllowedByQuest(session, standard)) chosen = standard;
+                else if (standard != null) Notice.ShowAll("This mission only allows certain loadouts, so " + ShipLabel(slot) + " is a copy of ship 1.");
+            }
             if (chosen != null && chosen.Asset != null && chosen.Asset.ShipLoadout != null)
             {
-                guid = chosen.AssetGuid;
-                name = DescribeLoadout(chosen);
-                _shipBAlloys = -1;
-                return ShipLoadout.FromJObject(chosen.Asset.ShipLoadout.AsJObject());
+                ship.Loadout = chosen.AssetGuid;
+                ship.Name = DescribeLoadout(chosen);
+                ship.Built = ShipLoadout.FromJObject(chosen.Asset.ShipLoadout.AsJObject());
+                ship.StartAlloys = -1;
+                ship.Homunculus = HomunculusOf(ship.Built);
+                return ship;
             }
-            guid = session.ToLoadShipGuid;
-            ShipLoadoutDataDef shipA = ShipADef;
-            if (shipA == null) shipA = LoadoutDef(session.ToLoadShipGuid);
-            name = "a copy of ship 1 (" + DescribeLoadout(shipA) + ")";
-            return session.ToLoadShipData != null ? ShipLoadout.FromJObject(session.ToLoadShipData.AsJObject()) : null;
+            if (session.ToLoadShipData == null) return null;
+            // A copy of ship 1: spawned from the very ShipLoadout ship 1 is spawned from.
+            ship.Loadout = GUIDUnion.Empty();
+            ship.Name = "a copy of ship 1 (" + DescribeLoadout(shipA) + ")";
+            ship.Built = null;
+            ship.StartAlloys = -2;
+            ship.Homunculus = HomunculusOf(session.ToLoadShipData);
+            return ship;
+        }
+
+        private static GUIDUnion HomunculusOf(ShipLoadout loadout)
+        {
+            return loadout != null && loadout.HomunculusOverride != null && !loadout.HomunculusOverride.IsNull ? loadout.HomunculusOverride.AssetGuid : GUIDUnion.Empty();
         }
 
         /// <summary>Whether the mission's loadout rules (challenges, Survivor) allow a loadout; CUSTOM is never on such a list.</summary>
@@ -600,7 +1001,7 @@ namespace VoidCrewFleet
             }
             catch (Exception e)
             {
-                Log.Failure("Checking ship 2 against the mission's loadout rules", e);
+                Log.Failure("Checking a ship against the mission's loadout rules", e);
                 return true;
             }
         }
@@ -608,12 +1009,17 @@ namespace VoidCrewFleet
         /// <summary>A few times a second, from the runtime: raise Changed when the room's fleet choices changed.</summary>
         public static void Poll()
         {
-            HubShipManager manager = HubShipManager.Instance;
-            ShipLoadoutDataDef shipA = ShipADef;
-            string signature = PhotonNetwork.InRoom
-                ? (HostHasFleet ? "1" : "0") + "|" + TwoShips + "|" + ChosenShipB.AsHex() + "|" + (byte)Variant + "|" +
-                  (shipA != null ? shipA.AssetGuid.AsHex() : "")
-                : null;
+            string signature = null;
+            if (PhotonNetwork.InRoom)
+            {
+                ShipLoadoutDataDef shipA = ShipADef;
+                var text = new StringBuilder();
+                text.Append(HostHasFleet ? '1' : '0').Append('|').Append(CoopShips).Append('|').Append(ShipsPerTeam).Append('|').Append((byte)Variant)
+                    .Append('|').Append(MirrorTypes ? 'M' : '-').Append('|').Append(shipA != null ? shipA.AssetGuid.AsHex() : "");
+                for (int slot = 0; slot < FleetSlots.MaxSlots; slot++)
+                    text.Append('|').Append(GetGuid(KeyType + (slot + 1)).AsHex()).Append('/').Append(ChosenLoadout(slot).AsHex());
+                signature = text.ToString();
+            }
             if (signature == _lastSignature) return;
             _lastSignature = signature;
             Action changed = Changed;

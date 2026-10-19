@@ -9,10 +9,10 @@ using UnityEngine;
 namespace VoidCrewFleet
 {
     /// <summary>
-    /// Puts the second player ship into the world. The host spawns ship 1 as the game does (moved to its side), then ship 2
-    /// through the same ShipLoadout.InitializeShip the game uses, so ship 2 is a room object cached for late joiners like
-    /// ship 1. Co-op ships start side by side; PvP ships start on opposite sides facing each other. The host then
-    /// publishes which ship is which and who crews which (FleetShips).
+    /// Puts ships 2-6 into the world. The host spawns ship 1 as the game does (moved to its place in the formation), then
+    /// the other ships through the same ShipLoadout.InitializeShip the game uses, so they are room objects cached for late
+    /// joiners like ship 1. Co-op ships start side by side; in PvP each team's ships start side by side on its own side of
+    /// the arena, facing the other team. The host then publishes which ship is which and who crews which (FleetShips).
     /// </summary>
     internal static class ShipSpawn
     {
@@ -66,20 +66,46 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- spawning
 
-        /// <summary>Where the two ships start, centred on where the game puts its one ship.</summary>
-        private static void StartPositions(FleetPlan plan, out Vector3 a, out Quaternion ra, out Vector3 b, out Quaternion rb)
+        /// <summary>How far apart a PvP team's own ships start (side by side).</summary>
+        public static float TeamSpacing
         {
+            get { return Mathf.Max(Settings.ShipSpacing.Value, 250f); }
+        }
+
+        /// <summary>A place in a line of ships side by side: the offset of ship index (0-based) of count along "right".</summary>
+        public static Vector3 LineOffset(int index, int count, Vector3 right, float spacing)
+        {
+            return right * ((index - (count - 1) * 0.5f) * spacing);
+        }
+
+        /// <summary>Where each ship starts, by slot, centred on where the game puts its one ship.</summary>
+        private static void StartPoses(FleetPlan plan, out Vector3[] positions, out Quaternion[] rotations)
+        {
+            int count = plan.ShipCount;
+            positions = new Vector3[count];
+            rotations = new Quaternion[count];
             if (plan.Mode == FleetMode.PvP)
             {
-                // On opposite sides of the arena's centre, facing each other (the origin without an arena).
-                PvpArena.StartPositions(Settings.PvpStartDistance.Value, out a, out ra, out b, out rb);
+                // Each team on its side of the arena's centre, facing the other (the origin without an arena), its ships side
+                // by side.
+                Vector3 blue, red;
+                Quaternion blueRotation, redRotation;
+                PvpArena.StartPositions(Settings.PvpStartDistance.Value, out blue, out blueRotation, out red, out redRotation);
+                int perTeam = Mathf.Max(1, plan.ShipsPerTeam);
+                for (int slot = 0; slot < count; slot++)
+                {
+                    bool isBlue = slot % 2 == 0;
+                    Quaternion rotation = isBlue ? blueRotation : redRotation;
+                    positions[slot] = (isBlue ? blue : red) + LineOffset(slot / 2, perTeam, rotation * Vector3.right, TeamSpacing);
+                    rotations[slot] = rotation;
+                }
                 return;
             }
-            float side = Settings.ShipSpacing.Value * 0.5f;
-            a = new Vector3(-side, 0f, 0f);
-            ra = Quaternion.identity;
-            b = new Vector3(side, 0f, 0f);
-            rb = Quaternion.identity;
+            for (int slot = 0; slot < count; slot++)
+            {
+                positions[slot] = LineOffset(slot, count, Vector3.right, Settings.ShipSpacing.Value);
+                rotations[slot] = Quaternion.identity;
+            }
         }
 
         [GamePatch(Feature, "GameSession", "LoadShip", PatchKind.Prefix)]
@@ -89,10 +115,12 @@ namespace VoidCrewFleet
             try
             {
                 FleetPlan plan = FleetSession.Current;
-                if (!PhotonNetwork.IsMasterClient || plan == null || plan.Mode == FleetMode.OneShip || plan.ShipBLoadout == null) return;
-                Vector3 b;
-                Quaternion rb;
-                StartPositions(plan, out _positionA, out _rotationA, out b, out rb);
+                if (!PhotonNetwork.IsMasterClient || plan == null || plan.Mode == FleetMode.OneShip || plan.ShipCount < 2) return;
+                Vector3[] positions;
+                Quaternion[] rotations;
+                StartPoses(plan, out positions, out rotations);
+                _positionA = positions[0];
+                _rotationA = rotations[0];
                 _spawningShipA = true;
             }
             catch (Exception e)
@@ -111,124 +139,77 @@ namespace VoidCrewFleet
             Rotation = _rotationA;
         }
 
-        /// <summary>Host: right after ship 1, spawn ship 2 and say which is which and who crews which.</summary>
+        /// <summary>Host: right after ship 1, spawn ships 2-6 and say which is which and who crews which.</summary>
         [GamePatch(Feature, "GameSession", "LoadShip", PatchKind.Postfix)]
-        private static void LoadShipPostfix(PlayerControlledShip __result)
+        private static void LoadShipPostfix(GameSession __instance, PlayerControlledShip __result)
         {
             _spawningShipA = false;
             if (!PhotonNetwork.IsMasterClient) return;
             FleetPlan plan = FleetSession.Current;
-            if (plan == null || plan.Mode == FleetMode.OneShip || plan.ShipBLoadout == null)
+            if (plan == null || plan.Mode == FleetMode.OneShip || plan.ShipCount < 2)
             {
                 FleetShips.ClearRoom();
                 return;
             }
             if (__result == null)
             {
-                Log.Warn("Ship 1 did not spawn, so ship 2 is not spawned either.");
+                Log.Warn("Ship 1 did not spawn, so the other ships are not spawned either.");
                 return;
             }
             try
             {
-                Vector3 a, b;
-                Quaternion ra, rb;
-                StartPositions(plan, out a, out ra, out b, out rb);
-                PlayerControlledShip shipB = plan.ShipBLoadout.InitializeShip(b, rb);
-                if (shipB == null)
+                Vector3[] positions;
+                Quaternion[] rotations;
+                StartPoses(plan, out positions, out rotations);
+                var ships = new PlayerControlledShip[plan.ShipCount];
+                ships[0] = __result;
+                for (int slot = 1; slot < ships.Length; slot++)
                 {
-                    Notice.ShowAll("Ship 2 could not be spawned; everyone plays on ship 1.");
-                    return;
+                    ShipPlan ship = plan.Ships[slot];
+                    // A copy of ship 1 spawns from the very loadout ship 1 was just spawned from (Ship Customizer matches
+                    // each spawned ship to its loadout by reference).
+                    ShipLoadout loadout = ship.Built ?? __instance.ToLoadShipData;
+                    try
+                    {
+                        ships[slot] = loadout != null ? loadout.InitializeShip(positions[slot], rotations[slot]) : null;
+                    }
+                    catch (Exception e)
+                    {
+                        Log.Failure("Spawning " + FleetSlots.Name(slot, plan.Mode == FleetMode.PvP), e);
+                    }
+                    if (ships[slot] == null) Notice.ShowAll(FleetSlots.Name(slot, plan.Mode == FleetMode.PvP) + " could not be spawned; its crew plays on another ship.");
                 }
                 // Teams confirmed in the hub stay: nobody waits on a team screen, everyone spawns aboard their team's ship.
-                bool hubTeams = plan.Mode == FleetMode.PvP && PvpTeams.Locked;
-                if (plan.Mode == FleetMode.PvP) PvpTeams.Reset(hubTeams);
-                FleetShips.PublishShips(__result, shipB);
-                Dictionary<int, int> crews = InitialCrews(plan, hubTeams);
+                bool pvp = plan.Mode == FleetMode.PvP;
+                bool hubTeams = pvp && PvpTeams.Locked;
+                if (pvp) PvpTeams.Reset(hubTeams);
+                FleetShips.PublishShips(ships);
+                var alive = new List<int>();
+                for (int slot = 0; slot < ships.Length; slot++)
+                {
+                    if (ships[slot] != null) alive.Add(slot);
+                }
+                Dictionary<int, CrewEntry> crews = pvp && !hubTeams
+                    ? new Dictionary<int, CrewEntry>()
+                    : CrewRules.PlaceEveryone(FleetShips.Crews(), PlayerActors(), alive, pvp);
                 FleetShips.PublishCrew(crews);
                 if (hubTeams)
-                    Notice.ShowAll("Fleet Battle: " + PvpTeams.TeamName(0) + " " + crews.Count(p => p.Value == 0) + " against " + PvpTeams.TeamName(1) + " " +
-                                   crews.Count(p => p.Value == 1) + ". Destroy the enemy ship to win!");
-                Log.Info("Ship 2 is in the world, " + Vector3.Distance(a, b).ToString("0") + " m from ship 1 (" + plan + ").");
+                    Notice.ShowAll("Fleet Battle: " + PvpTeams.TeamName(0) + " " + crews.Values.Count(e => e.Team == 0) + " against " + PvpTeams.TeamName(1) + " " +
+                                   crews.Values.Count(e => e.Team == 1) + ". Destroy every enemy ship to win!");
+                Log.Info(alive.Count + " ships are in the world (" + plan + "); crews " + string.Join(", ", crews.Values.Select(e => e.ToString()).ToArray()) + ".");
             }
             catch (Exception e)
             {
-                Log.Failure("Spawning ship 2", e);
-                Notice.ShowAll("Ship 2 could not be spawned; everyone plays on ship 1.");
+                Log.Failure("Spawning the fleet", e);
+                Notice.ShowAll("The other ships could not be spawned; everyone plays on ship 1.");
             }
         }
 
-        /// <summary>
-        /// The starting crews: players split as evenly as possible, alternating in join order. In PvP the teams from the
-        /// hub (anyone without one joins the smaller team); without them nobody is on a team yet, and the players choose
-        /// on the team screen before anyone spawns.
-        /// </summary>
-        private static Dictionary<int, int> InitialCrews(FleetPlan plan, bool hubTeams)
+        /// <summary>The actor numbers of everyone in the room, in join order.</summary>
+        public static List<int> PlayerActors()
         {
-            var crews = new Dictionary<int, int>();
-            if (plan.Mode == FleetMode.PvP)
-            {
-                if (!hubTeams) return crews;
-                Dictionary<int, int> picked = FleetShips.CrewMap();
-                foreach (Photon.Realtime.Player player in PhotonNetwork.PlayerList.OrderBy(p => p.ActorNumber))
-                {
-                    int team;
-                    if (picked.TryGetValue(player.ActorNumber, out team) && (team == 0 || team == 1)) crews[player.ActorNumber] = team;
-                }
-                foreach (Photon.Realtime.Player player in PhotonNetwork.PlayerList.OrderBy(p => p.ActorNumber))
-                {
-                    if (crews.ContainsKey(player.ActorNumber)) continue;
-                    crews[player.ActorNumber] = crews.Count(p => p.Value == 1) < crews.Count(p => p.Value == 0) ? 1 : 0;
-                }
-                return crews;
-            }
-            int slot = 0;
-            foreach (Photon.Realtime.Player player in PhotonNetwork.PlayerList.OrderBy(p => p.ActorNumber))
-            {
-                crews[player.ActorNumber] = slot;
-                slot = 1 - slot;
-            }
-            return crews;
+            return PhotonNetwork.PlayerList.Select(p => p.ActorNumber).OrderBy(a => a).ToList();
         }
 
-        /// <summary>
-        /// Host, a few times a second during a two-ship mission: everyone in the room has a ship. Players who joined
-        /// late go to the ship with the smaller crew (in PvP, the smaller team, once the teams are confirmed: before that
-        /// the players choose); players who left are taken off the list.
-        /// </summary>
-        public static void KeepCrewsUpToDate()
-        {
-            if (!PhotonNetwork.IsMasterClient || !PhotonNetwork.InRoom || !FleetShips.Active) return;
-            FleetPlan plan = FleetSession.Current;
-            if (plan == null || plan.Mode == FleetMode.OneShip) return;
-            bool pvp = plan.Mode == FleetMode.PvP;
-            bool assign = !pvp || PvpTeams.Locked;
-            Dictionary<int, int> crews = FleetShips.CrewMap();
-            bool changed = false;
-            var present = new HashSet<int>();
-            foreach (Photon.Realtime.Player player in PhotonNetwork.PlayerList)
-            {
-                present.Add(player.ActorNumber);
-                if (!assign || crews.ContainsKey(player.ActorNumber)) continue;
-                int countA = crews.Count(p => p.Value == 0 && InRoom(p.Key));
-                int countB = crews.Count(p => p.Value == 1 && InRoom(p.Key));
-                crews[player.ActorNumber] = countB < countA ? 1 : 0;
-                changed = true;
-                string name = string.IsNullOrEmpty(player.NickName) ? "Player " + player.ActorNumber : player.NickName;
-                if (pvp) Notice.ShowAll(name + " joins the " + PvpTeams.TeamName(crews[player.ActorNumber]) + " team.");
-                else Log.Info(name + " joins the crew of ship " + (crews[player.ActorNumber] + 1) + ".");
-            }
-            foreach (int actor in crews.Keys.ToList())
-            {
-                if (present.Contains(actor)) continue;
-                crews.Remove(actor);
-                changed = true;
-            }
-            if (changed) FleetShips.PublishCrew(crews);
-        }
-
-        private static bool InRoom(int actor)
-        {
-            return PhotonNetwork.CurrentRoom != null && PhotonNetwork.CurrentRoom.GetPlayer(actor) != null;
-        }
     }
 }

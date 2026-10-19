@@ -154,7 +154,7 @@ namespace VoidCrewFleet
             }
             Player listener = LocalPlayer.Instance;
             PlayerControlledShip listenerShip = listener != null && !listener.IsDead ? FleetShips.InteriorAt(listener.transform.position) : null;
-            int myTeam = FleetShips.CrewSlot(FleetShips.LocalActor);
+            int myTeam = FleetShips.TeamOfActor(FleetShips.LocalActor);
             bool locked = PvpTeams.Locked;
             foreach (string cloudId in manager.FmodEvents.Keys) Audibility[cloudId] = Audible(cloudId, listener, listenerShip, myTeam, locked);
             GateUntapped(manager, listener, listenerShip, myTeam, locked);
@@ -165,8 +165,28 @@ namespace VoidCrewFleet
             int actor;
             if (!ActorOfVoice.TryGetValue(cloudId, out actor)) return false;
             if (!locked) return true;
-            int speakerTeam = FleetShips.CrewSlot(actor);
+            return Hears(actor, listener, listenerShip, myTeam);
+        }
+
+        /// <summary>
+        /// Whether the local player hears another player (voice and text chat), once the teams are confirmed:
+        /// - spectators whose ship was destroyed (DEAD) are heard by the other dead spectators only, so nobody who still plays
+        ///   hears a call-out from someone watching the enemy;
+        /// - spectators waiting for a place are heard by the dead and by their own team's other waiting players;
+        /// - a spectator hears their own team's players, like a team radio;
+        /// - players still in the fight: the ship they are aboard, or 50 m in open space; a player without a body (waiting to
+        ///   respawn) is heard by their own team only.
+        /// </summary>
+        private static bool Hears(int actor, Player listener, PlayerControlledShip listenerShip, int myTeam)
+        {
+            int speakerTeam = FleetShips.TeamOfActor(actor);
             bool teammate = myTeam >= 0 && speakerTeam == myTeam;
+            CrewState speakerOut = Spectator.WatchState(actor);
+            CrewState listenerOut = Spectator.WatchState(FleetShips.LocalActor);
+            if (speakerOut == CrewState.Dead) return listenerOut == CrewState.Dead;
+            if (speakerOut == CrewState.Waiting)
+                return listenerOut == CrewState.Dead || (listenerOut == CrewState.Waiting && (teammate || myTeam < 0 || speakerTeam < 0));
+            if (listenerOut != CrewState.Playing) return teammate;
             Player speaker = FleetShips.CharacterOf(actor);
             if (speaker == null || speaker.IsDead || listener == null || listener.IsDead) return teammate;
             PlayerControlledShip speakerShip = FleetShips.InteriorAt(speaker.transform.position);
@@ -267,6 +287,35 @@ namespace VoidCrewFleet
         private static bool ParticipantSpeechPrefix(VivoxParticipant participant)
         {
             return participant == null || !participant.SpeechDetected || !Silenced(participant.PlayerId);
+        }
+
+        // ---------------------------------------------------------------- text chat
+
+        /// <summary>
+        /// Text chat follows the spectators' part of the voice rules (typing has no range): a spectator's messages reach only
+        /// the players who could hear them, so nobody watching the enemy can write a call-out to their team.
+        /// </summary>
+        [GamePatch(Feature, "Gameplay.Chat.TextChat", "IncomingMessage", PatchKind.Prefix)]
+        private static bool ChatPrefix(string cloudID)
+        {
+            try
+            {
+                if (!Active || !PvpTeams.Locked) return true;
+                Photon.Realtime.Player sender = VoipService.CloudIDToPlayer(cloudID);
+                if (sender == null || sender.IsLocal) return true;
+                CrewState speakerOut = Spectator.WatchState(sender.ActorNumber);
+                CrewState listenerOut = Spectator.WatchState(FleetShips.LocalActor);
+                if (speakerOut == CrewState.Playing) return true;
+                int myTeam = FleetShips.TeamOfActor(FleetShips.LocalActor);
+                int theirTeam = FleetShips.TeamOfActor(sender.ActorNumber);
+                if (speakerOut == CrewState.Dead) return listenerOut == CrewState.Dead;
+                return listenerOut == CrewState.Dead || (listenerOut == CrewState.Waiting && (myTeam == theirTeam || myTeam < 0 || theirTeam < 0));
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking who may read a chat message", e);
+                return true;
+            }
         }
     }
 }

@@ -9,12 +9,18 @@ using ResourceAssets;
 namespace VoidCrewFleet
 {
     /// <summary>
-    /// PvP teams. Team 1 (BLUE) crews ship 1 and team 2 (RED) crews ship 2; a team is simply a crew (FleetShips' crew
-    /// list). The teams are picked in the hub: when the host chooses FLEET BATTLE, everyone sees the team screen
-    /// (PvpTeamScreen), picks a side, and the host may move anyone, then confirms. Teams must be even: with an odd number
-    /// of players one team has one extra. The host starts the match by sitting in the ready room, and everyone spawns
-    /// aboard their team's ship. Without teams from the hub (an older host flow), the team screen shows at the start of
-    /// the match instead and holds every spawn until confirmed. Players who join later go to the smaller team.
+    /// Who crews which ship, picked in the hub on the lobby screen (PvpTeamScreen), and the PvP teams that come with it. A
+    /// player's ship is decided there for the whole mission: they always spawn on it, and if it is destroyed they aren't
+    /// re-cloned again (ShipDeath).
+    /// - Co-op with several ships: the screen opens for everyone; players pick the ship they crew, crews stay even. The host
+    ///   may move anyone and auto-balance, then confirms the crews; the mission starts the usual way once they are.
+    /// - Fleet Battle: each team has one to three ships; a player picks a ship, and with it the team (BLUE has ships 1, 3
+    ///   and 5, RED ships 2, 4 and 6). Teams must be even (with an odd number of players one team has one extra), crews stay
+    ///   even and every ship needs a crew. The host may move anyone, then confirms. The host starts the match by sitting in
+    ///   the ready room, and everyone spawns aboard their ship. Without teams from the hub (an older host flow), the team
+    ///   screen shows at the start of the match instead and holds every spawn until confirmed. Players who join later go to
+    ///   the smaller team.
+    /// Players who join the hub after the confirmation go to the smallest crew (of the smaller team).
     /// </summary>
     internal static class PvpTeams
     {
@@ -22,7 +28,7 @@ namespace VoidCrewFleet
 
         private const string KeyLocked = "VCF_TeamsLocked";
 
-        /// <summary>True once the host has confirmed the teams for this match.</summary>
+        /// <summary>True once the host has confirmed the teams (Fleet Battle) or the crews (co-op) for this mission.</summary>
         public static bool Locked
         {
             get
@@ -39,14 +45,14 @@ namespace VoidCrewFleet
             get { return FleetSession.IsPvP && !Locked && !GameSessionManager.InHub; }
         }
 
-        /// <summary>The hub's mission is FLEET BATTLE and the teams aren't confirmed yet: everyone picks a team.</summary>
-        public static bool HubChoosing
+        /// <summary>The hub plans a mission with several ships (FLEET BATTLE, or co-op with two or three ships).</summary>
+        public static bool HubFleetPlanned
         {
             get
             {
                 try
                 {
-                    return GameSessionManager.InHub && HubFleet.HostHasFleet && HubFleet.Variant == HubVariant.FleetBattle && !Locked;
+                    return GameSessionManager.InHub && HubFleet.HostHasFleet && HubFleet.PlannedMode != FleetMode.OneShip;
                 }
                 catch
                 {
@@ -55,196 +61,236 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>Teams are being picked, in the hub or at the start of a match.</summary>
+        /// <summary>The hub plans a co-op mission with several ships.</summary>
+        public static bool CoopPlanned
+        {
+            get
+            {
+                try
+                {
+                    return GameSessionManager.InHub && HubFleet.HostHasFleet && HubFleet.PlannedMode == FleetMode.Coop;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        /// <summary>The hub plans a fleet mission whose crews (and teams) aren't confirmed yet: everyone picks a ship.</summary>
+        public static bool HubChoosing
+        {
+            get { return HubFleetPlanned && !Locked; }
+        }
+
+        /// <summary>Ships are being picked, in the hub (teams or co-op crews) or at the start of a match (teams).</summary>
         public static bool PickingTeams
         {
             get { return Choosing || HubChoosing; }
         }
 
-        public static int PlayerCount
+        /// <summary>Co-op crews are being picked in the hub.</summary>
+        public static bool CoopPicking
         {
-            get { return PhotonNetwork.PlayerList.Length; }
+            get { return CoopPlanned && !Locked; }
         }
 
-        /// <summary>The most players a team may have: half the room, rounded up.</summary>
-        public static int MaxPerTeam
+        /// <summary>Ships can be picked right now (Fleet Battle teams, or co-op crews in the hub).</summary>
+        public static bool Picking
         {
-            get { return Math.Max(1, (PlayerCount + 1) / 2); }
+            get { return PickingTeams; }
         }
 
-        public static int Count(Dictionary<int, int> teams, int team)
+        /// <summary>How many ships players pick from: the hub's planned ships, or the running mission's.</summary>
+        public static int ShipCount
         {
-            int count = 0;
-            foreach (Player player in PhotonNetwork.PlayerList)
-            {
-                int value;
-                if (teams.TryGetValue(player.ActorNumber, out value) && value == team) count++;
-            }
-            return count;
-        }
-
-        /// <summary>Every player is on a team and the teams differ by at most one.</summary>
-        public static bool Balanced(Dictionary<int, int> teams, out string why)
-        {
-            int unassigned = PhotonNetwork.PlayerList.Count(p => !teams.ContainsKey(p.ActorNumber));
-            if (unassigned > 0)
-            {
-                why = unassigned + (unassigned == 1 ? " player hasn't" : " players haven't") + " picked a team yet.";
-                return false;
-            }
-            int a = Count(teams, 0);
-            int b = Count(teams, 1);
-            if (Math.Abs(a - b) > 1)
-            {
-                why = "The teams are " + a + " against " + b + "; they may differ by one at most.";
-                return false;
-            }
-            why = null;
-            return true;
+            get { return GameSessionManager.InHub ? HubFleet.PlannedShips : FleetSession.ShipCount; }
         }
 
         public static string TeamName(int team)
         {
-            return team == 0 ? "BLUE" : "RED";
+            return team == 0 ? "BLUE" : (team == 1 ? "RED" : "NO TEAM");
         }
 
-        /// <summary>"Ship 1: Frigate - Rookie" from the mission's loadouts.</summary>
-        public static string ShipName(int team)
+        /// <summary>A ship's loadout as "Frigate - Rookie" (no "METEM"): in the hub as chosen now, in a mission as it spawned.</summary>
+        public static string ShipName(int slot)
         {
             try
             {
                 if (GameSessionManager.InHub)
                 {
-                    // In the hub: the loadouts chosen at the terminal (ship 2 copies ship 1 until it has its own).
-                    if (team == 1 && HubFleet.ChosenShipB.IsNull) return "as ship 1 (" + HubFleet.DescribeLoadout(HubFleet.ShipADef).Replace("METEM ", "") + ")";
-                    return HubFleet.DescribeLoadout(team == 0 ? HubFleet.ShipADef : HubFleet.ShipBDef).Replace("METEM ", "");
+                    if (HubFleet.CopiesShip1(slot)) return "as ship 1 (" + HubFleet.DescribeLoadout(HubFleet.ShipADef).Replace("METEM ", "") + ")";
+                    return HubFleet.ShipDescription(slot).Replace("METEM ", "");
                 }
-                GameSession session = GameSessionManager.ActiveSession;
                 FleetPlan plan = FleetSession.Current;
-                if (team == 1 && plan != null && !string.IsNullOrEmpty(plan.ShipBName)) return plan.ShipBName.Replace("METEM ", "");
-                GUIDUnion guid = team == 0 ? (session != null ? session.ToLoadShipGuid : GUIDUnion.Empty()) : (plan != null ? plan.ShipB : GUIDUnion.Empty());
-                return HubFleet.DescribeLoadout(HubFleet.LoadoutDef(guid)).Replace("METEM ", "");
+                ShipPlan ship = plan != null ? plan.Ship(slot) : null;
+                if (ship != null && !string.IsNullOrEmpty(ship.Name)) return ship.Name.Replace("METEM ", "");
+                GameSession session = GameSessionManager.ActiveSession;
+                return HubFleet.DescribeLoadout(HubFleet.LoadoutDef(session != null ? session.ToLoadShipGuid : GUIDUnion.Empty())).Replace("METEM ", "");
             }
             catch
             {
-                return "ship " + (team + 1);
+                return "ship " + (slot + 1);
             }
         }
 
         // ---------------------------------------------------------------- requests
 
-        public static void Join(int team)
+        /// <summary>Asks the host to crew a ship (in Fleet Battle that picks the team too).</summary>
+        public static void Join(int slot)
         {
-            Net.ToHost(Msg.TeamRequest, team);
+            Net.ToHost(Msg.CrewRequest, slot);
         }
 
-        /// <summary>Host only: put a player on a team (or take them off it with -1), whatever they picked.</summary>
-        public static void Move(int actor, int team)
+        /// <summary>Host only: put a player on a ship (or take them off every ship with -1), whatever they picked.</summary>
+        public static void Move(int actor, int slot)
         {
-            Net.ToHost(Msg.TeamMove, actor, team);
+            Net.ToHost(Msg.CrewMove, actor, slot);
+        }
+
+        private static string ShipLabel(int slot)
+        {
+            return FleetSlots.Name(slot, FleetApi.IsTeamMatch);
         }
 
         public static void Listen()
         {
-            Net.On(Msg.TeamRequest, (sender, data) =>
+            Net.On(Msg.CrewRequest, (sender, data) =>
             {
-                if (!PhotonNetwork.IsMasterClient || !PickingTeams) return;
-                int team = Net.Get(data, 0, -1);
-                if (team != 0 && team != 1) return;
-                Dictionary<int, int> teams = FleetShips.CrewMap();
-                int current;
-                if (teams.TryGetValue(sender, out current) && current == team) return;
-                if (Count(teams, team) >= MaxPerTeam)
+                if (!PhotonNetwork.IsMasterClient || !Picking) return;
+                int slot = Net.Get(data, 0, -1);
+                Dictionary<int, CrewEntry> crews = FleetShips.Crews();
+                CrewEntry current;
+                if (crews.TryGetValue(sender, out current) && current.Slot == slot && current.State == CrewState.Playing) return;
+                bool teamMatch = FleetApi.IsTeamMatch;
+                string refusal = CrewRules.CanJoin(crews, ShipSpawn.PlayerActors(), sender, slot, ShipCount, teamMatch, ShipLabel, TeamName);
+                if (refusal != null)
                 {
-                    Net.ToActor(sender, Msg.Notice, TeamName(team) + " is full: teams stay even. Pick " + TeamName(1 - team) + ", or ask the host to move someone.");
+                    Net.ToActor(sender, Msg.Notice, refusal);
                     return;
                 }
-                teams[sender] = team;
-                FleetShips.PublishCrew(teams);
+                crews[sender] = CrewEntry.Play(sender, CrewRules.TeamOf(slot, teamMatch), slot);
+                FleetShips.PublishCrew(crews);
             });
-            Net.On(Msg.TeamMove, (sender, data) =>
+            Net.On(Msg.CrewMove, (sender, data) =>
             {
-                if (!PhotonNetwork.IsMasterClient || !PickingTeams) return;
+                if (!PhotonNetwork.IsMasterClient || !Picking) return;
                 if (PhotonNetwork.LocalPlayer == null || sender != PhotonNetwork.LocalPlayer.ActorNumber) return;
                 int actor = Net.Get(data, 0, -1);
-                int team = Net.Get(data, 1, -1);
-                Dictionary<int, int> teams = FleetShips.CrewMap();
-                if (team == 0 || team == 1) teams[actor] = team;
-                else teams.Remove(actor);
-                FleetShips.PublishCrew(teams);
+                int slot = Net.Get(data, 1, -1);
+                Dictionary<int, CrewEntry> crews = FleetShips.Crews();
+                if (slot >= 0 && slot < ShipCount) crews[actor] = CrewEntry.Play(actor, CrewRules.TeamOf(slot, FleetApi.IsTeamMatch), slot);
+                else crews.Remove(actor);
+                FleetShips.PublishCrew(crews);
             });
         }
 
-        /// <summary>Host only: everyone without a team joins the smaller one, then the larger team gives players away until even.</summary>
+        /// <summary>Host only: everyone on a ship, then even teams (Fleet Battle) and even crews; players keep their pick where they can.</summary>
         public static void AutoBalance()
         {
-            if (!PhotonNetwork.IsMasterClient) return;
-            Dictionary<int, int> teams = FleetShips.CrewMap();
-            foreach (Player player in PhotonNetwork.PlayerList.OrderBy(p => p.ActorNumber))
-            {
-                if (!teams.ContainsKey(player.ActorNumber)) teams[player.ActorNumber] = Count(teams, 0) <= Count(teams, 1) ? 0 : 1;
-            }
-            int guard = 32;
-            while (Math.Abs(Count(teams, 0) - Count(teams, 1)) > 1 && guard-- > 0)
-            {
-                int big = Count(teams, 0) > Count(teams, 1) ? 0 : 1;
-                Player last = PhotonNetwork.PlayerList.Where(p => teams[p.ActorNumber] == big).OrderByDescending(p => p.ActorNumber).First();
-                teams[last.ActorNumber] = 1 - big;
-            }
-            FleetShips.PublishCrew(teams);
+            if (!PhotonNetwork.IsMasterClient || !Picking) return;
+            FleetShips.PublishCrew(CrewRules.Balance(FleetShips.Crews(), ShipSpawn.PlayerActors(), ShipCount, FleetApi.IsTeamMatch));
         }
 
-        /// <summary>Host only: lock the teams and let everyone spawn aboard their team's ship.</summary>
+        /// <summary>Null when the teams can be confirmed now; otherwise why not.</summary>
+        public static string CheckTeams()
+        {
+            return CrewRules.CheckTeams(FleetShips.Crews(), ShipSpawn.PlayerActors(), ShipCount, ShipLabel);
+        }
+
+        /// <summary>Co-op: null when the crews can be confirmed now; otherwise why not.</summary>
+        public static string CheckCrews()
+        {
+            return CrewRules.CheckCrews(FleetShips.Crews(), ShipSpawn.PlayerActors(), ShipCount, ShipLabel);
+        }
+
+        /// <summary>Null when the picks can be confirmed now (teams or co-op crews); otherwise why not.</summary>
+        public static string CheckPicks()
+        {
+            return FleetApi.IsTeamMatch ? CheckTeams() : CheckCrews();
+        }
+
+        /// <summary>Host only: lock the teams (or co-op crews), so everyone spawns aboard their ship.</summary>
         public static void Confirm()
         {
             if (!PhotonNetwork.IsMasterClient || !PickingTeams) return;
             bool inHub = HubChoosing;
-            Dictionary<int, int> teams = FleetShips.CrewMap();
-            string why;
-            if (!Balanced(teams, out why))
+            bool teams = FleetApi.IsTeamMatch;
+            string why = CheckPicks();
+            if (why != null)
             {
-                Notice.Show("Can't start yet: " + why);
+                Notice.Show("Can't confirm yet: " + why);
                 return;
             }
-            FleetShips.PublishCrew(teams);
+            Dictionary<int, CrewEntry> crews = FleetShips.Crews();
+            FleetShips.PublishCrew(crews);
             PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyLocked, true } });
-            Notice.ShowAll("Teams confirmed: " + TeamName(0) + " " + Count(teams, 0) + " against " + TeamName(1) + " " + Count(teams, 1) + ". " +
+            if (!teams)
+            {
+                List<int> actors = ShipSpawn.PlayerActors();
+                Notice.ShowAll("Crews confirmed: " + string.Join(", ", Enumerable.Range(0, ShipCount).Select(s =>
+                               {
+                                   int crew = CrewRules.CrewOf(crews, actors, s);
+                                   return crew + (crew == 1 ? " player on " : " players on ") + ShipLabel(s);
+                               }).ToArray()) + ". Set up your ship at the loadout terminal, then sit in the ready room to start.");
+                return;
+            }
+            int blue = crews.Values.Count(e => e.Team == 0);
+            int red = crews.Values.Count(e => e.Team == 1);
+            Notice.ShowAll("Teams confirmed: " + TeamName(0) + " " + blue + " against " + TeamName(1) + " " + red + ". " +
                            (inHub
-                               ? "Set up your team's ship at the loadout terminal (SHIP 1 is BLUE, SHIP 2 is RED). The host starts the match by sitting in the ready room."
-                               : "Destroy the enemy ship to win!"));
+                               ? "Set up your ship at the loadout terminal (the FLEET panel lists every ship). The host starts the match by sitting in the ready room."
+                               : "Destroy every enemy ship to win!"));
+        }
+
+        /// <summary>Self-test only: lock the teams as they are (one player can't crew every ship).</summary>
+        public static void ForceConfirm()
+        {
+            if (!PhotonNetwork.IsMasterClient || !PickingTeams) return;
+            FleetShips.PublishCrew(FleetShips.Crews());
+            PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyLocked, true } });
+            Log.Info("[autotest] Teams locked without the checks: " + (CheckTeams() ?? "they would have passed") + ".");
         }
 
         /// <summary>
-        /// Host, a few times a second: in the hub, once the teams are confirmed, a player who joins later goes to the smaller
-        /// team (as in a match), so they can set up their team's ship without the host reopening team picking.
+        /// Host, a few times a second: in the hub, once the teams (or co-op crews) are confirmed, a player who joins later goes
+        /// to the smallest crew (of the smaller team), as in a mission, so they can set up their ship without the host
+        /// reopening the picking.
         /// </summary>
         public static void KeepHubTeamsComplete()
         {
             try
             {
-                if (!PhotonNetwork.IsMasterClient || !GameSessionManager.InHub || !HubFleet.HostHasFleet || HubFleet.Variant != HubVariant.FleetBattle || !Locked) return;
-                Dictionary<int, int> teams = FleetShips.CrewMap();
+                if (!PhotonNetwork.IsMasterClient || !HubFleetPlanned || !Locked) return;
+                bool teams = FleetApi.IsTeamMatch;
+                Dictionary<int, CrewEntry> crews = FleetShips.Crews();
+                List<int> players = ShipSpawn.PlayerActors();
+                var ships = Enumerable.Range(0, ShipCount).ToList();
                 bool changed = false;
                 foreach (Player player in PhotonNetwork.PlayerList.OrderBy(p => p.ActorNumber))
                 {
-                    if (teams.ContainsKey(player.ActorNumber)) continue;
-                    int team = Count(teams, 0) <= Count(teams, 1) ? 0 : 1;
-                    teams[player.ActorNumber] = team;
+                    CrewEntry entry;
+                    if (crews.TryGetValue(player.ActorNumber, out entry) && entry.Slot >= 0 && entry.Slot < ShipCount) continue;
+                    int slot = CrewRules.PlaceFor(crews, players, ships, teams);
+                    if (slot < 0) continue;
+                    crews[player.ActorNumber] = CrewEntry.Play(player.ActorNumber, CrewRules.TeamOf(slot, teams), slot);
                     changed = true;
-                    Net.ToActor(player.ActorNumber, Msg.Notice, "You joined the " + TeamName(team) + " team (the teams were already confirmed). Set up the " + TeamName(team) +
-                                                               " ship at the loadout terminal.");
+                    Net.ToActor(player.ActorNumber, Msg.Notice, teams
+                        ? "You joined the " + TeamName(slot % 2) + " team on " + FleetSlots.Name(slot, true) + " (the teams were already confirmed). Set it up at the loadout terminal."
+                        : "You fly " + FleetSlots.Name(slot, false) + " (the crews were already confirmed). Set it up at the loadout terminal.");
                 }
-                if (changed) FleetShips.PublishCrew(teams);
+                if (changed) FleetShips.PublishCrew(crews);
             }
             catch (Exception e)
             {
-                Log.Failure("Giving a late joiner a team", e);
+                Log.Failure("Giving a late joiner a ship", e);
             }
         }
 
         /// <summary>
-        /// Host, when the hub loads, FLEET BATTLE is chosen or a match starts: no result, sabotage or hack from an earlier
-        /// match, and the teams are picked again (unless a match starts with the teams confirmed in the hub).
+        /// Host, when the hub loads, the fleet changes (FLEET BATTLE chosen or left, another ship count) or a match starts: no
+        /// result, sabotage or hack from an earlier match, and the ships are picked again (unless a match starts with the
+        /// teams confirmed in the hub).
         /// </summary>
         public static void Reset(bool keepTeams = false)
         {

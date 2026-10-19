@@ -12,23 +12,35 @@ namespace VoidCrewFleet
         /// <summary>Host to everyone: show a notice. Data: text.</summary>
         Notice = 1,
 
-        /// <summary>Client to host, in the hub: switch two ships on or off. Data: bool.</summary>
-        HubTwoShips = 2,
+        /// <summary>Client to host, in the hub: how many ships the game's own missions use (1-3). Data: int.</summary>
+        HubShipCount = 2,
 
-        /// <summary>Client to host, in the hub: the second ship's loadout. Data: GUID hex.</summary>
-        HubShipB = 3,
+        /// <summary>Client to host, in the hub: a ship 2-6's loadout. Data: slot, GUID hex.</summary>
+        HubShipLoadout = 3,
 
         /// <summary>Client to host, in the hub: choose a fleet mission variant. Data: byte (HubVariant).</summary>
         HubVariant = 4,
 
-        /// <summary>Client to host, PvP team screen: the team this player wants. Data: team.</summary>
-        TeamRequest = 10,
+        /// <summary>Host only, in the hub: force a ship's type. Data: slot, ship GUID hex ("" for any type).</summary>
+        HubShipType = 5,
 
-        /// <summary>Client to host, PvP team screen (host only): move a player. Data: actor, team.</summary>
-        TeamMove = 11,
+        /// <summary>Host only, in the hub: Fleet Battle's ships per team. Data: int (1-3).</summary>
+        HubShipsPerTeam = 6,
 
-        /// <summary>Attacker to the victim's client: you were punched. Data: damage, attacker position.</summary>
-        Punch = 20,
+        /// <summary>Host only, in the hub: Fleet Battle's teams get the same ship types. Data: bool.</summary>
+        HubMirror = 7,
+
+        /// <summary>Client to host, lobby screen: the ship this player wants to crew. Data: slot.</summary>
+        CrewRequest = 10,
+
+        /// <summary>Client to host, lobby screen (host only): move a player to a ship, or off every ship (-1). Data: actor, slot.</summary>
+        CrewMove = 11,
+
+        /// <summary>
+        /// Attacker to the players around and the victim: a punch, to show on the attacker's model; the victim's client takes
+        /// the damage. Data: arm (byte, 0 left, 1 right), victim's actor number (-1 for none), damage, attacker position.
+        /// </summary>
+        FistSwing = 20,
 
         /// <summary>Host to the victim's client: an enemy ship's turret hit you. Data: damage, turret position.</summary>
         TurretHit = 21,
@@ -107,6 +119,18 @@ namespace VoidCrewFleet
                 return;
             }
             Send(type, data, new RaiseEventOptions { TargetActors = new[] { actor } });
+        }
+
+        /// <summary>To these players other than the local one.</summary>
+        public static void ToOtherActors(IEnumerable<int> actors, Msg type, params object[] data)
+        {
+            int me = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : -1;
+            var targets = new List<int>();
+            foreach (int actor in actors)
+            {
+                if (actor != me && actor > 0 && !targets.Contains(actor)) targets.Add(actor);
+            }
+            if (targets.Count > 0) Send(type, data, new RaiseEventOptions { TargetActors = targets.ToArray() });
         }
 
         private static void Send(Msg type, object[] data, RaiseEventOptions options)

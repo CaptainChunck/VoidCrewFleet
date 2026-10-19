@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using Gameplay.Hub;
 using HarmonyLib;
@@ -12,10 +14,12 @@ using LoadoutTerminal = UI.ShipLoadoutTerminal.ShipLoadoutTerminal;
 namespace VoidCrewFleet
 {
     /// <summary>
-    /// The hub's ship loadout terminal, made for two ships. A bar along the top of the screen switches two ships on or off
-    /// and chooses which ship the terminal is setting up: SHIP 1 is the game's own selection (so the Ship Customizer's
-    /// CUSTOM loadout works there as before), SHIP 2 is this plugin's. While SHIP 2 is chosen, SELECT picks ship 2's loadout
-    /// and the list and SELECTED marker show ship 2's choice. Anyone in the room can use it; the host keeps the choice.
+    /// The hub's ship loadout terminal, made for a fleet. A FLEET section in the terminal's top-right corner sets how many
+    /// ships the game's own missions use (or, in Fleet Battle, opens the lobby screen), lists every ship, and chooses which
+    /// ship the terminal is setting up: SHIP 1 is the game's own selection (so the Ship Customizer's CUSTOM loadout works
+    /// there as before), ships 2-6 are this plugin's. While another ship is chosen, SELECT picks that ship's loadout and the
+    /// list and SELECTED marker show its choice. Anyone in the room can use it (in Fleet Battle, only a ship's own team);
+    /// the host keeps the choices, and refuses a loadout of another type than the one the host forced for that ship.
     /// </summary>
     internal static class HubTerminalUi
     {
@@ -25,13 +29,13 @@ namespace VoidCrewFleet
         private static readonly FieldInfo DisplayField = GameMember.Field(typeof(LoadoutTerminal), "display");
         private static readonly MethodInfo DisplayMethod = GameMember.Method(typeof(LoadoutTerminal), "Display");
 
-        private static bool _editingShipB;
+        private static int _editingSlot;
         private static LoadoutTerminal _terminal;
         private static VisualElement _root;
         private static VisualElement _bar;
-        private static Button _twoButton;
-        private static ShipRow _shipARow;
-        private static ShipRow _shipBRow;
+        private static Button _countButton;
+        private static Button _crewsButton;
+        private static readonly List<ShipRow> Rows = new List<ShipRow>();
         private static Label _hint;
         private static VisualElement _tint;
         private static bool _subscribed;
@@ -41,6 +45,11 @@ namespace VoidCrewFleet
             get { return HubFleet.HostHasFleet && Patcher.IsReady(Feature); }
         }
 
+        private static bool EditingOther
+        {
+            get { return _editingSlot > 0; }
+        }
+
         // ---------------------------------------------------------------- hooks
 
         [GamePatch(Feature, "UI.ShipLoadoutTerminal.ShipLoadoutTerminal", "Display", PatchKind.Postfix)]
@@ -48,6 +57,7 @@ namespace VoidCrewFleet
         {
             try
             {
+                bool opened = __instance != _terminal;
                 _terminal = __instance;
                 if (___root != null) _root = ___root;
                 if (!_subscribed)
@@ -58,42 +68,52 @@ namespace VoidCrewFleet
                 }
                 EnsureBar();
                 Refresh();
+                // A newly opened terminal shows the ship the player crews (their pick on the lobby screen), when it isn't ship 1.
+                if (opened && _root != null && Available)
+                {
+                    int own = FleetShips.CrewSlot(FleetShips.LocalActor);
+                    if (own > 0 && own < HubFleet.PlannedShips) _root.schedule.Execute(() => EditShip(own)).ExecuteLater(50);
+                }
             }
             catch (Exception e)
             {
-                Log.Failure("Adding the two-ship bar to the loadout terminal", e);
+                Log.Failure("Adding the FLEET section to the loadout terminal", e);
             }
         }
 
-        /// <summary>SELECT while setting up ship 2 chooses ship 2's loadout instead of the game's (ship 1).</summary>
+        /// <summary>
+        /// SELECT: in Fleet Battle only a ship's own team may change it, and a ship whose type the host forced only takes a
+        /// loadout of that type. While setting up a ship 2-6, it chooses that ship's loadout instead of the game's (ship 1).
+        /// </summary>
         [GamePatch(Feature, "UI.ShipLoadoutTerminal.ShipLoadoutTerminal", "OnShipChosen", PatchKind.Prefix)]
         private static bool ShipChosenPrefix(ShipLoadoutDataDef shipDef)
         {
-            if (Available && shipDef != null && FleetApi.IsTeamMatch && PhotonNetwork.LocalPlayer != null)
+            if (!Available || shipDef == null) return true;
+            int slot = Mathf.Clamp(_editingSlot, 0, FleetSlots.MaxSlots - 1);
+            string refusal = null;
+            if (FleetApi.IsTeamMatch && PhotonNetwork.LocalPlayer != null && !FleetApi.CanEditShip(PhotonNetwork.LocalPlayer.ActorNumber, slot + 1))
             {
-                int ship = _editingShipB ? 2 : 1;
-                if (!FleetApi.CanEditShip(PhotonNetwork.LocalPlayer.ActorNumber, ship))
-                {
-                    string team = PvpTeams.TeamName(ship - 1);
-                    Notice.Show(FleetApi.TeamOf(PhotonNetwork.LocalPlayer.ActorNumber) < 0
-                        ? "Pick a team first: only a ship's own team can change its loadout."
-                        : "Only " + team + " players can change the " + team + " ship.");
-                    if (_root != null) _root.schedule.Execute(MarkChoice).ExecuteLater(300);
-                    return false;
-                }
+                string team = PvpTeams.TeamName(FleetSlots.TeamOf(slot, true));
+                refusal = FleetApi.TeamOf(PhotonNetwork.LocalPlayer.ActorNumber) < 0
+                    ? "Pick a ship first: only a ship's own team can change its loadout."
+                    : "Only " + team + " players can change " + HubFleet.ShipLabel(slot) + ".";
             }
-            if (!_editingShipB || !Available || shipDef == null) return true;
-            if (HubFleet.LoadoutDef(shipDef.AssetGuid) == null)
+            GUIDUnion type = HubFleet.ForcedType(slot);
+            if (refusal == null && !type.IsNull && HubFleet.TypeOf(shipDef) != type)
+                refusal = HubFleet.ShipLabel(slot) + " must be a " + FleetSlots.TypeName(type) + " (the host's choice).";
+            if (refusal == null && slot > 0 && CustomizerLink.IsCustom(shipDef.AssetGuid) && !CustomizerLink.CanCustomize(slot + 1))
+                refusal = "CUSTOM on " + HubFleet.ShipLabel(slot) + " needs Ship Customizer 0.9.0 or later.";
+            if (refusal == null && slot > 0 && HubFleet.LoadoutDef(shipDef.AssetGuid) == null)
+                refusal = HubFleet.ShipLabel(slot) + " can't use that loadout.";
+            if (refusal != null)
             {
-                Notice.Show(CustomizerLink.Installed
-                    ? "Ship 2 can't have a CUSTOM loadout of its own with this version of Ship Customizer: update it, or leave ship 2 as a copy of ship 1."
-                    : "Ship 2 can't use that loadout.");
+                Notice.Show(refusal);
+                if (_root != null) _root.schedule.Execute(MarkChoice).ExecuteLater(300);
+                return false;
             }
-            else
-            {
-                HubFleet.RequestShipB(shipDef.AssetGuid);
-            }
-            // SELECT marks the shown loadout as chosen by itself; show ship 2's real choice again once that is done.
+            if (slot == 0) return true;
+            HubFleet.RequestLoadout(slot, shipDef.AssetGuid);
+            // SELECT marks the shown loadout as chosen by itself; show the ship's real choice again once that is done.
             if (_root != null) _root.schedule.Execute(MarkChoice).ExecuteLater(300);
             return false;
         }
@@ -101,7 +121,7 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "UI.ShipLoadoutTerminal.ShipLoadoutTerminal", "ShowSelection", PatchKind.Postfix)]
         private static void ShowSelectionPostfix()
         {
-            if (_editingShipB && Available) MarkShipB();
+            if (EditingOther && Available) MarkOther();
         }
 
         [HarmonyBefore(CustomizerLink.PluginGuid)]
@@ -110,11 +130,13 @@ namespace VoidCrewFleet
         {
             try
             {
-                if (_editingShipB && Available && data != null) __instance.Selected(!HubFleet.ChosenShipB.IsNull && data.AssetGuid == HubFleet.ChosenShipB);
+                if (!EditingOther || !Available || data == null) return;
+                GUIDUnion chosen = HubFleet.ChosenLoadout(_editingSlot);
+                __instance.Selected(!chosen.IsNull && data.AssetGuid == chosen);
             }
             catch (Exception e)
             {
-                Log.Failure("Marking ship 2's loadout", e);
+                Log.Failure("Marking a ship's loadout", e);
             }
         }
 
@@ -122,12 +144,13 @@ namespace VoidCrewFleet
         private static void TerminalDestroyPrefix(LoadoutTerminal __instance)
         {
             if (__instance != _terminal) return;
-            if (_editingShipB) CustomizerLink.SetTerminalShip(1);
+            if (EditingOther) CustomizerLink.SetTerminalShip(1);
             _terminal = null;
             _root = null;
             _bar = null;
             _tint = null;
-            _editingShipB = false;
+            Rows.Clear();
+            _editingSlot = 0;
         }
 
         // ---------------------------------------------------------------- the hub's mission panel
@@ -138,7 +161,7 @@ namespace VoidCrewFleet
         private static string _gameShipText;
         private static bool _flowSubscribed;
 
-        /// <summary>The hub's mission panel ("STANDARD / NO SHIP SELECTED") names both ships when there are two.</summary>
+        /// <summary>The hub's mission panel ("STANDARD / NO SHIP SELECTED") names every ship when there are several.</summary>
         [GamePatch(Feature, "HUBFlowDisplay", "ShipSelected", PatchKind.Postfix)]
         private static void FlowShipPostfix(Label ___selectedShipLabel)
         {
@@ -169,14 +192,26 @@ namespace VoidCrewFleet
         {
             try
             {
-                bool two = Available && HubFleet.PlannedMode != FleetMode.OneShip;
+                int ships = Available ? HubFleet.PlannedShips : 1;
                 bool pvp = HubFleet.Variant == HubVariant.FleetBattle;
                 if (_flowShipLabel != null && _flowShipLabel.panel != null && _gameShipText != null)
                 {
-                    _flowShipLabel.text = !two
-                        ? _gameShipText
-                        : Slot(pvp ? "<color=#5AA9FF>BLUE</color>" : "SHIP 1", _gameShipText) + "\n" +
-                          Slot(pvp ? "<color=#FF5A4F>RED</color>" : "SHIP 2", HubFleet.ChosenShipB.IsNull ? "SAME AS SHIP 1" : FlowName(HubFleet.ShipBDef, HubFleet.ShipBName));
+                    if (ships < 2)
+                    {
+                        _flowShipLabel.text = _gameShipText;
+                    }
+                    else if (pvp)
+                    {
+                        // One line per team: its ships' types.
+                        _flowShipLabel.text = TeamLine(0, ships) + "\n" + TeamLine(1, ships);
+                    }
+                    else
+                    {
+                        var lines = new List<string> { Slot("SHIP 1", _gameShipText) };
+                        for (int slot = 1; slot < ships; slot++)
+                            lines.Add(Slot("SHIP " + (slot + 1), HubFleet.CopiesShip1(slot) ? "SAME AS SHIP 1" : FlowName(HubFleet.ShipDef(slot), HubFleet.ChosenName(slot))));
+                        _flowShipLabel.text = string.Join("\n", lines.ToArray());
+                    }
                 }
                 if (_flowQuestLabel != null && _flowQuestLabel.panel != null && _gameQuestText != null)
                 {
@@ -188,8 +223,23 @@ namespace VoidCrewFleet
             }
             catch (Exception e)
             {
-                Log.Failure("Showing both ships on the hub's mission panel", e);
+                Log.Failure("Showing the fleet on the hub's mission panel", e);
             }
+        }
+
+        private static string TeamLine(int team, int ships)
+        {
+            string colour = ColorUtility.ToHtmlStringRGB(FleetApi.TeamColor(team));
+            IEnumerable<string> types = FleetSlots.SlotsOfTeam(team, ships).Select(slot => ShipType(slot));
+            return "<color=#" + colour + ">" + PvpTeams.TeamName(team) + "</color>  " + string.Join(", ", types.ToArray());
+        }
+
+        /// <summary>A ship's type as the panels name it ("FRIGATE").</summary>
+        private static string ShipType(int slot)
+        {
+            GUIDUnion type = HubFleet.ForcedType(slot);
+            if (type.IsNull) type = HubFleet.TypeOf(HubFleet.ShipDef(slot));
+            return FleetSlots.TypeName(type);
         }
 
         private static string Slot(string name, string ship)
@@ -214,6 +264,7 @@ namespace VoidCrewFleet
         /// <summary>A ship's row in the FLEET section: one of the terminal's own LOADOUTS rows, so it looks and highlights like them.</summary>
         private sealed class ShipRow
         {
+            public int Slot;
             public VisualElement Root;
             public VisualElement Marker;
             public Label Title;
@@ -223,7 +274,7 @@ namespace VoidCrewFleet
         {
             if (_root == null || (_bar != null && _bar.parent == _root)) return;
             // The terminal's top-right corner, beside RESOURCES and above the ship picture, is free: a FLEET section in the
-            // terminal's own style goes there, with its header and decorative line, its LOADOUTS rows and its small button.
+            // terminal's own style goes there, with its header and decorative line, its LOADOUTS rows and its small buttons.
             // The Ship Customizer's toolbar sits lower down, just above SELECT.
             _bar = new VisualElement { name = "FleetShipBar", pickingMode = PickingMode.Ignore };
             _bar.style.position = Position.Absolute;
@@ -236,22 +287,30 @@ namespace VoidCrewFleet
             _bar.Add(Ui.GameLabel("FLEET", "ui-text-size__large", "ui-text-color__white", "loadout-panel-header", "ui-text-dropshadow"));
             _bar.Add(Ui.GameDivider());
 
-            _twoButton = Ui.GameButton("", ToggleTwoShips, "metem-button-size__small");
-            Ui.Margin(_twoButton, 8, 0, 0, 0);
-            _twoButton.style.paddingLeft = 8;
-            _twoButton.style.paddingRight = 8;
-            _twoButton.style.fontSize = 18;
-            _bar.Add(_twoButton);
+            _countButton = SmallButton(ToggleShips);
+            Ui.Margin(_countButton, 8, 0, 0, 0);
+            _bar.Add(_countButton);
 
             // A faint backing keeps the rows readable over any ship picture; hover and selection paint over it.
             var rows = new VisualElement { pickingMode = PickingMode.Ignore };
             rows.style.marginTop = 6;
             rows.style.backgroundColor = new Color(0f, 0f, 0f, 0.45f);
-            _shipARow = MakeShipRow(() => EditShip(false));
-            _shipBRow = MakeShipRow(() => EditShip(true));
-            rows.Add(_shipARow.Root);
-            rows.Add(_shipBRow.Root);
+            Rows.Clear();
+            for (int index = 0; index < FleetSlots.MaxSlots; index++)
+            {
+                int place = index;
+                // The row at this place shows a different ship depending on the order (Fleet Battle lists by team).
+                ShipRow row = MakeShipRow(() => EditShip(Rows[place].Slot));
+                row.Slot = index;
+                Rows.Add(row);
+                rows.Add(row.Root);
+            }
             _bar.Add(rows);
+
+            _crewsButton = SmallButton(OpenLobby);
+            _crewsButton.text = "CREWS";
+            Ui.Margin(_crewsButton, 6, 0, 0, 0);
+            _bar.Add(_crewsButton);
 
             _hint = Ui.GameLabel("", "ui-text-color__white");
             _hint.style.fontSize = 16;
@@ -267,6 +326,15 @@ namespace VoidCrewFleet
             _root.Add(_bar);
             _bar.BringToFront();
             Ui.Announce(_bar);
+        }
+
+        private static Button SmallButton(Action onClick)
+        {
+            Button button = Ui.GameButton("", onClick, "metem-button-size__small");
+            button.style.paddingLeft = 8;
+            button.style.paddingRight = 8;
+            button.style.fontSize = 18;
+            return button;
         }
 
         /// <summary>A row made from the terminal's own LOADOUTS row template; by hand, with the same classes, if it is missing.</summary>
@@ -319,13 +387,20 @@ namespace VoidCrewFleet
             return row;
         }
 
-        /// <summary>A row's two lines ("SHIP 1: DESTROYER" over "ROOKIE"), whether it is the ship being set up, and its team colour.</summary>
-        private static void SetRow(ShipRow row, string slot, string ship, string loadout, bool selected, Color? team, bool enabled)
+        /// <summary>A row's two lines ("SHIP 2: DESTROYER" over "ROOKIE"), whether it is the ship being set up, and its team colour.</summary>
+        private static void SetRow(ShipRow row, string label, string ship, string loadout, bool selected, Color? team, bool compact)
         {
-            row.Title.text = "<size=80%>" + slot + (string.IsNullOrEmpty(ship) ? "" : ": " + ship) + "</size>\n" + loadout;
-            row.Root.SetEnabled(enabled);
-            row.Root.EnableInClassList("unity-collection-view__item--selected", selected && enabled);
+            row.Title.style.fontSize = compact ? 16 : 18;
+            row.Title.text = "<size=80%>" + label + (string.IsNullOrEmpty(ship) ? "" : ": " + ship) + "</size>\n" + loadout;
+            row.Root.EnableInClassList("unity-collection-view__item--selected", selected);
             if (row.Marker != null) row.Marker.style.backgroundColor = team.HasValue ? new StyleColor(team.Value) : new StyleColor(StyleKeyword.Null);
+        }
+
+        /// <summary>The order the rows are listed in: ship order in co-op, by team in Fleet Battle (BLUE 1-3, then RED 1-3).</summary>
+        private static List<int> RowOrder(int ships, bool teams)
+        {
+            if (!teams) return Enumerable.Range(0, ships).ToList();
+            return FleetSlots.SlotsOfTeam(0, ships).Concat(FleetSlots.SlotsOfTeam(1, ships)).ToList();
         }
 
         private static void Refresh()
@@ -338,55 +413,66 @@ namespace VoidCrewFleet
                 if (!available)
                 {
                     ShowTint(Color.clear);
-                    if (_editingShipB) CustomizerLink.SetTerminalShip(1);
-                    _editingShipB = false;
+                    if (EditingOther) CustomizerLink.SetTerminalShip(1);
+                    _editingSlot = 0;
                     return;
                 }
-                bool two = HubFleet.PlannedMode != FleetMode.OneShip;
-                bool locked = HubFleet.Variant != HubVariant.None;
+                int ships = HubFleet.PlannedShips;
                 bool teams = FleetApi.IsTeamMatch;
-                if (!two && _editingShipB) EditShip(false);
+                if (_editingSlot >= ships) EditShip(0);
 
-                _twoButton.text = teams ? "TEAMS & RULES" : (two ? "TWO SHIPS: ON" : "TWO SHIPS: OFF");
-                _twoButton.SetEnabled(!locked || teams);
+                _countButton.text = teams ? "TEAMS & RULES" : "SHIPS: " + ships;
+                _countButton.SetEnabled(teams || HubFleet.Variant != HubVariant.FleetBattle);
+                _crewsButton.style.display = !teams && ships > 1 ? DisplayStyle.Flex : DisplayStyle.None;
 
-                string ship, loadout;
-                SplitName(HubFleet.ShipADef, null, out ship, out loadout);
-                SetRow(_shipARow, teams ? "BLUE" : "SHIP 1", ship, loadout, !_editingShipB, teams ? FleetApi.ShipColor(1) : (Color?)null, true);
-                if (!two)
+                List<int> order = RowOrder(ships, teams);
+                bool compact = ships > 3;
+                for (int i = 0; i < Rows.Count; i++)
                 {
-                    ship = null;
-                    loadout = "OFF";
+                    ShipRow row = Rows[i];
+                    bool shown = i < order.Count;
+                    row.Root.style.display = shown ? DisplayStyle.Flex : DisplayStyle.None;
+                    if (!shown) continue;
+                    int slot = order[i];
+                    row.Slot = slot;
+                    string ship, loadout;
+                    if (slot > 0 && HubFleet.CopiesShip1(slot))
+                    {
+                        SplitName(HubFleet.ShipADef, null, out ship, out loadout);
+                        loadout = "AS SHIP 1";
+                    }
+                    else
+                    {
+                        SplitName(HubFleet.ShipDef(slot), HubFleet.ChosenName(slot), out ship, out loadout);
+                    }
+                    if (!HubFleet.ForcedType(slot).IsNull) ship = FleetSlots.TypeName(HubFleet.ForcedType(slot)) + " ONLY";
+                    SetRow(row, HubFleet.ShipLabel(slot), ship, loadout, slot == _editingSlot, teams ? FleetApi.ShipColor(slot + 1) : (Color?)null, compact);
                 }
-                else if (HubFleet.ChosenShipB.IsNull)
-                {
-                    ship = null;
-                    loadout = "AS SHIP 1";
-                }
-                else
-                {
-                    SplitName(HubFleet.ShipBDef, HubFleet.ShipBName, out ship, out loadout);
-                }
-                SetRow(_shipBRow, teams ? "RED" : "SHIP 2", ship, loadout, _editingShipB, teams ? FleetApi.ShipColor(2) : (Color?)null, two);
 
+                int actor = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : -1;
+                string label = HubFleet.ShipLabel(_editingSlot);
                 if (teams)
                 {
-                    int shipNumber = _editingShipB ? 2 : 1;
-                    string team = PvpTeams.TeamName(shipNumber - 1);
-                    int actor = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : -1;
+                    string team = PvpTeams.TeamName(FleetSlots.TeamOf(_editingSlot, true));
                     int mine = FleetApi.TeamOf(actor);
-                    _hint.text = FleetApi.CanEditShip(actor, shipNumber)
-                        ? "The " + team + " ship: pick its ship and loadout, then SELECT."
-                        : (mine < 0 ? "You're not on a team: the host can open TEAMS & RULES again." : "The " + team + " ship: only " + team + " players can change it.");
+                    _hint.text = FleetApi.CanEditShip(actor, _editingSlot + 1)
+                        ? label + ": pick its loadout, then SELECT."
+                        : (mine < 0 ? "Pick a ship on the lobby screen (TEAMS & RULES) to set up your team's ships." : label + ": only " + team + " players can change it.");
+                }
+                else if (ships < 2)
+                {
+                    _hint.text = "One ship, up to " + FleetSlots.MaxCrewPerShip + " players. SHIPS adds a second or third ship.";
                 }
                 else
                 {
-                    _hint.text = _editingShipB
-                        ? "Setting up SHIP 2: pick a ship and loadout, then SELECT."
-                        : (two ? "Setting up SHIP 1. Press SHIP 2 to set up the second ship." : "One ship, up to 8 players. Turn TWO SHIPS on for a second ship.");
+                    _hint.text = "Setting up " + label + ": pick a ship and loadout, then SELECT. CREWS: who flies which ship.";
                 }
-                ShowTint(teams ? FleetApi.ShipColor(_editingShipB ? 2 : 1) : Color.clear);
-                if (_editingShipB) MarkShipB();
+                GUIDUnion forced = HubFleet.ForcedType(_editingSlot);
+                if (!forced.IsNull) _hint.text += " It must be a " + FleetSlots.TypeName(forced) + ".";
+                if (_editingSlot > 1 && CustomizerLink.Installed && !CustomizerLink.CanCustomize(_editingSlot + 1))
+                    _hint.text += " CUSTOM here needs Ship Customizer 0.9.0.";
+                ShowTint(teams ? FleetApi.ShipColor(_editingSlot + 1) : Color.clear);
+                if (EditingOther) MarkOther();
             }
             catch (Exception e)
             {
@@ -405,7 +491,7 @@ namespace VoidCrewFleet
                 return;
             }
             text = text.Replace("METEM ", "").ToUpperInvariant();
-            int dash = text.IndexOf(" - ", System.StringComparison.Ordinal);
+            int dash = text.IndexOf(" - ", StringComparison.Ordinal);
             ship = dash > 0 ? text.Substring(0, dash) : null;
             loadout = dash > 0 ? text.Substring(dash + 3) : text;
         }
@@ -435,7 +521,8 @@ namespace VoidCrewFleet
             _tint.style.display = DisplayStyle.Flex;
         }
 
-        private static void ToggleTwoShips()
+        /// <summary>SHIPS: one more ship (back to one after three). In Fleet Battle: TEAMS & RULES.</summary>
+        private static void ToggleShips()
         {
             if (FleetApi.IsTeamMatch)
             {
@@ -446,19 +533,31 @@ namespace VoidCrewFleet
                 else PvpTeams.Reset();
                 return;
             }
-            if (HubFleet.Variant != HubVariant.None) return;
-            HubFleet.RequestTwoShips(HubFleet.PlannedMode == FleetMode.OneShip);
+            int ships = HubFleet.PlannedMode == FleetMode.OneShip ? 1 : HubFleet.PlannedShips;
+            int next = ships >= FleetSlots.MaxCoopShips ? 1 : ships + 1;
+            if (next < 2 && HubFleet.Variant == HubVariant.FleetPilgrimage) next = 2;
+            HubFleet.RequestShipCount(next);
+        }
+
+        /// <summary>
+        /// CREWS: the lobby screen, where players pick the ship they fly. While the crews are picked it brings this player's
+        /// screen back (after HIDE); once they are confirmed, the host opens crew picking again for everyone (the crews are
+        /// kept until changed), and the other players look at the crews.
+        /// </summary>
+        private static void OpenLobby()
+        {
+            if (PvpTeams.PickingTeams || !PhotonNetwork.IsMasterClient) PvpTeamScreen.ShowLocally();
+            else PvpTeams.Reset();
         }
 
         /// <summary>Switches which ship the terminal sets up, and shows that ship's current loadout.</summary>
-        private static void EditShip(bool shipB)
+        private static void EditShip(int slot)
         {
-            if (shipB && HubFleet.PlannedMode == FleetMode.OneShip) return;
-            _editingShipB = shipB;
+            if (slot < 0 || slot >= Math.Max(1, HubFleet.PlannedShips)) slot = 0;
+            _editingSlot = slot;
             // Before showing it: the Ship Customizer's CUSTOM then shows and edits this ship's own layout.
-            CustomizerLink.SetTerminalShip(shipB ? 2 : 1);
-            ShipLoadoutDataDef def = shipB ? HubFleet.ShipBDef : HubFleet.ShipADef;
-            ShowLoadout(def);
+            CustomizerLink.SetTerminalShip(slot + 1);
+            ShowLoadout(HubFleet.ShipDef(slot));
             Refresh();
         }
 
@@ -487,7 +586,6 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>The list and SELECTED marker show ship 2's choice while ship 2 is being set up.</summary>
         /// <summary>After a refused or redirected SELECT: the SELECTED mark shows the real choice of the ship being set up.</summary>
         private static void MarkChoice()
         {
@@ -496,10 +594,10 @@ namespace VoidCrewFleet
             {
                 var display = DisplayField != null ? DisplayField.GetValue(_terminal) as ModuleLayout : null;
                 if (display == null || display.CurrentLoadout == null) return;
-                if (_editingShipB)
+                if (EditingOther)
                 {
-                    if (HubFleet.ChosenShipB.IsNull) display.Selected(false);
-                    else MarkShipB();
+                    if (HubFleet.ChosenLoadout(_editingSlot).IsNull) display.Selected(false);
+                    else MarkOther();
                     return;
                 }
                 ShipLoadoutDataDef chosen = HubShipManager.Instance != null ? HubShipManager.Instance.CurrentShipSelected : null;
@@ -511,20 +609,23 @@ namespace VoidCrewFleet
             }
         }
 
-        private static void MarkShipB()
+        /// <summary>The list and SELECTED marker show the choice of the ship 2-6 being set up.</summary>
+        private static void MarkOther()
         {
-            if (_terminal == null || !_editingShipB || HubFleet.ChosenShipB.IsNull) return;
+            if (_terminal == null || !EditingOther) return;
+            GUIDUnion chosen = HubFleet.ChosenLoadout(_editingSlot);
+            if (chosen.IsNull) return;
             try
             {
-                ShipLoadoutDataDef shipB = HubFleet.ShipBDef;
+                ShipLoadoutDataDef def = HubFleet.LoadoutDef(chosen);
                 var list = LoadoutListField != null ? LoadoutListField.GetValue(_terminal) as ShipLoadoutList : null;
                 var display = DisplayField != null ? DisplayField.GetValue(_terminal) as ModuleLayout : null;
-                if (list != null && shipB != null) list.LoadoutPicked(shipB);
-                if (display != null) display.Selected(shipB != null && display.CurrentLoadout != null && display.CurrentLoadout.AssetGuid == shipB.AssetGuid);
+                if (list != null && def != null) list.LoadoutPicked(def);
+                if (display != null) display.Selected(def != null && display.CurrentLoadout != null && display.CurrentLoadout.AssetGuid == def.AssetGuid);
             }
             catch (Exception e)
             {
-                Log.Failure("Marking ship 2's loadout", e);
+                Log.Failure("Marking a ship's loadout", e);
             }
         }
     }

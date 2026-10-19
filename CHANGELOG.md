@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.4.0
+Fleets of up to three ships, and Fleet Battle with up to three ships per team. Everyone in a room needs 0.4.0: the
+network protocol changed.
+
+**Ships and players**
+- Up to **24 players** per room (8 per ship).
+- **Co-op: up to three ships.** The FLEET panel's SHIPS button sets how many ships the game's own missions use (one in
+  a new room; the host's last choice is remembered). The Fleet Pilgrimage has two or three.
+- The FLEET panel lists every ship: click one to set it up at the terminal.
+- **Players pick the ship they fly** on the lobby screen, which opens for everyone when the host sets two or three
+  ships. Crews stay even; the host can move players and auto-balance, and confirms the crews (CONFIRM CREWS) before the
+  mission can start. CREWS on the FLEET panel brings the screen back.
+- **Ship types:** the host can force each ship's type (Destroyer, Frigate or Striker) on the lobby screen, or leave it
+  free. A ship whose loadout isn't of that type gets the type's standard loadout.
+- A ship with no loadout chosen copies ship 1, as before (in co-op, when its type allows it).
+- **Void jumps:** the escape vector set on any ship counts for every ship, and once every ship's void drive is charged,
+  any ship's lever jumps the whole fleet. While a drive isn't charged, the lever says which ship's and nothing starts.
+  During a jump, any ship's lever acts for the fleet.
+- **Everyone always respawns on their own ship**, the one picked in the lobby.
+- **A destroyed ship's crew can't be re-cloned for the rest of the mission** (co-op and Fleet Battle). Anyone aboard
+  dies with it; a crew member aboard another ship plays on until they die. Then they watch the remaining ships from a
+  third-person view: Q / E (or the mouse buttons) switch ships, the mouse looks around and the wheel zooms.
+- **The mission goes on while any ship is left** (before, losing a ship could end it). Once a ship is lost, the host's
+  escape menu has **RETURN TO HUB**, which ends the mission for everyone so they can start again.
+- The Fleet Pilgrimage's extra enemies grow with a third ship.
+- Respawn tubes keep their numbers when a ship is lost, so nobody is re-cloned on the wrong ship.
+
+**Fleet Battle**
+- **One to three ships per team**, set by the host on the lobby screen. BLUE has ships 1, 3 and 5; RED has 2, 4 and 6.
+- **The host forces each ship's type.** By default both teams get the same ships (BOTH TEAMS: SAME SHIPS).
+- Players pick a ship, and with it their team. Teams and crews stay even, and every ship needs a crew before the host
+  can confirm.
+- **Hulls have 4x the game's hit points** (PvP > HullMultiplier, the host's setting).
+- A team's own ships are friendly to each other: they can't damage each other, and their crews may use anything aboard
+  each other's ships.
+- **A team loses when it has no ships left.**
+- **Spectators:** the crew of a destroyed ship watches the rest of the match, as in co-op.
+- **Reconnects:** a player who loses their connection keeps their place for 3 minutes, and returns to their team and
+  ship. After that their place goes to someone waiting, or anyone joining. A player who comes back to a full team waits
+  for the next free place, watching their own team's ships.
+- Spectators talk among themselves: nobody still fighting hears them, by voice or text chat.
+- Teammates' ships are marked as allies, enemy ships as enemies.
+- Late joiners and returning players are placed by account, so a reconnect is recognised.
+- No ship copies another in Fleet Battle: a ship nobody set up starts with its type's standard loadout.
+- **Fist fighting:** with empty hands, hold the right mouse button to raise your fists into a fighting stance, then
+  left click to punch, alternating arms. On a gamepad: hold LT, punch with RT. Everyone around sees the stance and the
+  punches. V no longer punches: it is the game's salute key, so every punch also saluted (the PunchKey setting is gone).
+
+**Ship Customizer**
+- With Ship Customizer 0.9.0 or newer, every ship can have a CUSTOM loadout of its own. With older versions, ship 2 can
+  (as before), and ships 3-6 use game loadouts.
+
 ## 0.3.1
 Fixes from a full code review. Everyone in a room needs 0.3.1: the network protocol changed, and the game now tells a
 player with another version which one the room needs.

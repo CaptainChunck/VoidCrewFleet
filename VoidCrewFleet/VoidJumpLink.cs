@@ -15,15 +15,20 @@ using UnityEngine;
 namespace VoidCrewFleet
 {
     /// <summary>
-    /// Void jumps with two ships. The session has one active sector, so the two ships always jump together: ship 1's crew
-    /// plots the exit vector, charges the drive and pulls the lever as usual (anyone may still choose the destination on
-    /// either ship's astral map), and ship 2 is carried along, living through every step of the jump with its own crew.
+    /// Void jumps with several ships. The session has one active sector, so the ships always jump together:
+    /// - the escape vector is the sector's: set on any ship's astral map, every ship has it;
+    /// - every ship's crew charges its own void drive;
+    /// - once every ship's drive is charged, any ship's void lever starts the jump: that ship becomes the LEAD ship and
+    ///   every other ship is carried along, living through every step of the jump with its own crew. While a ship's drive
+    ///   isn't charged, the lever names it and nothing starts. During the jump any ship's lever acts as the lead ship's.
+    /// The lead ship is chosen by the host and shared as a room property; before the first jump (and while it is lost) it is
+    /// the living ship with the lowest number.
     ///
-    /// Each ship has its own VoidJumpSystem. Ship 2's follows ship 1's: on the client that drives ship 2's jump system, every
-    /// state change of ship 1 is applied to ship 2 too, and the game's own sync carries ship 2's state to everyone else.
-    /// Ship 2's jump system makes no moves of its own (its timers and "not charged" signals are ignored), and the parts of
-    /// a jump that must only happen once (the interdiction roll and counters, leaving the sector, the autosave) are skipped
-    /// for it. The two ships arrive side by side at the destination's entry point.
+    /// Each ship has its own VoidJumpSystem. The followers' follow the leader's: on the client that drives a follower's jump
+    /// system, every state change of the leader is applied to it too, and the game's own sync carries its state to everyone
+    /// else. A follower's jump system makes no moves of its own (its timers and "not charged" signals are ignored), and the
+    /// parts of a jump that must only happen once (the interdiction roll and counters, leaving the sector, the autosave) are
+    /// skipped for it. The ships arrive side by side at the destination's entry point.
     /// PvP matches have no void jumps.
     /// </summary>
     internal static class VoidJumpLink
@@ -53,17 +58,90 @@ namespace VoidCrewFleet
 
         private static bool Linked
         {
-            get { return FleetSession.Mode == FleetMode.TwoShips && FleetShips.Active; }
+            get { return FleetSession.Mode == FleetMode.Coop && FleetShips.Active; }
+        }
+
+        private const string KeyLead = "VCF_JumpLead";
+
+        /// <summary>The host's own choice of lead ship (the room's copy only updates after a round trip to the server).</summary>
+        private static int _hostLead = -1;
+        private static object _leadSession;
+        private static int _lastLead = -1;
+
+        /// <summary>
+        /// The lead ship's slot: the ship whose void lever started the current (or last) jump, chosen by the host and shared
+        /// as a room property; before any jump, and while that ship is lost, the living ship with the lowest number. A lead
+        /// ship lost mid-jump hands over to the next one, which is in the same state.
+        /// </summary>
+        public static int LeaderSlot
+        {
+            get
+            {
+                object session = GameSessionManager.ActiveSession;
+                if (!ReferenceEquals(session, _leadSession))
+                {
+                    _leadSession = session;
+                    _hostLead = -1;
+                }
+                int chosen = PhotonNetwork.IsMasterClient ? _hostLead : RoomLead();
+                int lead = chosen >= 0 && FleetShips.IsAlive(chosen) ? chosen : -1;
+                if (lead < 0)
+                {
+                    List<int> alive = FleetShips.AliveSlots();
+                    lead = alive.Count > 0 ? alive[0] : -1;
+                }
+                if (lead != _lastLead && _lastLead >= 0 && lead >= 0) Log.Info("Ship " + (lead + 1) + " leads the void jump now.");
+                _lastLead = lead;
+                return lead;
+            }
+        }
+
+        private static int RoomLead()
+        {
+            object value;
+            return PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null && PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeyLead, out value) && value is int
+                ? (int)value
+                : -1;
+        }
+
+        /// <summary>Host: the ship whose lever was pulled leads the jump.</summary>
+        private static void SetLead(int slot)
+        {
+            _hostLead = slot;
+            try
+            {
+                if (PhotonNetwork.CurrentRoom != null) PhotonNetwork.CurrentRoom.SetCustomProperties(new ExitGames.Client.Photon.Hashtable { { KeyLead, slot } });
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Sharing the lead ship of the void jump", e);
+            }
+            Log.Info("Ship " + (slot + 1) + " leads the void jump.");
+        }
+
+        /// <summary>True while any living ship is somewhere in a jump (past setting the escape vector).</summary>
+        public static bool JumpUnderWay()
+        {
+            foreach (PlayerControlledShip ship in FleetShips.All)
+            {
+                if (ship == null || ship.StartedDeath) continue;
+                VoidJumpSystem system = SystemOf(ship);
+                VoidJumpState state = system != null ? system.ActiveState : null;
+                if (state != null && !(state is VoidJumpInactive) && !(state is VoidJumpExitVectorSet)) return true;
+            }
+            return false;
         }
 
         private static bool IsFollower(VoidJumpSystem system)
         {
-            return Linked && system != null && system.PlayerShip != null && FleetShips.Slot(system.PlayerShip) == 1;
+            if (!Linked || system == null || system.PlayerShip == null) return false;
+            int slot = FleetShips.Slot(system.PlayerShip);
+            return slot >= 0 && slot != LeaderSlot;
         }
 
         private static bool IsLeader(VoidJumpSystem system)
         {
-            return Linked && system != null && system.PlayerShip != null && FleetShips.Slot(system.PlayerShip) == 0;
+            return Linked && system != null && system.PlayerShip != null && FleetShips.Slot(system.PlayerShip) == LeaderSlot;
         }
 
         private static VoidJumpSystem SystemOf(PlayerControlledShip ship)
@@ -91,7 +169,7 @@ namespace VoidCrewFleet
                 Counted.Add(false);
                 return true;
             }
-            bool allowed = _mirroring || _starting || _reading == __instance;
+            bool allowed = _mirroring || _starting || _reading == __instance || _vectorDepth > 0;
             if (!allowed || newActiveStateIndex >= FirstEndState)
             {
                 Counted.Add(false);
@@ -111,32 +189,36 @@ namespace VoidCrewFleet
             if (counted) _followerDepth--;
         }
 
-        /// <summary>Ship 1 changed state: the client driving ship 2's jump system makes ship 2 do the same.</summary>
+        /// <summary>The lead ship changed state: the client driving each follower's jump system makes it do the same.</summary>
         [GamePatch(Feature, "Gameplay.Ship.VoidJump.VoidJumpSystem", "ChangeActiveStateByIndex", PatchKind.Postfix)]
         private static void ChangeStatePostfix(VoidJumpSystem __instance, int newActiveStateIndex)
         {
             if (!IsLeader(__instance) || newActiveStateIndex >= FirstEndState || ChangeStateByIndex == null) return;
-            PlayerControlledShip followerShip = FleetShips.BySlot(1);
-            VoidJumpSystem follower = SystemOf(followerShip);
-            if (follower == null || follower.photonView == null || !follower.photonView.AmOwner) return;
-            try
+            foreach (PlayerControlledShip followerShip in new List<PlayerControlledShip>(FleetShips.All))
             {
-                if (StateIndexField != null && (int)StateIndexField.GetValue(follower) == newActiveStateIndex) return;
-                if (newActiveStateIndex >= StateAligning && newActiveStateIndex <= StateTravellingUnstable && follower.ActiveSystemHook == null)
+                if (followerShip == null || followerShip == __instance.PlayerShip) continue;
+                VoidJumpSystem follower = SystemOf(followerShip);
+                if (follower == null || follower.photonView == null || !follower.photonView.AmOwner) continue;
+                try
                 {
-                    VoidDriveModule drive = followerShip.GetModule<VoidDriveModule>();
-                    if (drive != null) follower.ActiveSystemHook = drive;
+                    if (followerShip.StartedDeath) continue;
+                    if (StateIndexField != null && (int)StateIndexField.GetValue(follower) == newActiveStateIndex) continue;
+                    if (newActiveStateIndex >= StateAligning && newActiveStateIndex <= StateTravellingUnstable && follower.ActiveSystemHook == null)
+                    {
+                        VoidDriveModule drive = followerShip.GetModule<VoidDriveModule>();
+                        if (drive != null) follower.ActiveSystemHook = drive;
+                    }
+                    _mirroring = true;
+                    ChangeStateByIndex.Invoke(follower, new object[] { newActiveStateIndex });
                 }
-                _mirroring = true;
-                ChangeStateByIndex.Invoke(follower, new object[] { newActiveStateIndex });
-            }
-            catch (Exception e)
-            {
-                Log.Failure("Moving ship 2 through the void jump with ship 1", e);
-            }
-            finally
-            {
-                _mirroring = false;
+                catch (Exception e)
+                {
+                    Log.Failure("Moving " + FleetShips.Describe(followerShip) + " through the void jump with the lead ship", e);
+                }
+                finally
+                {
+                    _mirroring = false;
+                }
             }
         }
 
@@ -166,11 +248,49 @@ namespace VoidCrewFleet
             _starting = false;
         }
 
-        /// <summary>Ship 2's own signals (lever, exit vector, "not charged") don't move it; ship 1's jump does.</summary>
+        private static int _vectorDepth;
+        private static bool _sharingVector;
+
+        /// <summary>
+        /// A following ship's own signals (its timers, "not charged", "aligned") don't move it; the lead ship's jump does. The
+        /// escape vector is the sector's, though: set (or cleared) on any ship's astral map before a jump, it is set (or
+        /// cleared) on every ship at once.
+        /// </summary>
         [GamePatch(Feature, "Gameplay.Ship.VoidJump.VoidJumpSystem", "SendSignal", PatchKind.Prefix)]
-        private static bool SignalPrefix(VoidJumpSystem __instance)
+        private static bool SignalPrefix(VoidJumpSystem __instance, VoidJumpSignal signal, out bool __state)
         {
-            return !IsFollower(__instance);
+            __state = false;
+            if (!Linked) return true;
+            bool vector = signal == VoidJumpSignal.ExitVectorSet || signal == VoidJumpSignal.ExitVectorUnset;
+            if (!vector || JumpUnderWay()) return !IsFollower(__instance);
+            __state = true;
+            _vectorDepth++;
+            if (_sharingVector || __instance.photonView == null || !__instance.photonView.AmOwner) return true;
+            _sharingVector = true;
+            try
+            {
+                foreach (PlayerControlledShip ship in new List<PlayerControlledShip>(FleetShips.All))
+                {
+                    VoidJumpSystem other = SystemOf(ship);
+                    if (other == null || other == __instance || ship.StartedDeath || other.photonView == null || !other.photonView.AmOwner) continue;
+                    other.SendSignal(signal);
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Sharing the escape vector with every ship", e);
+            }
+            finally
+            {
+                _sharingVector = false;
+            }
+            return true;
+        }
+
+        [GamePatch(Feature, "Gameplay.Ship.VoidJump.VoidJumpSystem", "SendSignal", PatchKind.Finalizer)]
+        private static void SignalFinalizer(bool __state)
+        {
+            if (__state) _vectorDepth--;
         }
 
         // ---------------------------------------------------------------- once per jump, not once per ship
@@ -223,6 +343,29 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- who may pull the lever
 
+        /// <summary>The player whose lever pull the host is handling right now (inside the game's start request), or -1.</summary>
+        private static int _startRequestFrom = -1;
+
+        [GamePatch(Feature, "CG.Ship.Modules.VoidDriveModule", "TryStartImpulseJumpInternal", PatchKind.Prefix)]
+        private static void StartRequestPrefix(PhotonMessageInfo info)
+        {
+            _startRequestFrom = info.Sender != null ? info.Sender.ActorNumber : (PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : 0);
+        }
+
+        [GamePatch(Feature, "CG.Ship.Modules.VoidDriveModule", "TryStartImpulseJumpInternal", PatchKind.Finalizer)]
+        private static void StartRequestFinalizer()
+        {
+            _startRequestFrom = -1;
+        }
+
+        /// <summary>
+        /// Pulling a void lever. In PvP there are no jumps. In co-op any ship's lever starts the jump for every ship, once
+        /// every ship's void drive is charged (and that ship has the escape vector, as the game checks): that ship leads the
+        /// jump and the others follow it. While one ship's drive isn't charged, the lever says which ship and nothing starts.
+        /// During a jump, any ship's lever acts as the lead ship's.
+        /// The game checks a pull twice: on the puller's screen (for the message) and on the host (to start the jump); the
+        /// host makes the changes.
+        /// </summary>
         [GamePatch(Feature, "CG.Ship.Modules.VoidDriveModule", "TryStartJumpEngine", PatchKind.Prefix)]
         private static bool TryStartJumpPrefix(VoidDriveModule __instance, ref ImpulseJumpOutcome __result)
         {
@@ -236,18 +379,65 @@ namespace VoidCrewFleet
                     Warn("No void jumps in a PvP match: the fight ends when a ship is destroyed.");
                     return false;
                 }
-                if (Linked && FleetShips.Slot(ship) == 1)
+                if (!Linked) return true;
+                bool hostRequest = _startRequestFrom >= 0 && PhotonNetwork.IsMasterClient;
+                int slot = FleetShips.Slot(ship);
+                if (JumpUnderWay())
                 {
-                    __result = ImpulseJumpOutcome.CantFlyNoImpulse;
-                    Warn("Ship 1 makes the void jump, and ship 2 jumps with it. You can still pick the destination on the astral map.");
+                    int lead = LeaderSlot;
+                    if (slot == lead || lead < 0) return true;
+                    // A following ship's lever, mid-jump: it pulls the lead ship's (with the game's own checks for that ship).
+                    if (hostRequest)
+                    {
+                        PlayerControlledShip leadShip = FleetShips.BySlot(lead);
+                        VoidDriveModule leaderDrive = leadShip != null ? leadShip.GetModule<VoidDriveModule>() : null;
+                        __result = ImpulseJumpOutcome.CantFlyNoImpulse;
+                        if (leaderDrive != null && leaderDrive != __instance) leaderDrive.TryStartImpulseJump();
+                    }
+                    else
+                    {
+                        __result = ImpulseJumpOutcome.InTransit;
+                    }
                     return false;
                 }
+                // Starting a jump: every ship's void drive must be charged.
+                List<string> uncharged = UnchargedShips();
+                if (uncharged.Count > 0)
+                {
+                    __result = ImpulseJumpOutcome.CantFlyNoImpulse;
+                    string text = "Void drive not charged on " + string.Join(" and ", uncharged.ToArray()) + ": every ship's void drive must be charged to jump.";
+                    if (hostRequest)
+                    {
+                        Log.Info("Void jump refused (" + FleetShips.Describe(ship) + "'s lever): " + text);
+                        if (_startRequestFrom != FleetShips.LocalActor) Net.ToActor(_startRequestFrom, Msg.Notice, text);
+                    }
+                    else
+                    {
+                        Warn(text);
+                    }
+                    return false;
+                }
+                // This ship leads the jump; the game's own checks follow (the escape vector, power, the helm, its charge).
+                if (hostRequest && slot >= 0) SetLead(slot);
             }
             catch (Exception e)
             {
-                Log.Failure("Checking who may start the void jump", e);
+                Log.Failure("Checking the void jump", e);
             }
             return true;
+        }
+
+        /// <summary>"Ship 2", "Ship 3": the living ships whose void drive isn't fully charged.</summary>
+        private static List<string> UnchargedShips()
+        {
+            var names = new List<string>();
+            foreach (int slot in FleetShips.AliveSlots())
+            {
+                PlayerControlledShip ship = FleetShips.BySlot(slot);
+                VoidDriveModule drive = ship != null ? ship.GetModule<VoidDriveModule>() : null;
+                if (drive == null || !drive.IsFullyCharged) names.Add("Ship " + (slot + 1));
+            }
+            return names;
         }
 
         private static void Warn(string text)
@@ -266,6 +456,7 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- arriving side by side
 
+        /// <summary>A ship's place in the line of ships arriving side by side: by its number among the living ships.</summary>
         private static Vector3 ArrivalOffset(VoidJumpSystem system, Sector.ImpulseEnterPoint enter)
         {
             if (!Linked || system == null || system.PlayerShip == null || enter == null) return Vector3.zero;
@@ -273,8 +464,10 @@ namespace VoidCrewFleet
             look.y = 0f;
             if (look.sqrMagnitude < 0.01f) look = Vector3.forward;
             Vector3 right = Vector3.Cross(Vector3.up, look.normalized);
-            float half = Settings.ShipSpacing.Value * 0.5f;
-            return right * (FleetShips.Slot(system.PlayerShip) == 0 ? -half : half);
+            List<int> alive = FleetShips.AliveSlots();
+            int index = alive.IndexOf(FleetShips.Slot(system.PlayerShip));
+            if (index < 0) return Vector3.zero;
+            return ShipSpawn.LineOffset(index, alive.Count, right, Settings.ShipSpacing.Value);
         }
 
         private static Sector.ImpulseEnterPoint EnterPoint(VoidJumpSystem system)

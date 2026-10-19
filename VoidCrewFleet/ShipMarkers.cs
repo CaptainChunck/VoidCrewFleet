@@ -41,8 +41,8 @@ namespace VoidCrewFleet
         private static bool IsOtherTeam(int actor)
         {
             if (!FleetSession.IsPvP) return false;
-            int mine = FleetShips.CrewSlot(FleetShips.LocalActor);
-            int theirs = FleetShips.CrewSlot(actor);
+            int mine = FleetShips.TeamOfActor(FleetShips.LocalActor);
+            int theirs = FleetShips.TeamOfActor(actor);
             return mine >= 0 && theirs >= 0 && mine != theirs;
         }
 

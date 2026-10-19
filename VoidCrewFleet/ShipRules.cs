@@ -178,10 +178,10 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>The rules can change only on the host, in the hub, while the teams are being picked.</summary>
+        /// <summary>The rules can change only on the host, in the hub, while the Fleet Battle teams are being picked.</summary>
         public static bool CanEdit
         {
-            get { return PhotonNetwork.IsMasterClient && PvpTeams.HubChoosing; }
+            get { return PhotonNetwork.IsMasterClient && PvpTeams.HubChoosing && FleetApi.IsTeamMatch; }
         }
 
         /// <summary>Host: change the rules (a copy of what is shown, changed by the caller) and remember them for next time.</summary>

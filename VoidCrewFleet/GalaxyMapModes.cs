@@ -84,14 +84,15 @@ namespace VoidCrewFleet
                 Log.Failure("Reading the Pilgrimage's picture", e);
             }
             _fleetInfo = ContextInfo.Create(icon, "FLEET PILGRIMAGE",
-                "The Pilgrimage for <b>two ships</b>. Enemies come in greater numbers and every sector holds more objectives, so the two crews can split up " +
-                "and work on different objectives at the same time. Up to 16 players, shared evenly between the ships.\n" +
+                "The Pilgrimage for <b>two or three ships</b>. Enemies come in greater numbers and every sector holds more objectives, so the crews can split " +
+                "up and work on different objectives at the same time. Up to 24 players; each picks the ship they fly.\n" +
                 "<i>Fleet missions give no XP or rewards (Void Crew's modding rules).</i>");
             _battleInfo = ContextInfo.Create(icon, "FLEET BATTLE",
-                "<b>PvP</b>: two crews, one ship each, starting on opposite sides of an asteroid field full of objectives that pay out alloys for upgrades and ammo. " +
-                "Pick your team before the match; the host balances and confirms the teams. Board through open airlocks, or hack one with a hacking " +
-                "terminal from the fabricator to open the enemy's doors for five minutes. Sabotage enemy systems at their " +
-                "enhancement panels, and destroy the enemy ship to win.\n<i>No XP or rewards (Void Crew's modding rules).</i>");
+                "<b>PvP</b>: two teams of one to three ships each, starting on opposite sides of an asteroid field full of objectives that pay out alloys for " +
+                "upgrades and ammo. Pick your ship before the match; the host sets the ships, balances and confirms the teams. Board through open airlocks, " +
+                "or hack one with a hacking terminal from the fabricator to open the enemy's doors for five minutes. Sabotage enemy systems at their " +
+                "enhancement panels, and destroy every enemy ship to win: a ship's crew watches once it is lost.\n" +
+                "<i>No XP or rewards (Void Crew's modding rules).</i>");
             _fleetInfo.hideFlags = HideFlags.DontUnloadUnusedAsset;
             _battleInfo.hideFlags = HideFlags.DontUnloadUnusedAsset;
         }
@@ -172,8 +173,8 @@ namespace VoidCrewFleet
         {
             if (EntryKind == null || __instance == null) return;
             int kind = Convert.ToInt32(EntryKind.GetValue(__instance));
-            if (kind == FleetPilgrimageType) __result = "PILGRIMAGE · 2 SHIPS";
-            else if (kind == FleetBattleType) __result = "PVP · 2 SHIPS";
+            if (kind == FleetPilgrimageType) __result = "PILGRIMAGE · FLEET";
+            else if (kind == FleetBattleType) __result = "PVP · TEAMS";
         }
     }
 }

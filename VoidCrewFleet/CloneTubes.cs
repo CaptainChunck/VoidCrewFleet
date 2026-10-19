@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using System.Reflection.Emit;
 using CG.Game.Player;
 using CG.Ship.Modules;
 using CG.Space;
+using HarmonyLib;
 using Photon.Pun;
 
 namespace VoidCrewFleet
@@ -11,13 +14,21 @@ namespace VoidCrewFleet
     /// <summary>
     /// Clone tubes are the only places players spawn. The game keeps one list (the last ship's tubes win) with indices
     /// that restart at 0 per ship, and sends those indices over the network. Here every ship's tubes go into one list,
-    /// ship 1's first (ships ordered by root view ID, the same on every client), and each tube's Index becomes its
-    /// place in that list, so the game's spawn messages keep working. The host then gives each player a tube on their
-    /// own crew's ship (and, in PvP, nobody spawns before the teams are confirmed).
+    /// ship 1's first (ships ordered by root view ID, the same on every client), and each tube's Index becomes a code
+    /// that never changes while the ship exists: its ship's slot x 100 + its place on that ship (ship 1's tubes keep the
+    /// game's own numbers). The game's spawn messages carry that code, and the game's lookups of a tube by index find the
+    /// tube with that code, so a ship lost from the middle of the list doesn't renumber the others. The host then gives
+    /// each player a tube on their own ship, the one they were given, and no other (in PvP nobody spawns before the teams
+    /// are confirmed; a player whose ship was lost doesn't spawn at all).
     /// </summary>
     internal static class CloneTubes
     {
         public const string Feature = FleetShips.Feature;
+
+        private const int SlotStride = 100;
+
+        private static readonly MethodInfo ListGetItem = AccessTools.PropertyGetter(typeof(List<CloneTube>), "Item");
+        private static readonly MethodInfo TubeAtMethod = AccessTools.Method(typeof(CloneTubes), "TubeAt");
 
         private sealed class ShipTubes
         {
@@ -120,14 +131,75 @@ namespace VoidCrewFleet
             var all = new List<CloneTube>();
             foreach (ShipTubes entry in Registered.OrderBy(r => r.ShipView))
             {
-                foreach (CloneTube tube in entry.Tubes)
+                int slot = entry.Ship != null ? FleetShips.Slot(entry.Ship) : -1;
+                for (int local = 0; local < entry.Tubes.Count; local++)
                 {
+                    CloneTube tube = entry.Tubes[local];
                     if (tube == null) continue;
-                    tube.Index = all.Count;
+                    // Tubes that aren't on a player ship (the hub's) keep their place in the list, as in the game.
+                    tube.Index = slot >= 0 ? slot * SlotStride + local : all.Count;
                     all.Add(tube);
                 }
             }
             return all;
+        }
+
+        /// <summary>
+        /// A few times a second: every tube's code follows its ship's slot as this client knows it now (a client can see a
+        /// ship before the host has said which slot it is).
+        /// </summary>
+        public static void Recode()
+        {
+            try
+            {
+                if (Registered.Count < 2) return;
+                foreach (ShipTubes entry in Registered)
+                {
+                    int slot = entry.Ship != null ? FleetShips.Slot(entry.Ship) : -1;
+                    if (slot < 0) continue;
+                    for (int local = 0; local < entry.Tubes.Count; local++)
+                    {
+                        CloneTube tube = entry.Tubes[local];
+                        if (tube != null) tube.Index = slot * SlotStride + local;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Numbering the clone tubes", e);
+            }
+        }
+
+        /// <summary>The game's "tube number index" lookups: the tube with that code, else (the game's own meaning) its place in the list.</summary>
+        public static CloneTube TubeAt(List<CloneTube> list, int index)
+        {
+            if (list == null) return null;
+            foreach (CloneTube tube in list)
+            {
+                if (tube != null && tube.Index == index) return tube;
+            }
+            return index >= 0 && index < list.Count ? list[index] : null;
+        }
+
+        [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "RespawnPlayer", PatchKind.Transpiler)]
+        [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "InitializeCharacter", PatchKind.Transpiler)]
+        private static IEnumerable<CodeInstruction> TubeLookupTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
+        {
+            int replaced = 0;
+            foreach (CodeInstruction instruction in instructions)
+            {
+                if ((instruction.opcode == OpCodes.Callvirt || instruction.opcode == OpCodes.Call) && ListGetItem != null && Equals(instruction.operand, ListGetItem))
+                {
+                    var call = new CodeInstruction(OpCodes.Call, TubeAtMethod);
+                    call.labels.AddRange(instruction.labels);
+                    call.blocks.AddRange(instruction.blocks);
+                    yield return call;
+                    replaced++;
+                    continue;
+                }
+                yield return instruction;
+            }
+            if (replaced == 0) Log.Warn("Clone tubes: " + original.DeclaringType.FullName + "." + original.Name + " no longer looks a tube up by index; the game may have changed.");
         }
 
         private static List<CloneTube> TubesOf(PlayerControlledShip ship)
@@ -143,20 +215,17 @@ namespace VoidCrewFleet
         // ---------------------------------------------------------------- which ship a player spawns on
 
         /// <summary>
-        /// The ship a player should spawn on: their crew's ship, unless it is gone or dying in co-op, then the other one.
-        /// Null when they must wait (PvP before the teams are set, or their ship is gone in PvP).
+        /// The ship a player spawns on: always the ship they were given (in the lobby, or by the host when they joined), never
+        /// another. Null when they must wait: the host hasn't placed them yet (it does within a moment), PvP before the teams
+        /// are set, or a spectator (their ship was lost: they are not re-cloned).
         /// </summary>
         private static PlayerControlledShip SpawnShipFor(Photon.Realtime.Player player)
         {
             if (player == null) return null;
-            PlayerControlledShip own = FleetShips.ShipOfActor(player.ActorNumber);
-            if (own != null && !own.StartedDeath) return own;
-            if (FleetSession.IsPvP) return null;
-            foreach (PlayerControlledShip ship in FleetShips.All)
-            {
-                if (ship != null && !ship.StartedDeath) return ship;
-            }
-            return null;
+            CrewEntry entry;
+            if (!FleetShips.TryGetEntry(player.ActorNumber, out entry) || entry.IsSpectator) return null;
+            PlayerControlledShip own = FleetShips.BySlot(entry.Slot);
+            return own != null && !own.StartedDeath ? own : null;
         }
 
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "TrySpawnPlayer", PatchKind.Prefix)]
@@ -256,13 +325,13 @@ namespace VoidCrewFleet
             ShipRedirect.EndOverride();
         }
 
-        /// <summary>A respawn message names a tube by its index in the combined list; refuse indices this client doesn't have.</summary>
+        /// <summary>A respawn message names a tube by its code; refuse codes this client doesn't know (its ship may be gone here).</summary>
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "RespawnPlayer", PatchKind.Prefix)]
         private static bool RespawnPrefix(int clonetubeIndex, List<CloneTube> ___clonetubes)
         {
-            if (___clonetubes != null && clonetubeIndex >= 0 && clonetubeIndex < ___clonetubes.Count) return true;
+            if (TubeAt(___clonetubes, clonetubeIndex) != null) return true;
             Log.Warn("The host sent clone tube " + clonetubeIndex + " but this client knows " + (___clonetubes != null ? ___clonetubes.Count : 0) +
-                     " tubes; asking to spawn again.");
+                     " tubes and none with that number; asking to spawn again.");
             if (SpawnSystem.Instance != null) SpawnSystem.Instance.RequestSpawn();
             return false;
         }

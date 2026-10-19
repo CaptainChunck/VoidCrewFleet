@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
 using CG.Game;
@@ -14,17 +15,17 @@ namespace VoidCrewFleet
 {
     /// <summary>
     /// Each player ship has its own alloys and biomass (the game keeps one count for the room, used by every fabricator,
-    /// bioport and clone tube). With two ships:
+    /// bioport and clone tube). With several ships:
     /// - the host keeps one count per ship and sends each change through the game's own NotifyAlloyChange /
     ///   NotifyBiomassChange messages, with the ship appended to the item GUID array (the game reads only its first four
-    ///   numbers), so every client knows both counts, late joiners included;
+    ///   numbers), so every client knows every ship's count, late joiners included;
     /// - fabricators, recyclers, fabricator upgrades, bioports and clone tubes check and spend their own ship's count, and
     ///   learn blueprints for their own ship;
     /// - the game's own count (HUD, ship voice lines, ship status, clone tube screen) is the count of the ship the local
     ///   player belongs to right now (FleetShips.ViewShip), switched silently when that changes; fabricator terminals
     ///   always show their own ship's count;
-    /// - both ships start with the game's own starting amounts, except that ship 2 with a loadout of its own starts with its
-    ///   own alloys (its CUSTOM loadout's, or the game's default); the end-of-mission tally counts the player's own ship.
+    /// - every ship starts with the game's own starting amounts, except that a ship 2-6 with a loadout of its own starts with
+    ///   its own alloys (its CUSTOM loadout's, or the game's default); the end-of-mission tally counts the player's own ship.
     /// With one ship nothing is tagged or redirected.
     /// </summary>
     internal static class ShipResources
@@ -34,10 +35,12 @@ namespace VoidCrewFleet
         private const int Tag = 0x56434652; // "VCFR"
         private const string KeyStart = "VCF_ResStart";
 
-        private static readonly int[] Alloy = new int[2];
-        private static readonly int[] Biomass = new int[2];
-        private static readonly bool[] HasAlloy = new bool[2];
-        private static readonly bool[] HasBiomass = new bool[2];
+        private const int Slots = FleetSlots.MaxSlots;
+
+        private static readonly int[] Alloy = new int[Slots];
+        private static readonly int[] Biomass = new int[Slots];
+        private static readonly bool[] HasAlloy = new bool[Slots];
+        private static readonly bool[] HasBiomass = new bool[Slots];
         private static readonly List<int> Attributed = new List<int>();
         private static int[] _hostStart;
         private static int _shown = -1;
@@ -68,8 +71,21 @@ namespace VoidCrewFleet
         /// <summary>For reports: "ship 1 120 alloys / 50 biomass, ship 2 ...".</summary>
         public static string Describe()
         {
-            return "ship 1 " + Alloy[0] + " alloys / " + Biomass[0] + " biomass, ship 2 " + Alloy[1] + " alloys / " + Biomass[1] + " biomass, shown " +
-                   (_shown + 1);
+            var text = new System.Text.StringBuilder();
+            for (int slot = 0; slot < ShipSlots; slot++)
+                text.Append("ship ").Append(slot + 1).Append(' ').Append(Alloy[slot]).Append(" alloys / ").Append(Biomass[slot]).Append(" biomass, ");
+            return text.Append("shown ").Append(_shown + 1).ToString();
+        }
+
+        /// <summary>How many ships this mission has counts for.</summary>
+        private static int ShipSlots
+        {
+            get { return Mathf.Clamp(Mathf.Max(FleetShips.PublishedCount, FleetSession.ShipCount), 1, Slots); }
+        }
+
+        private static bool Valid(int slot)
+        {
+            return slot >= 0 && slot < Slots;
         }
 
         // ---------------------------------------------------------------- which ship a piece of code is for
@@ -91,7 +107,7 @@ namespace VoidCrewFleet
         {
             if (_pinned >= 0) return _pinned;
             int slot = FleetShips.Slot(FleetShips.ViewShip);
-            return slot >= 0 && slot <= 1 ? slot : 0;
+            return Valid(slot) ? slot : 0;
         }
 
         private static int Shown()
@@ -106,14 +122,14 @@ namespace VoidCrewFleet
         {
             if (!Active) return manager.AlloyAmount;
             int slot = SlotOf(context);
-            return slot >= 0 && slot <= 1 && HasAlloy[slot] ? Alloy[slot] : manager.AlloyAmount;
+            return Valid(slot) && HasAlloy[slot] ? Alloy[slot] : manager.AlloyAmount;
         }
 
         public static int BiomassFor(GameSessionSuppliesManager manager, object context)
         {
             if (!Active) return manager.BiomassAmount;
             int slot = SlotOf(context);
-            return slot >= 0 && slot <= 1 && HasBiomass[slot] ? Biomass[slot] : manager.BiomassAmount;
+            return Valid(slot) && HasBiomass[slot] ? Biomass[slot] : manager.BiomassAmount;
         }
 
         public static void ModifyAlloyFor(GameSessionSuppliesManager manager, int add, ResourceChangeAlloy cause, GUIDUnion guid, object context)
@@ -202,7 +218,7 @@ namespace VoidCrewFleet
         {
             slot = -1;
             int[] a = guid;
-            if (a == null || a.Length != 6 || a[4] != Tag || a[5] < 0 || a[5] > 1) return false;
+            if (a == null || a.Length != 6 || a[4] != Tag || !Valid(a[5])) return false;
             slot = a[5];
             guid = new[] { a[0], a[1], a[2], a[3] };
             return true;
@@ -211,7 +227,7 @@ namespace VoidCrewFleet
         /// <summary>Host: a ship's new count, through the game's own message (it also runs here at once and is stored).</summary>
         private static void Send(GameSessionSuppliesManager manager, int slot, bool alloy, int value, bool voice, byte cause, GUIDUnion guid)
         {
-            if (slot < 0 || slot > 1) return;
+            if (!Valid(slot)) return;
             if (!alloy) value = Mathf.Max(0, value);
             manager.photonView.RPC(alloy ? "NotifyAlloyChange" : "NotifyBiomassChange", RpcTarget.All, value, voice, cause, Tagged(guid, slot));
         }
@@ -219,10 +235,11 @@ namespace VoidCrewFleet
         private static int AttributedSlot()
         {
             int slot = Attributed.Count > 0 ? Attributed[Attributed.Count - 1] : -1;
-            if (slot >= 0 && slot <= 1) return slot;
+            if (Valid(slot)) return slot;
             slot = FleetShips.Slot(ClientGame.Current != null ? ClientGame.Current.PlayerShip : null);
-            Log.WarnOnce("resources unattributed", "A resource change did not say which ship it is for; it goes to " + (slot == 1 ? "ship 2" : "ship 1") + ".");
-            return slot >= 0 && slot <= 1 ? slot : 0;
+            if (!Valid(slot)) slot = 0;
+            Log.WarnOnce("resources unattributed", "A resource change did not say which ship it is for; it goes to ship " + (slot + 1) + ".");
+            return slot;
         }
 
         [GamePatch(Feature, "GameSessionSuppliesManager", "ModifyAlloyCount", PatchKind.Prefix)]
@@ -245,32 +262,34 @@ namespace VoidCrewFleet
             return false;
         }
 
-        /// <summary>Mission start and the quest "set resources" action: both ships. Debug tools: the ship shown here.</summary>
+        /// <summary>Mission start and the quest "set resources" action: every ship. Debug tools: the ship shown here.</summary>
         [GamePatch(Feature, "GameSessionSuppliesManager", "SetAlloyAmountNoNotification", PatchKind.Prefix)]
         private static bool SetAlloyPrefix(GameSessionSuppliesManager __instance, int alloyAmount, ResourceChangeAlloy changeCause)
         {
             if (!Active) return true;
             if (!__instance.photonView.IsMine) return false;
-            for (int slot = 0; slot < 2; slot++)
+            for (int slot = 0; slot < ShipSlots; slot++)
             {
                 if (changeCause == ResourceChangeAlloy.DEBUG && slot != Shown()) continue;
-                int amount = slot == 1 ? ShipBStartAlloys(__instance, alloyAmount, changeCause) : alloyAmount;
+                int amount = slot > 0 ? StartAlloys(__instance, slot, alloyAmount, changeCause) : alloyAmount;
                 Send(__instance, slot, true, amount, false, (byte)changeCause, GUIDUnion.Empty());
             }
             return false;
         }
 
         /// <summary>
-        /// Ship 2's amount when the run starts: the same as ship 1 when it is a copy of ship 1; with a loadout of its own, its
-        /// CUSTOM starting alloys (Ship Customizer), or else the game's own amount (not ship 1's CUSTOM amount).
+        /// A ship 2-6's amount when the run starts: the same as ship 1 when it is a copy of ship 1; with a loadout of its own,
+        /// its CUSTOM starting alloys (Ship Customizer), or else the game's own amount (not ship 1's CUSTOM amount).
         /// </summary>
-        private static int ShipBStartAlloys(GameSessionSuppliesManager manager, int sessionAmount, ResourceChangeAlloy changeCause)
+        private static int StartAlloys(GameSessionSuppliesManager manager, int slot, int sessionAmount, ResourceChangeAlloy changeCause)
         {
             if (changeCause != ResourceChangeAlloy.GAME_SESSION_PROGRESS_TRACKER_START && changeCause != ResourceChangeAlloy.GAME_STATE_INGAME_ENTER) return sessionAmount;
             FleetPlan plan = FleetSession.Current;
-            if (plan == null || plan.ShipBAlloys == -2) return sessionAmount;
-            int amount = plan.ShipBAlloys >= 0 ? plan.ShipBAlloys : manager.GetTotalPlayerAlloyBonus();
-            Log.Info("Ship 2 starts with " + amount + " alloys (" + (plan.ShipBAlloys >= 0 ? "its CUSTOM loadout's" : "the game's own amount") + "); ship 1 with " + sessionAmount + ".");
+            ShipPlan ship = plan != null ? plan.Ship(slot) : null;
+            if (ship == null || ship.StartAlloys == -2) return sessionAmount;
+            int amount = ship.StartAlloys >= 0 ? ship.StartAlloys : manager.GetTotalPlayerAlloyBonus();
+            Log.Info("Ship " + (slot + 1) + " starts with " + amount + " alloys (" + (ship.StartAlloys >= 0 ? "its CUSTOM loadout's" : "the game's own amount") +
+                     "); ship 1 with " + sessionAmount + ".");
             return amount;
         }
 
@@ -279,7 +298,7 @@ namespace VoidCrewFleet
         {
             if (!Active) return true;
             if (!__instance.photonView.IsMine) return false;
-            for (int slot = 0; slot < 2; slot++)
+            for (int slot = 0; slot < ShipSlots; slot++)
             {
                 if (changeCause == ResourceChangeBiomass.DEBUG && slot != Shown()) continue;
                 Send(__instance, slot, false, biomassAmount, false, (byte)changeCause, GUIDUnion.Empty());
@@ -293,7 +312,7 @@ namespace VoidCrewFleet
         {
             if (!Active) return true;
             if (!__instance.photonView.IsMine) return false;
-            for (int slot = 0; slot < 2; slot++)
+            for (int slot = 0; slot < Slots; slot++)
             {
                 if (HasAlloy[slot])
                     __instance.photonView.RPC("NotifyAlloyChange", newPlayer, Alloy[slot], false, (byte)ResourceChangeAlloy.PLAYER_JOINED, Tagged(GUIDUnion.Empty(), slot));
@@ -368,6 +387,13 @@ namespace VoidCrewFleet
             }
             if (!_wasActive) return;
             _wasActive = false;
+            if (_survivor < 0)
+            {
+                // The ship that is left: its count is everyone's from now on.
+                IList<PlayerControlledShip> left = FleetShips.All;
+                int slot = left.Count == 1 ? FleetShips.Slot(left[0]) : -1;
+                if (Valid(slot)) _survivor = slot;
+            }
             if (_survivor >= 0)
             {
                 Show(manager, _survivor);
@@ -381,13 +407,19 @@ namespace VoidCrewFleet
             Reset();
         }
 
-        /// <summary>A ship is lost: its resources go with it, and the survivor's count is everyone's from now on.</summary>
+        /// <summary>
+        /// A ship is lost: its resources go with it. When one ship is left, its count is everyone's from now on; with more
+        /// left, each player's count follows the ship they are on.
+        /// </summary>
         public static void OnShipLost(PlayerControlledShip ship)
         {
             if (!Active) return;
             int dead = FleetShips.Slot(ship);
-            if (dead < 0 || dead > 1) return;
-            _survivor = 1 - dead;
+            if (!Valid(dead)) return;
+            List<int> alive = FleetShips.AliveSlots();
+            alive.Remove(dead);
+            if (alive.Count != 1) return;
+            _survivor = alive[0];
             _pinned = _survivor;
         }
 
@@ -400,7 +432,7 @@ namespace VoidCrewFleet
 
         private static void Reset()
         {
-            for (int i = 0; i < 2; i++)
+            for (int i = 0; i < Slots; i++)
             {
                 Alloy[i] = 0;
                 Biomass[i] = 0;
@@ -480,8 +512,8 @@ namespace VoidCrewFleet
             try
             {
                 if (GameSessionManager.InHub || !PhotonNetwork.IsMasterClient || !Active || PhotonNetwork.CurrentRoom == null) return;
-                var start = new int[2];
-                for (int slot = 0; slot < 2; slot++)
+                var start = new int[ShipSlots];
+                for (int slot = 0; slot < start.Length; slot++)
                 {
                     PlayerControlledShip ship = FleetShips.BySlot(slot);
                     if (ship == null) continue;
@@ -497,7 +529,7 @@ namespace VoidCrewFleet
                 }
                 _hostStart = start;
                 PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyStart, start } });
-                Log.Info("Each ship's starting value: ship 1 " + start[0] + ", ship 2 " + start[1] + " alloys.");
+                Log.Info("Each ship's starting value in alloys: " + string.Join(", ", start.Select((v, i) => "ship " + (i + 1) + " " + v).ToArray()) + ".");
             }
             catch (Exception e)
             {
@@ -533,7 +565,7 @@ namespace VoidCrewFleet
                 {
                     int slot = FleetShips.CrewSlot(FleetShips.LocalActor);
                     if (slot < 0) slot = FleetShips.Slot(FleetShips.ViewShip);
-                    if (slot >= 0 && slot <= 1)
+                    if (Valid(slot))
                     {
                         _pinned = slot;
                         Show(GameSessionSuppliesManager.Instance, slot);
@@ -566,7 +598,7 @@ namespace VoidCrewFleet
                 return;
             }
             int slot = FleetShips.Slot(ship);
-            if (slot < 0 || slot > 1) return;
+            if (!Valid(slot)) return;
             if (alloys != 0) Send(manager, slot, true, Alloy[slot] + alloys, true, (byte)ResourceChangeAlloy.QUEST, GUIDUnion.Empty());
             if (biomass != 0) Send(manager, slot, false, Biomass[slot] + biomass, true, (byte)ResourceChangeBiomass.QUEST, GUIDUnion.Empty());
         }
