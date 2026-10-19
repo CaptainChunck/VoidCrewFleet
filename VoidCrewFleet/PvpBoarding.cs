@@ -5,6 +5,7 @@ using CG.Client.Ship;
 using CG.Client.Ship.Modules.Mediators;
 using CG.Client.Player.Interactions;
 using CG.Client.Ship.Interactions;
+using CG.Game;
 using CG.Game.Player;
 using CG.Game.SpaceObjects.Controllers;
 using CG.Objects;
@@ -13,6 +14,7 @@ using CG.Ship.Modules;
 using CG.Ship.Object;
 using CG.Space;
 using Gameplay.Enhancements;
+using Gameplay.SpacePlatforms;
 using Photon.Pun;
 using UnityEngine;
 
@@ -22,11 +24,12 @@ namespace VoidCrewFleet
     /// Boarding rules in PvP. A player may go aboard the enemy ship through an airlock its crew left open, or after their
     /// team hacked one of its airlocks (<see cref="PvpHack"/>). Aboard the enemy ship a player may use:
     /// - its System Enhancement panels (sabotage), and the power switches of its modules (turn a turret, shield or any
-    ///   other system off), always;
+    ///   other system off), always; not the central computer's power switch, which is the whole ship's power;
     /// - its doors, airlock door buttons and pressurise levers, while their team has door access from a hack, except the
     ///   doors into the cockpit (never), and never an airlock's safety override.
     /// Nothing else: no seats, helm, turrets, terminals, other switches, sockets (the homunculus stays in its cradle),
-    /// items, repairs or clone tubes. Passing through an open door needs no interaction, so it always works.
+    /// items (the superior grappling hook doesn't catch them either), repairs or clone tubes. Passing through an open
+    /// door needs no interaction, so it always works.
     /// - Every client hides the enemy ship's interactables from its own player (the game's one interaction raycast), and
     ///   refuses to start a seat, terminal or minigame of the enemy ship (the game's one "activate abilities" event).
     ///   This also covers a host on the enemy team, whose actions never go through the network.
@@ -37,12 +40,18 @@ namespace VoidCrewFleet
         public const string Feature = "PvP boarding rules";
 
         private const float WarningSeconds = 20f;
+        private const float WarningGapSeconds = 3f;
 
         private static readonly Dictionary<int, bool> EnhancementParts = new Dictionary<int, bool>();
         private static readonly Dictionary<int, bool> PowerSwitches = new Dictionary<int, bool>();
+        private static readonly HashSet<int> MainPowerSwitches = new HashSet<int>();
         private static readonly Dictionary<int, AbstractDoor> DoorControls = new Dictionary<int, AbstractDoor>();
         private static readonly HashSet<int> PressurizeLevers = new HashSet<int>();
+        private static readonly HashSet<int> SafetySwitches = new HashSet<int>();
+        private static readonly Dictionary<int, bool> Stations = new Dictionary<int, bool>();
+        private static readonly Dictionary<string, float> WarningShown = new Dictionary<string, float>();
         private static float _lastWarning = -100f;
+        private static GrapplingHookProjectile _hookToRestore;
 
         /// <summary>The local player's team (0 BLUE, 1 RED), or -1 when not on a team.</summary>
         private static int LocalTeam
@@ -98,7 +107,10 @@ namespace VoidCrewFleet
             return part;
         }
 
-        /// <summary>A module's own power switch (any system's on/off switch).</summary>
+        /// <summary>
+        /// A module's own power switch (any system's on/off switch). Not the central computer's: that one switches the
+        /// whole ship's power, so a single click by a boarder would shut everything down.
+        /// </summary>
         public static bool IsModulePowerSwitch(Component component)
         {
             var clicker = component as SwitchClicker;
@@ -110,11 +122,10 @@ namespace VoidCrewFleet
             foreach (IShipModuleMediator mediator in clicker.GetComponentsInParent<IShipModuleMediator>(true))
             {
                 var property = mediator.GetType().GetProperty("PowerSwitch");
-                if (property != null && ReferenceEquals(property.GetValue(mediator, null), clicker))
-                {
-                    power = true;
-                    break;
-                }
+                if (property == null || !ReferenceEquals(property.GetValue(mediator, null), clicker)) continue;
+                if (mediator is CentralShipComputerMediator || mediator.Module is CentralShipComputerModule) MainPowerSwitches.Add(id);
+                else power = true;
+                break;
             }
             PowerSwitches[id] = power;
             return power;
@@ -165,24 +176,60 @@ namespace VoidCrewFleet
         }
 
         [GamePatch(Feature, "CG.Client.Ship.AirlockButtonPanel", "Initialize", PatchKind.Postfix)]
-        private static void AirlockPanelPostfix(ClickerInteractable ___pressurizationSwitch)
+        private static void AirlockPanelPostfix(ClickerInteractable ___pressurizationSwitch, SwitchClicker ___safetySwitch)
         {
             if (___pressurizationSwitch != null) PressurizeLevers.Add(___pressurizationSwitch.GetInstanceID());
+            if (___safetySwitch != null) SafetySwitches.Add(___safetySwitch.GetInstanceID());
         }
 
-        private static void Warn()
+        /// <summary>
+        /// Tells the local player why they can't use a thing of the enemy ship: each text at most every 20 seconds, and
+        /// none sooner than 3 seconds after the last one.
+        /// </summary>
+        private static void Warn(Component blocked, bool station)
         {
-            if (Time.unscaledTime - _lastWarning < WarningSeconds || HackTerminal.LocalHeld != null) return;
+            if (blocked == null || Time.unscaledTime - _lastWarning < WarningGapSeconds || HackTerminal.LocalHeld != null) return;
+            string text = WarningText(blocked, station);
+            float shown;
+            if (WarningShown.TryGetValue(text, out shown) && Time.unscaledTime - shown < WarningSeconds) return;
             _lastWarning = Time.unscaledTime;
+            WarningShown[text] = _lastWarning;
             try
             {
-                if (ViewEventBus.Instance != null)
-                    ViewEventBus.Instance.OnShowQuickWarning.Publish("ENEMY SHIP: only its System Enhancement panels and power switches (hack an airlock for its doors).");
+                if (ViewEventBus.Instance != null) ViewEventBus.Instance.OnShowQuickWarning.Publish(text);
             }
             catch
             {
                 // Only a hint.
             }
+        }
+
+        /// <summary>Why the local player can't use this thing of the enemy ship (no hacking advice while they have door access).</summary>
+        private static string WarningText(Component blocked, bool station)
+        {
+            int id = blocked.GetInstanceID();
+            AbstractDoor door;
+            if (DoorControls.TryGetValue(id, out door) && door != null && PvpHack.IsCockpitDoor(door)) return "ENEMY COCKPIT: its doors never open for enemies.";
+            if (SafetySwitches.Contains(id)) return "ENEMY SHIP: the airlock safety override is for its own crew only.";
+            if (MainPowerSwitches.Contains(id)) return "ENEMY SHIP: the central computer's power switch is for its own crew only.";
+            bool access = PvpHack.LocalHasAccess(ShipOf(blocked));
+            if (!access && IsDoorControl(blocked)) return "ENEMY SHIP: hack one of its airlocks to use its doors.";
+            if (blocked is Grabbable || blocked is SocketInteractable || blocked is CarryableObject) return "ENEMY SHIP: you can't take its items.";
+            if (station || IsStation(blocked)) return "ENEMY SHIP: its seats, helm, turrets, terminals and clone tubes are for its own crew only.";
+            return access
+                ? "ENEMY SHIP: only its doors, System Enhancement panels and power switches."
+                : "ENEMY SHIP: only its System Enhancement panels and power switches (hack an airlock for its doors).";
+        }
+
+        /// <summary>Part of something that seats or takes over a player: a seat, the helm, a turret, a terminal, a periscope, a clone tube.</summary>
+        private static bool IsStation(Component component)
+        {
+            int id = component.GetInstanceID();
+            bool station;
+            if (Stations.TryGetValue(id, out station)) return station;
+            station = (component.GetComponentInParent<IAbilityActivator>() as Component) != null;
+            Stations[id] = station;
+            return station;
         }
 
         // ---------------------------------------------------------------- the game's panels register their parts
@@ -209,10 +256,11 @@ namespace VoidCrewFleet
             if (!__result || interactable == null) return;
             try
             {
-                if (!Blocked(interactable)) return;
+                AbstractInteractable blocked = interactable;
+                if (!Blocked(blocked)) return;
                 __result = false;
                 interactable = null;
-                if (distance < 2.3f) Warn();
+                if (distance < 2.3f) Warn(blocked, false);
             }
             catch (Exception e)
             {
@@ -246,12 +294,96 @@ namespace VoidCrewFleet
                 var component = activator as Component;
                 if (component == null || !Blocked(component)) return true;
                 Log.Verbose("PvP: blocked " + component.GetType().Name + " on the enemy ship.");
-                Warn();
+                Warn(component, true);
                 return false;
             }
             catch (Exception e)
             {
                 Log.Failure("Checking an action on the enemy ship", e);
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// The superior grappling hook catches a loose item it hits, pulls it in and picks it up without the interaction
+        /// raycast: not an item of the enemy ship (even a dropped homunculus). On such a hit the hook acts like the standard
+        /// one, which doesn't catch items. Every client simulates every player's hook, so this goes by the team of the
+        /// player who threw it, and all of them agree.
+        /// </summary>
+        [GamePatch(Feature, "GrapplingHookProjectile", "TryHit", PatchKind.Prefix, Optional = true)]
+        private static void HookHitPrefix(GrapplingHookProjectile __instance, Collider hitCollider)
+        {
+            _hookToRestore = null;
+            if (__instance == null || !__instance.CanAttractCarryables || hitCollider == null || !PvpCombat.Active) return;
+            try
+            {
+                CarryableObject carryable = HookTarget(__instance, hitCollider);
+                if (carryable == null) return;
+                Player thrower = HookThrower(__instance);
+                int actor = thrower != null && thrower.photonView != null ? thrower.photonView.OwnerActorNr : FleetShips.LocalActor;
+                Component item = carryable.GetComponent<Grabbable>();
+                if (item == null) item = carryable;
+                if (!IsEnemyOf(actor, ShipOf(item))) return;
+                __instance.CanAttractCarryables = false;
+                _hookToRestore = __instance;
+                if (thrower != null && thrower == LocalPlayer.Instance) Warn(item, false);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking a grappling hook hit on the enemy ship", e);
+            }
+        }
+
+        [GamePatch(Feature, "GrapplingHookProjectile", "TryHit", PatchKind.Finalizer, Optional = true)]
+        private static void HookHitFinalizer()
+        {
+            GrapplingHookProjectile hook = _hookToRestore;
+            _hookToRestore = null;
+            if (hook != null) hook.CanAttractCarryables = true;
+        }
+
+        /// <summary>The item a grappling hook hit would catch: the game's own lookup of what was hit, when that is an item.</summary>
+        private static CarryableObject HookTarget(GrapplingHookProjectile hook, Collider hit)
+        {
+            IDamageReceiver receiver;
+            ConnectedSimulationObject simulated = hook.IsBeingSimulated ? hit.GetComponentInParent<ConnectedSimulationObject>() : null;
+            if (simulated != null) receiver = simulated.ConnectedObject != null ? simulated.ConnectedObject.GetComponent<IDamageReceiver>() : null;
+            else receiver = hit.GetComponentInParent<IDamageReceiver>();
+            return receiver as CarryableObject;
+        }
+
+        /// <summary>The player whose grappling hook ability threw this hook, or null.</summary>
+        private static Player HookThrower(GrapplingHookProjectile hook)
+        {
+            ClientGame game = ClientGame.Current;
+            if (game == null || game.Players == null) return null;
+            foreach (Player player in game.Players)
+            {
+                if (player == null || player.Locomotion == null) continue;
+                var ability = player.Locomotion.GetAbility<ChannelGrapplingHook>();
+                if (ability != null && ability.ActiveHeadProjectileInstance == hook) return player;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Backstop: the local player picks up nothing of the enemy ship that the interaction raycast doesn't offer (the
+        /// grappling hook picks up what it pulled in through here).
+        /// </summary>
+        [GamePatch(Feature, "CarryableInteract", "StartInteraction", PatchKind.Prefix, Optional = true,
+            Arguments = new[] { "CG.Client.Player.Interactions.AbstractInteractable", "System.Boolean" })]
+        private static bool StartInteractionPrefix(AbstractInteractable interactable, LocalPlayer ___player)
+        {
+            if (interactable == null || !PvpCombat.Active) return true;
+            try
+            {
+                if (___player == null || ___player != LocalPlayer.Instance || !Blocked(interactable)) return true;
+                Log.Verbose("PvP: blocked picking up " + interactable.GetType().Name + " of the enemy ship.");
+                return false;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking a pick-up on the enemy ship", e);
                 return true;
             }
         }
