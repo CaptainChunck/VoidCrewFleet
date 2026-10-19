@@ -5,6 +5,7 @@ using ExitGames.Client.Photon;
 using Photon.Pun;
 using Photon.Realtime;
 using ResourceAssets;
+using UnityEngine;
 
 namespace VoidCrewFleet
 {
@@ -28,15 +29,33 @@ namespace VoidCrewFleet
 
         private const string KeyLocked = "VCF_TeamsLocked";
 
+        /// <summary>
+        /// The host's own latest confirm or reopen, for a few seconds: the room's property only changes here once the server
+        /// has sent it back, and the host acts on the lock right after changing it (late joiners, ship requests).
+        /// </summary>
+        private static bool _hostLocked;
+        private static float _hostLockedAt = -100f;
+        private static string _hostLockedRoom;
+
         /// <summary>True once the host has confirmed the teams (Fleet Battle) or the crews (co-op) for this mission.</summary>
         public static bool Locked
         {
             get
             {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return false;
+                if (PhotonNetwork.IsMasterClient && Time.unscaledTime - _hostLockedAt < 3f && PhotonNetwork.CurrentRoom.Name == _hostLockedRoom) return _hostLocked;
                 object value;
-                return PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null && PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeyLocked, out value) &&
-                       value is bool && (bool)value;
+                return PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeyLocked, out value) && value is bool && (bool)value;
             }
+        }
+
+        /// <summary>Host: confirm (or reopen) the picks: here at once, in the room after a round trip.</summary>
+        private static void SetLocked(bool locked)
+        {
+            _hostLocked = locked;
+            _hostLockedAt = Time.unscaledTime;
+            _hostLockedRoom = PhotonNetwork.CurrentRoom.Name;
+            PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyLocked, locked ? (object)true : null } });
         }
 
         /// <summary>While true (a PvP match before the teams are confirmed) the host holds every spawn request.</summary>
@@ -61,22 +80,6 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>The hub plans a co-op mission with several ships.</summary>
-        public static bool CoopPlanned
-        {
-            get
-            {
-                try
-                {
-                    return GameSessionManager.InHub && HubFleet.HostHasFleet && HubFleet.PlannedMode == FleetMode.Coop;
-                }
-                catch
-                {
-                    return false;
-                }
-            }
-        }
-
         /// <summary>The hub plans a fleet mission whose crews (and teams) aren't confirmed yet: everyone picks a ship.</summary>
         public static bool HubChoosing
         {
@@ -87,18 +90,6 @@ namespace VoidCrewFleet
         public static bool PickingTeams
         {
             get { return Choosing || HubChoosing; }
-        }
-
-        /// <summary>Co-op crews are being picked in the hub.</summary>
-        public static bool CoopPicking
-        {
-            get { return CoopPlanned && !Locked; }
-        }
-
-        /// <summary>Ships can be picked right now (Fleet Battle teams, or co-op crews in the hub).</summary>
-        public static bool Picking
-        {
-            get { return PickingTeams; }
         }
 
         /// <summary>How many ships players pick from: the hub's planned ships, or the running mission's.</summary>
@@ -157,7 +148,7 @@ namespace VoidCrewFleet
         {
             Net.On(Msg.CrewRequest, (sender, data) =>
             {
-                if (!PhotonNetwork.IsMasterClient || !Picking) return;
+                if (!PhotonNetwork.IsMasterClient || !PickingTeams) return;
                 int slot = Net.Get(data, 0, -1);
                 Dictionary<int, CrewEntry> crews = FleetShips.Crews();
                 CrewEntry current;
@@ -174,7 +165,7 @@ namespace VoidCrewFleet
             });
             Net.On(Msg.CrewMove, (sender, data) =>
             {
-                if (!PhotonNetwork.IsMasterClient || !Picking) return;
+                if (!PhotonNetwork.IsMasterClient || !PickingTeams) return;
                 if (PhotonNetwork.LocalPlayer == null || sender != PhotonNetwork.LocalPlayer.ActorNumber) return;
                 int actor = Net.Get(data, 0, -1);
                 int slot = Net.Get(data, 1, -1);
@@ -188,7 +179,7 @@ namespace VoidCrewFleet
         /// <summary>Host only: everyone on a ship, then even teams (Fleet Battle) and even crews; players keep their pick where they can.</summary>
         public static void AutoBalance()
         {
-            if (!PhotonNetwork.IsMasterClient || !Picking) return;
+            if (!PhotonNetwork.IsMasterClient || !PickingTeams) return;
             FleetShips.PublishCrew(CrewRules.Balance(FleetShips.Crews(), ShipSpawn.PlayerActors(), ShipCount, FleetApi.IsTeamMatch));
         }
 
@@ -224,7 +215,7 @@ namespace VoidCrewFleet
             }
             Dictionary<int, CrewEntry> crews = FleetShips.Crews();
             FleetShips.PublishCrew(crews);
-            PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyLocked, true } });
+            SetLocked(true);
             if (!teams)
             {
                 List<int> actors = ShipSpawn.PlayerActors();
@@ -248,20 +239,20 @@ namespace VoidCrewFleet
         {
             if (!PhotonNetwork.IsMasterClient || !PickingTeams) return;
             FleetShips.PublishCrew(FleetShips.Crews());
-            PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyLocked, true } });
+            SetLocked(true);
             Log.Info("[autotest] Teams locked without the checks: " + (CheckTeams() ?? "they would have passed") + ".");
         }
 
         /// <summary>
         /// Host, a few times a second: in the hub, once the teams (or co-op crews) are confirmed, a player who joins later goes
         /// to the smallest crew (of the smaller team), as in a mission, so they can set up their ship without the host
-        /// reopening the picking.
+        /// reopening the picking. Not while the hub loads: the last mission's crews and lock are only cleared once it has.
         /// </summary>
         public static void KeepHubTeamsComplete()
         {
             try
             {
-                if (!PhotonNetwork.IsMasterClient || !HubFleetPlanned || !Locked) return;
+                if (!PhotonNetwork.IsMasterClient || !HubFleetPlanned || HubShipManager.Instance == null || !Locked) return;
                 bool teams = FleetApi.IsTeamMatch;
                 Dictionary<int, CrewEntry> crews = FleetShips.Crews();
                 List<int> players = ShipSpawn.PlayerActors();
@@ -295,7 +286,7 @@ namespace VoidCrewFleet
         public static void Reset(bool keepTeams = false)
         {
             if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null) return;
-            if (!keepTeams) PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyLocked, null } });
+            if (!keepTeams) SetLocked(false);
             PvpMatch.ResetRoom();
             PvpSabotage.ResetRoom();
             PvpHack.ResetRoom();

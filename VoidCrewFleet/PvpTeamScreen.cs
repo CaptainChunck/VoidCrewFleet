@@ -78,6 +78,8 @@ namespace VoidCrewFleet
         private static bool _inputBlocked;
         private static float _inputAsserted;
         private static bool _dismissed;
+        private static bool _dismissedTeams;
+        private static bool _dismissedPlaced;
         private static bool _viewing;
         private static float _leaveArmedUntil;
         private static Button _hideButton;
@@ -138,6 +140,7 @@ namespace VoidCrewFleet
                 if (PvpTeams.PickingTeams)
                 {
                     // The game's own menus come first (this screen would cover the escape menu); HIDE puts it away until reopened.
+                    if (_dismissed) KeepHidden();
                     return !_dismissed && !MenuScreenController.IsOpen();
                 }
                 _dismissed = false;
@@ -152,6 +155,21 @@ namespace VoidCrewFleet
             {
                 return false;
             }
+        }
+
+        /// <summary>
+        /// HIDE lasts while the same picking goes on. The screen comes back when the host switches between co-op crews and
+        /// Fleet Battle teams, or when this player loses the ship they had (crews cleared, their ship taken out of the fleet).
+        /// </summary>
+        private static void KeepHidden()
+        {
+            bool placed = FleetShips.CrewSlot(FleetShips.LocalActor) >= 0;
+            if (FleetApi.IsTeamMatch != _dismissedTeams || (_dismissedPlaced && !placed))
+            {
+                _dismissed = false;
+                return;
+            }
+            if (placed) _dismissedPlaced = true;
         }
 
         private static void Hide()
@@ -557,9 +575,10 @@ namespace VoidCrewFleet
             Dictionary<int, CrewEntry> crews = FleetShips.Crews();
             Player[] players = PhotonNetwork.PlayerList.OrderBy(p => p.ActorNumber).ToArray();
             bool host = PhotonNetwork.IsMasterClient;
-            bool picking = PvpTeams.Picking;
+            bool picking = PvpTeams.PickingTeams;
+            // The ships' names, types and the mission come from the room's fleet choices: their revision stands for them.
             string signature = Signature(crews, players, host) + (picking ? "|picking" : "|locked") + (Time.unscaledTime < _leaveArmedUntil ? "|leave" : "") +
-                               "|" + HubFleet.MirrorTypes + "|" + string.Join(",", Enumerable.Range(0, ships).Select(s => HubFleet.ForcedType(s).AsHex() + "/" + PvpTeams.ShipName(s)).ToArray());
+                               "|" + HubFleet.Revision;
             if (signature == _signature) return;
             _signature = signature;
 
@@ -834,6 +853,8 @@ namespace VoidCrewFleet
             if (PvpTeams.PickingTeams)
             {
                 _dismissed = true;
+                _dismissedTeams = FleetApi.IsTeamMatch;
+                _dismissedPlaced = FleetShips.CrewSlot(FleetShips.LocalActor) >= 0;
                 Notice.Show(FleetApi.IsTeamMatch
                     ? "The team screen is hidden. TEAMS & RULES on the loadout terminal's FLEET panel brings it back."
                     : "The crew screen is hidden. CREWS on the loadout terminal's FLEET panel brings it back.");
