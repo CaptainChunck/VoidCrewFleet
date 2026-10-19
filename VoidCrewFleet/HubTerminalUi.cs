@@ -2,6 +2,7 @@ using System;
 using System.Reflection;
 using Gameplay.Hub;
 using HarmonyLib;
+using Photon.Pun;
 using ResourceAssets;
 using UI.ShipLoadoutTerminal;
 using UnityEngine;
@@ -32,6 +33,7 @@ namespace VoidCrewFleet
         private static VisualElement _shipAButton;
         private static VisualElement _shipBButton;
         private static Label _hint;
+        private static VisualElement _tint;
         private static bool _subscribed;
 
         private static bool Available
@@ -51,6 +53,7 @@ namespace VoidCrewFleet
                 if (!_subscribed)
                 {
                     HubFleet.Changed += Refresh;
+                    FleetApi.TeamsChanged += Refresh;
                     _subscribed = true;
                 }
                 EnsureBar();
@@ -66,6 +69,19 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "UI.ShipLoadoutTerminal.ShipLoadoutTerminal", "OnShipChosen", PatchKind.Prefix)]
         private static bool ShipChosenPrefix(ShipLoadoutDataDef shipDef)
         {
+            if (Available && shipDef != null && FleetApi.IsTeamMatch && PhotonNetwork.LocalPlayer != null)
+            {
+                int ship = _editingShipB ? 2 : 1;
+                if (!FleetApi.CanEditShip(PhotonNetwork.LocalPlayer.ActorNumber, ship))
+                {
+                    string team = PvpTeams.TeamName(ship - 1);
+                    Notice.Show(FleetApi.TeamOf(PhotonNetwork.LocalPlayer.ActorNumber) < 0
+                        ? "Pick a team first: only a ship's own team can change its loadout."
+                        : "Only " + team + " players can change the " + team + " ship.");
+                    if (_root != null && _editingShipB) _root.schedule.Execute(MarkShipB).ExecuteLater(300);
+                    return false;
+                }
+            }
             if (!_editingShipB || !Available || shipDef == null) return true;
             if (HubFleet.LoadoutDef(shipDef.AssetGuid) == null)
             {
@@ -110,6 +126,7 @@ namespace VoidCrewFleet
             _terminal = null;
             _root = null;
             _bar = null;
+            _tint = null;
             _editingShipB = false;
         }
 
@@ -254,26 +271,42 @@ namespace VoidCrewFleet
                 _bar.style.display = available ? DisplayStyle.Flex : DisplayStyle.None;
                 if (!available)
                 {
+                    ShowTint(Color.clear);
                     if (_editingShipB) CustomizerLink.SetTerminalShip(1);
                     _editingShipB = false;
                     return;
                 }
                 bool two = HubFleet.PlannedMode != FleetMode.OneShip;
                 bool locked = HubFleet.Variant != HubVariant.None;
+                bool teams = FleetApi.IsTeamMatch;
                 if (!two && _editingShipB) EditShip(false);
 
-                Ui.SetButtonText(_twoButton, locked ? "FLEET MISSION\n2 SHIPS" : (two ? "TWO SHIPS: ON" : "TWO SHIPS: OFF"));
-                Ui.SetButtonText(_shipAButton, "SHIP 1\n" + Short(HubFleet.ShipADef));
+                Ui.SetButtonText(_twoButton, teams ? "FLEET BATTLE\nTEAMS" : (locked ? "FLEET MISSION\n2 SHIPS" : (two ? "TWO SHIPS: ON" : "TWO SHIPS: OFF")));
+                Ui.SetButtonText(_shipAButton, (teams ? "BLUE SHIP\n" : "SHIP 1\n") + Short(HubFleet.ShipADef));
                 Ui.SetButtonText(_shipBButton, !two ? "SHIP 2\nOFF"
-                    : "SHIP 2\n" + (HubFleet.ChosenShipB.IsNull ? "AS SHIP 1" : Short(HubFleet.ShipBDef, HubFleet.ShipBName)));
-                Highlight(_shipAButton, !_editingShipB);
-                Highlight(_shipBButton, _editingShipB);
+                    : (teams ? "RED SHIP\n" : "SHIP 2\n") + (HubFleet.ChosenShipB.IsNull ? "AS SHIP 1" : Short(HubFleet.ShipBDef, HubFleet.ShipBName)));
+                Highlight(_shipAButton, !_editingShipB, teams ? FleetApi.ShipColor(1) : (Color?)null);
+                Highlight(_shipBButton, _editingShipB, teams ? FleetApi.ShipColor(2) : (Color?)null);
                 _shipBButton.SetEnabled(two);
-                _twoButton.SetEnabled(!locked);
+                _twoButton.SetEnabled(!locked || teams);
 
-                _hint.text = _editingShipB
-                    ? "Choosing SHIP 2: pick a ship and loadout, then SELECT. Players are split evenly between the ships."
-                    : (two ? "Choosing SHIP 1. Press SHIP 2 to choose the second ship." : "One ship, up to 8 players. Turn TWO SHIPS on for a second ship.");
+                if (teams)
+                {
+                    int ship = _editingShipB ? 2 : 1;
+                    string team = PvpTeams.TeamName(ship - 1);
+                    int actor = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : -1;
+                    int mine = FleetApi.TeamOf(actor);
+                    _hint.text = "The " + team + " team's ship. " + (FleetApi.CanEditShip(actor, ship)
+                        ? "You're " + team + ": pick its ship and loadout, then SELECT."
+                        : (mine < 0 ? "Pick a team first (FLEET BATTLE TEAMS)." : "Only " + team + " players can change it; you can look."));
+                }
+                else
+                {
+                    _hint.text = _editingShipB
+                        ? "Choosing SHIP 2: pick a ship and loadout, then SELECT. Players are split evenly between the ships."
+                        : (two ? "Choosing SHIP 1. Press SHIP 2 to choose the second ship." : "One ship, up to 8 players. Turn TWO SHIPS on for a second ship.");
+                }
+                ShowTint(teams ? FleetApi.ShipColor(_editingShipB ? 2 : 1) : Color.clear);
                 if (_editingShipB) MarkShipB();
             }
             catch (Exception e)
@@ -289,14 +322,52 @@ namespace VoidCrewFleet
             return text.Replace("METEM ", "").ToUpperInvariant();
         }
 
-        private static void Highlight(VisualElement button, bool on)
+        /// <summary>The ship being set up is highlighted; in Fleet Battle each ship's button wears its team's colour.</summary>
+        private static void Highlight(VisualElement button, bool on, Color? team = null)
         {
+            if (team.HasValue)
+            {
+                Color colour = team.Value;
+                button.style.backgroundColor = new Color(colour.r * 0.35f, colour.g * 0.35f, colour.b * 0.35f, on ? 0.95f : 0.7f);
+                Ui.Border(button, on ? 2 : 1, on ? Ui.Gold : colour);
+                return;
+            }
             button.style.backgroundColor = on ? new Color(0.45f, 0.33f, 0.1f, 0.95f) : Ui.ButtonColor;
             Ui.Border(button, 1, on ? Ui.Gold : new Color(1f, 1f, 1f, 0.18f));
         }
 
+        /// <summary>Fleet Battle: the terminal's background takes the team colour of the ship being set up.</summary>
+        private static void ShowTint(Color colour)
+        {
+            if (_root == null) return;
+            if (colour.a <= 0f)
+            {
+                if (_tint != null) _tint.style.display = DisplayStyle.None;
+                return;
+            }
+            if (_tint == null || _tint.parent != _root)
+            {
+                _tint = new VisualElement { name = "FleetTeamTint", pickingMode = PickingMode.Ignore };
+                _tint.style.position = Position.Absolute;
+                _tint.style.left = 0;
+                _tint.style.right = 0;
+                _tint.style.top = 0;
+                _tint.style.bottom = 0;
+                _root.Insert(0, _tint);
+            }
+            _tint.style.backgroundColor = new Color(colour.r, colour.g, colour.b, 0.2f);
+            _tint.style.display = DisplayStyle.Flex;
+        }
+
         private static void ToggleTwoShips()
         {
+            if (FleetApi.IsTeamMatch)
+            {
+                // FLEET BATTLE TEAMS: the host opens team picking again for everyone.
+                if (PhotonNetwork.IsMasterClient) PvpTeams.Reset();
+                else Notice.Show("Only the host can open team picking again.");
+                return;
+            }
             if (HubFleet.Variant != HubVariant.None) return;
             HubFleet.RequestTwoShips(HubFleet.PlannedMode == FleetMode.OneShip);
         }

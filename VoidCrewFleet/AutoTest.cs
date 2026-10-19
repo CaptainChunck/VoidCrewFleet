@@ -188,6 +188,18 @@ namespace VoidCrewFleet
                 Fail("no mission is selected");
                 yield break;
             }
+            if (Settings.AutoTest.Value == AutoTestMode.PvP)
+            {
+                // Fleet Battle picks the teams in the hub: the team screen is up for everyone; join BLUE and confirm.
+                Log.Info("[autotest] Hub team screen showing: " + PvpTeamScreen.Visible + ", picking: " + PvpTeams.HubChoosing + ".");
+                Screenshot("hub-teams");
+                PvpTeams.Join(0);
+                yield return new WaitForSeconds(1.5f);
+                PvpTeams.Confirm();
+                yield return new WaitForSeconds(1.5f);
+                Log.Info("[autotest] Hub teams locked: " + PvpTeams.Locked + ", local team " + FleetShips.CrewSlot(FleetShips.LocalActor) +
+                         ", can edit ship 1 " + FleetApi.CanEditShip(FleetShips.LocalActor, 1) + ", ship 2 " + FleetApi.CanEditShip(FleetShips.LocalActor, 2) + ".");
+            }
             Screenshot("hub");
             yield return new WaitForSeconds(0.5f);
             Log.Info("[autotest] Planned: " + HubFleet.PlannedMode + ", ship 2 = " + HubFleet.DescribeLoadout(HubFleet.ShipBDef) + ".");

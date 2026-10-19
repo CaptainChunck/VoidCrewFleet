@@ -142,9 +142,15 @@ namespace VoidCrewFleet
                     Notice.ShowAll("Ship 2 could not be spawned; everyone plays on ship 1.");
                     return;
                 }
-                if (plan.Mode == FleetMode.PvP) PvpTeams.Reset();
+                // Teams confirmed in the hub stay: nobody waits on a team screen, everyone spawns aboard their team's ship.
+                bool hubTeams = plan.Mode == FleetMode.PvP && PvpTeams.Locked;
+                if (plan.Mode == FleetMode.PvP) PvpTeams.Reset(hubTeams);
                 FleetShips.PublishShips(__result, shipB);
-                FleetShips.PublishCrew(InitialCrews(plan));
+                Dictionary<int, int> crews = InitialCrews(plan, hubTeams);
+                FleetShips.PublishCrew(crews);
+                if (hubTeams)
+                    Notice.ShowAll("Fleet Battle: " + PvpTeams.TeamName(0) + " " + crews.Count(p => p.Value == 0) + " against " + PvpTeams.TeamName(1) + " " +
+                                   crews.Count(p => p.Value == 1) + ". Destroy the enemy ship to win!");
                 Log.Info("Ship 2 is in the world, " + Vector3.Distance(a, b).ToString("0") + " m from ship 1 (" + plan + ").");
             }
             catch (Exception e)
@@ -155,13 +161,29 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// The starting crews: players split as evenly as possible, alternating in join order. In PvP nobody is on a team
-        /// yet: the players choose on the team screen before anyone spawns.
+        /// The starting crews: players split as evenly as possible, alternating in join order. In PvP the teams from the
+        /// hub (anyone without one joins the smaller team); without them nobody is on a team yet, and the players choose
+        /// on the team screen before anyone spawns.
         /// </summary>
-        private static Dictionary<int, int> InitialCrews(FleetPlan plan)
+        private static Dictionary<int, int> InitialCrews(FleetPlan plan, bool hubTeams)
         {
             var crews = new Dictionary<int, int>();
-            if (plan.Mode == FleetMode.PvP) return crews;
+            if (plan.Mode == FleetMode.PvP)
+            {
+                if (!hubTeams) return crews;
+                Dictionary<int, int> picked = FleetShips.CrewMap();
+                foreach (Photon.Realtime.Player player in PhotonNetwork.PlayerList.OrderBy(p => p.ActorNumber))
+                {
+                    int team;
+                    if (picked.TryGetValue(player.ActorNumber, out team) && (team == 0 || team == 1)) crews[player.ActorNumber] = team;
+                }
+                foreach (Photon.Realtime.Player player in PhotonNetwork.PlayerList.OrderBy(p => p.ActorNumber))
+                {
+                    if (crews.ContainsKey(player.ActorNumber)) continue;
+                    crews[player.ActorNumber] = crews.Count(p => p.Value == 1) < crews.Count(p => p.Value == 0) ? 1 : 0;
+                }
+                return crews;
+            }
             int slot = 0;
             foreach (Photon.Realtime.Player player in PhotonNetwork.PlayerList.OrderBy(p => p.ActorNumber))
             {

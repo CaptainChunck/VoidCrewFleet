@@ -39,6 +39,7 @@ namespace VoidCrewFleet
         private static VisualElement _hostButtons;
         private static VisualElement _confirmButton;
         private static Label _status;
+        private static VisualElement _leaveButton;
         private static Label _flash;
         private static float _flashUntil;
         private static string _signature;
@@ -83,7 +84,7 @@ namespace VoidCrewFleet
             if (!FleetRuntime.GameReady || !PhotonNetwork.InRoom) return false;
             try
             {
-                if (!PvpTeams.Choosing) return false;
+                if (!PvpTeams.PickingTeams) return false;
                 GameStateMachine machine = GameStateMachine.Instance;
                 return machine != null && (machine.CurrentState is GSSpawn || machine.CurrentState is GSIngame);
             }
@@ -100,7 +101,7 @@ namespace VoidCrewFleet
                 _visible = false;
                 if (_screen != null) _screen.style.display = DisplayStyle.None;
                 Log.Info("PvP: the team screen is closed.");
-                if (PvpTeams.Locked && Settings.PunchKey != null)
+                if (PvpTeams.Locked && Settings.PunchKey != null && !GameSessionManager.InHub)
                     Notice.Show("Enemy players aboard your ship? Punch them with " + Settings.PunchKey.Value + " (five punches knock one out).");
             }
             SetCursor(false);
@@ -191,9 +192,9 @@ namespace VoidCrewFleet
             Ui.Margin(_confirmButton, 0, 40, 0, 0);
             _hostButtons.Add(_confirmButton);
             bottom.Add(_hostButtons);
-            VisualElement leave = Ui.Button("LEAVE MATCH", Leave, 18);
-            Ui.Margin(leave, 0, 0, 0, 0);
-            bottom.Add(leave);
+            _leaveButton = Ui.Button("LEAVE MATCH", Leave, 18);
+            Ui.Margin(_leaveButton, 0, 0, 0, 0);
+            bottom.Add(_leaveButton);
             window.Add(bottom);
 
             _screen.Add(window);
@@ -291,15 +292,21 @@ namespace VoidCrewFleet
                 bool balanced = PvpTeams.Balanced(teams, out why);
                 _hostButtons.style.display = host ? DisplayStyle.Flex : DisplayStyle.None;
                 _confirmButton.SetEnabled(balanced);
+                bool inHub = GameSessionManager.InHub;
+                if (_leaveButton != null) Ui.SetButtonText(_leaveButton, inHub ? "LEAVE LOBBY" : "LEAVE MATCH");
                 if (host)
                 {
                     _status.text = balanced
-                        ? "The teams are even. Press CONFIRM TEAMS to start the match."
+                        ? (inHub
+                            ? "The teams are even. Press CONFIRM TEAMS, then set up the ships and sit in the ready room to start the match."
+                            : "The teams are even. Press CONFIRM TEAMS to start the match.")
                         : why + " Move players with their BLUE / RED buttons, or press AUTO-BALANCE.";
                 }
                 else
                 {
-                    _status.text = (mine < 0 ? "Pick a team. " : "") + "The host confirms the teams, then everyone spawns aboard their team's ship.";
+                    _status.text = (mine < 0 ? "Pick a team. " : "") + (inHub
+                        ? "The host confirms the teams; then set up your team's ship at the loadout terminal."
+                        : "The host confirms the teams, then everyone spawns aboard their team's ship.");
                 }
             }
             catch (Exception e)

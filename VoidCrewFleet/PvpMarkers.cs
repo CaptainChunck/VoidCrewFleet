@@ -32,6 +32,7 @@ namespace VoidCrewFleet
 
         private static readonly List<WeakReference> Providers = new List<WeakReference>();
         private static readonly Dictionary<PlayerMarkerVE, int> NameTags = new Dictionary<PlayerMarkerVE, int>();
+        private static readonly Dictionary<PlayerMarkerVE, Label> Badges = new Dictionary<PlayerMarkerVE, Label>();
 
         private static int LocalTeam
         {
@@ -154,12 +155,42 @@ namespace VoidCrewFleet
                     continue;
                 }
                 bool enemy = Relative && IsEnemyActor(pair.Value);
+                int team = FleetApi.TeamOf(pair.Value);
                 var name = NameField != null ? NameField.GetValue(tag) as Label : null;
-                if (name != null) name.style.color = enemy ? new StyleColor(Ui.Warning) : new StyleColor(StyleKeyword.Null);
+                if (name != null)
+                    name.style.color = team >= 0 ? new StyleColor(FleetApi.TeamColor(team)) : (enemy ? new StyleColor(Ui.Warning) : new StyleColor(StyleKeyword.Null));
+                SetBadge(tag, team);
                 bool show = !enemy || CanSee(camera, tag);
                 tag.style.visibility = show ? Visibility.Visible : Visibility.Hidden;
             }
-            foreach (PlayerMarkerVE tag in gone) NameTags.Remove(tag);
+            foreach (PlayerMarkerVE tag in gone)
+            {
+                NameTags.Remove(tag);
+                Badges.Remove(tag);
+            }
+        }
+
+        /// <summary>A team badge above a player's name in a team match (Fleet Battle, in the hub and in the match).</summary>
+        private static void SetBadge(PlayerMarkerVE tag, int team)
+        {
+            Label badge;
+            if (!Badges.TryGetValue(tag, out badge) || badge.parent != tag)
+            {
+                if (team < 0) return;
+                badge = Ui.Label("", 13, Color.white, true);
+                badge.pickingMode = PickingMode.Ignore;
+                badge.style.unityTextAlign = TextAnchor.MiddleCenter;
+                tag.Insert(0, badge);
+                Badges[tag] = badge;
+            }
+            if (team < 0)
+            {
+                badge.style.display = DisplayStyle.None;
+                return;
+            }
+            badge.text = PvpTeams.TeamName(team) + " TEAM";
+            badge.style.color = FleetApi.TeamColor(team);
+            badge.style.display = DisplayStyle.Flex;
         }
 
         private static bool CanSee(Camera camera, PlayerMarkerVE tag)

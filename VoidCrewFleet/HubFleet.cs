@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using CG.Game.Player;
 using CG.GameLoopStateMachine.GameStates;
 using Client.Utils;
 using ExitGames.Client.Photon;
@@ -229,6 +231,11 @@ namespace VoidCrewFleet
                         : "Ship 2 can't use that loadout.");
                     return;
                 }
+                if (Variant == HubVariant.FleetBattle && FleetShips.CrewSlot(sender) != 1)
+                {
+                    Net.ToActor(sender, Msg.Notice, "Only RED players can change the RED ship (ship 2).");
+                    return;
+                }
                 if (CustomizerLink.IsCustom(guid))
                 {
                     string refusal = CustomizerLink.CheckShip2(guid, sender);
@@ -275,6 +282,61 @@ namespace VoidCrewFleet
             }
         }
 
+        // ---------------------------------------------------------------- Fleet Battle starts from the host's seat
+
+        private static readonly FieldInfo ZoneChairsField = GameMember.Field(typeof(CG.Client.Quests.Behaviours.QuestStartZone), "takeoverChairs");
+        private static readonly FieldInfo SeatChairField = GameMember.Field(typeof(SittingInChair), "chair");
+        private static CG.Client.Quests.Behaviours.QuestStartZone _zone;
+        private static float _lastSeatNotice = -100f;
+
+        /// <summary>
+        /// Host, FLEET BATTLE: the teams are already picked, so the host sitting in the ready room starts the match (the
+        /// game's short countdown for "everyone is seated"); nobody else's seat counts. Before the teams are confirmed,
+        /// sitting down starts nothing.
+        /// </summary>
+        [GamePatch(Feature, "Gameplay.Quests.QuestStartProcess", "UpdateQuestProcess", PatchKind.Prefix)]
+        private static void StartCountdownPrefix(ref int playersInZoneCount)
+        {
+            if (!PhotonNetwork.IsMasterClient || Variant != HubVariant.FleetBattle || !HostHasFleet) return;
+            try
+            {
+                bool seated = HostSeatedInReadyRoom();
+                if (!PvpTeams.Locked)
+                {
+                    playersInZoneCount = 0;
+                    if (seated && Time.unscaledTime - _lastSeatNotice > 10f)
+                    {
+                        _lastSeatNotice = Time.unscaledTime;
+                        Notice.Show("Confirm the teams first (CONFIRM TEAMS on the team screen); then sit down here to start the match.");
+                    }
+                    return;
+                }
+                playersInZoneCount = seated && PhotonNetwork.CurrentRoom != null ? Mathf.Max(1, (int)PhotonNetwork.CurrentRoom.PlayerCount) : 0;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Starting Fleet Battle from the ready room", e);
+            }
+        }
+
+        private static bool HostSeatedInReadyRoom()
+        {
+            LocalPlayer me = LocalPlayer.Instance;
+            if (me == null || me.Locomotion == null || ZoneChairsField == null || SeatChairField == null) return false;
+            var sitting = me.Locomotion.GetAbility<SittingInChair>();
+            if (sitting == null || !sitting.IsActive) return false;
+            object chair = SeatChairField.GetValue(sitting);
+            if (chair == null) return false;
+            if (_zone == null) _zone = UnityEngine.Object.FindObjectOfType<CG.Client.Quests.Behaviours.QuestStartZone>();
+            var chairs = _zone != null ? ZoneChairsField.GetValue(_zone) as Array : null;
+            if (chairs == null) return false;
+            foreach (object candidate in chairs)
+            {
+                if (ReferenceEquals(candidate, chair)) return true;
+            }
+            return false;
+        }
+
         private static bool HostInHub()
         {
             try
@@ -305,7 +367,12 @@ namespace VoidCrewFleet
         {
             Set(KeyVariant, (byte)variant);
             if (variant == HubVariant.None) return;
-            if (variant == HubVariant.FleetBattle) Set(KeyTwo, true);
+            if (variant == HubVariant.FleetBattle)
+            {
+                Set(KeyTwo, true);
+                // Everyone picks a team now (the team screen opens on every client).
+                PvpTeams.Reset();
+            }
             try
             {
                 _applyingVariant = true;

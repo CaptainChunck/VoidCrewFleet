@@ -59,6 +59,7 @@ namespace VoidCrewFleet
             FleetRuntime.Slow += PvpMarkers.Tick;
             FleetRuntime.Slow += ShipMarkers.Tick;
             FleetRuntime.Slow += HelmIsolation.Tick;
+            FleetRuntime.Slow += FleetApi.Tick;
             FleetRuntime.Slow += AutoTest.Tick;
         }
     }
