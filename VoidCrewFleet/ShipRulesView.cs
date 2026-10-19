@@ -164,9 +164,15 @@ namespace VoidCrewFleet
             _signature = signature;
             try
             {
-                for (int i = 0; i < 3; i++) TierButtons[i].EnableInClassList("metem-button-selected", rules.TierAllowed(i + 1));
+                PickingMode controls = edit ? PickingMode.Position : PickingMode.Ignore;
+                for (int i = 0; i < 3; i++)
+                {
+                    TierButtons[i].EnableInClassList("metem-button-selected", rules.TierAllowed(i + 1));
+                    TierButtons[i].pickingMode = controls;
+                }
                 _alloysButton.text = ShipRules.AlloysText(rules.MaxAlloys);
                 _alloysButton.EnableInClassList("metem-button-selected", rules.MaxAlloys != int.MaxValue);
+                _alloysButton.pickingMode = controls;
                 _clearButton.style.display = edit ? DisplayStyle.Flex : DisplayStyle.None;
                 _note.text = edit
                     ? "Rules apply to CUSTOM loadouts (Ship Customizer). The game's own loadouts are unchanged."
@@ -209,8 +215,9 @@ namespace VoidCrewFleet
             name.style.flexShrink = 1;
             row.Add(name);
             Button toggle = Ui.GameButton(allowed ? "ALLOWED" : "BLOCKED", () => ToggleCategory(category), "metem-button-size__small");
-            toggle.style.height = 30;
-            toggle.style.fontSize = 15;
+            toggle.pickingMode = ShipRules.CanEdit ? PickingMode.Position : PickingMode.Ignore;
+            toggle.style.height = 34;
+            toggle.style.fontSize = 16;
             toggle.style.paddingLeft = 12;
             toggle.style.paddingRight = 12;
             toggle.style.paddingTop = 0;
@@ -242,7 +249,7 @@ namespace VoidCrewFleet
             Ui.Click(row, () =>
             {
                 _selected = category;
-                _signature = null;
+                Redraw();
             });
             return row;
         }
@@ -264,12 +271,13 @@ namespace VoidCrewFleet
             row.Add(name);
             string state = crateOfBanned ? "WEAPON BANNED" : banned ? "BANNED" : tierOff ? "TIER OFF" : categoryOff ? "BLOCKED" : (option.Tier > 0 ? ShipRules.TierName(option.Tier) : "");
             Label tag = Ui.GameLabel(state, "ui-text-size__small");
-            tag.style.fontSize = 15;
+            tag.style.fontSize = 16;
             tag.style.flexShrink = 0;
             tag.style.unityFontStyleAndWeight = FontStyle.Bold;
             tag.style.color = banned ? Ui.Warning : (tierOff || categoryOff) ? Ui.GameLightGrey : Ui.GameBrightGrey;
             tag.style.marginLeft = 8;
             row.Add(tag);
+            if (!ShipRules.CanEdit) return row;
             Ui.Hover(row, Ui.GameDarkGrey, new Color(0.27f, 0.27f, 0.27f, 1f));
             Ui.Click(row, () =>
             {
@@ -280,6 +288,13 @@ namespace VoidCrewFleet
         }
 
         // ---------------------------------------------------------------- the host's changes
+
+        /// <summary>Redraws the tab now, instead of on the next tick.</summary>
+        private static void Redraw()
+        {
+            _signature = null;
+            Refresh();
+        }
 
         private static bool MayEdit()
         {
@@ -298,6 +313,7 @@ namespace VoidCrewFleet
                 else if (rules.Tiers.Length > 1) rules.Tiers = rules.Tiers.Replace(digit, "");
                 else PvpTeamScreen.Flash("At least one tier stays allowed.");
             });
+            Redraw();
         }
 
         private static void CycleAlloys()
@@ -308,18 +324,21 @@ namespace VoidCrewFleet
                 int index = Array.IndexOf(ShipRules.AlloyChoices, rules.MaxAlloys);
                 rules.MaxAlloys = ShipRules.AlloyChoices[(index + 1) % ShipRules.AlloyChoices.Length];
             });
+            Redraw();
         }
 
         private static void ToggleCategory(string category)
         {
             _selected = category;
-            _signature = null;
-            if (!MayEdit()) return;
-            ShipRules.Change(rules =>
+            if (MayEdit())
             {
-                if (rules.BlockedCategories.Contains(category)) rules.BlockedCategories.Remove(category);
-                else rules.BlockedCategories.Add(category);
-            });
+                ShipRules.Change(rules =>
+                {
+                    if (rules.BlockedCategories.Contains(category)) rules.BlockedCategories.Remove(category);
+                    else rules.BlockedCategories.Add(category);
+                });
+            }
+            Redraw();
         }
 
         private static void ToggleBan(string code)
@@ -330,6 +349,7 @@ namespace VoidCrewFleet
                 if (rules.Banned.Contains(code)) rules.Banned.Remove(code);
                 else rules.Banned.Add(code);
             });
+            Redraw();
         }
 
         private static void Clear()
@@ -342,6 +362,7 @@ namespace VoidCrewFleet
                 rules.Banned.Clear();
                 rules.MaxAlloys = int.MaxValue;
             });
+            Redraw();
         }
     }
 }

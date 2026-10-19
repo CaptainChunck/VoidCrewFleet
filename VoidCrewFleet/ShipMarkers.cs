@@ -124,6 +124,60 @@ namespace VoidCrewFleet
             if (IsEnemyPart(marker.FollowTarget)) __result = false;
         }
 
+        // ---------------------------------------------------------------- the HUD's ship info follows your ship
+
+        private static readonly FieldInfo HudShipField = GameMember.Field(typeof(UI.MainHUD.ShipInfoHUD), "playerShip");
+        private static readonly FieldInfo HudHullField = GameMember.Field(typeof(UI.MainHUD.ShipInfoHUD), "hullDamageController");
+        private static readonly FieldInfo HudBreakersField = GameMember.Field(typeof(UI.MainHUD.ShipInfoHUD), "breakerInstances");
+        private static readonly MethodInfo HudEnable = GameMember.Method(typeof(UI.MainHUD.ShipInfoHUD), "OnEnable");
+        private static readonly MethodInfo HudDisable = GameMember.Method(typeof(UI.MainHUD.ShipInfoHUD), "OnDisable");
+        private static readonly MethodInfo HudAddBreaker = GameMember.Method(typeof(UI.MainHUD.ShipInfoHUD), "CreateBreakerEntry");
+        private static readonly MethodInfo HudPowerChanged = GameMember.Method(typeof(UI.MainHUD.ShipInfoHUD), "PowerChanged");
+        private static UI.MainHUD.ShipInfoHUD _hud;
+
+        /// <summary>
+        /// The HUD's hull, power and breakers bind once, at spawn, to the ship of that moment. When the local player moves
+        /// to the other ship, or is re-cloned there after losing their own, they move along with the player.
+        /// </summary>
+        private static void KeepHudOnViewShip()
+        {
+            if (FleetSession.ShipCount < 2 || GameSessionManager.InHub || HudShipField == null || HudEnable == null || HudDisable == null) return;
+            CG.Game.ClientGame game = CG.Game.ClientGame.Current;
+            PlayerControlledShip view = game != null ? game.PlayerShip : null;
+            if (view == null || view.StartedDeath) return;
+            if (_hud == null) _hud = UnityEngine.Object.FindObjectOfType<UI.MainHUD.ShipInfoHUD>();
+            if (_hud == null || !_hud.isActiveAndEnabled) return;
+            var bound = HudShipField.GetValue(null) as PlayerControlledShip;
+            if (bound == view) return;
+            try
+            {
+                HudDisable.Invoke(_hud, null);
+                if (HudHullField != null) HudHullField.SetValue(_hud, view.Transform.GetComponentInChildren<HullDamageController>());
+                HudEnable.Invoke(_hud, null);
+                var breakers = HudBreakersField != null ? HudBreakersField.GetValue(_hud) as System.Collections.IList : null;
+                if (breakers != null && HudAddBreaker != null)
+                {
+                    foreach (object entry in breakers)
+                    {
+                        var disposable = entry as IDisposable;
+                        if (disposable != null) disposable.Dispose();
+                    }
+                    breakers.Clear();
+                    var power = view.ShipsPowerSystem as Gameplay.Power.ProtectedPowerSystem;
+                    if (power != null)
+                    {
+                        foreach (Gameplay.Power.PowerBreaker breaker in power.Breakers) HudAddBreaker.Invoke(_hud, new object[] { breaker });
+                    }
+                }
+                if (HudPowerChanged != null) HudPowerChanged.Invoke(_hud, null);
+                Log.Verbose("The HUD's ship info now shows " + FleetShips.Describe(view) + ".");
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Moving the HUD's ship info to the ship you're on", e);
+            }
+        }
+
         // ---------------------------------------------------------------- the HUD's hull bar
 
         [GamePatch(Feature, "UI.MainHUD.ShipInfoHUD", "OnHullStateChanged", PatchKind.Prefix)]
@@ -301,6 +355,7 @@ namespace VoidCrewFleet
         /// <summary>A few times a second: a ship that arrived late gets its hint; a lost ship's hint goes.</summary>
         public static void Tick()
         {
+            KeepHudOnViewShip();
             if (_urgencyTemplate == null) return;
             if (!FleetShips.Active)
             {

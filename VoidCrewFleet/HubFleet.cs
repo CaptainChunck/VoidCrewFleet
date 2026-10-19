@@ -60,23 +60,36 @@ namespace VoidCrewFleet
                    PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(key, out value) && value != null;
         }
 
-        /// <summary>True when the room's host runs this plugin (and its fleet choices exist).</summary>
+        /// <summary>True when the room's host runs this plugin with the same network protocol (and its fleet choices exist).</summary>
         public static bool HostHasFleet
         {
             get
             {
                 object value;
-                return TryGet(KeyOn, out value) && value is int && (int)value >= FleetPlan.Protocol;
+                return TryGet(KeyOn, out value) && value is int && (int)value == FleetPlan.Protocol;
             }
         }
 
-        /// <summary>Whether the game's own missions are flown with two ships. On unless the host turned it off.</summary>
+        /// <summary>Whether the game's own missions are flown with two ships: off unless the host turned it on.</summary>
         public static bool TwoShips
         {
             get
             {
                 object value;
-                return !TryGet(KeyTwo, out value) || !(value is bool) || (bool)value;
+                return TryGet(KeyTwo, out value) && value is bool && (bool)value;
+            }
+        }
+
+        /// <summary>
+        /// Whether two-ship missions can run on this host: the patches they can't work without are in. After a game update
+        /// that breaks one of them, missions fall back to one ship instead of a half-working fleet.
+        /// </summary>
+        public static bool FleetReady
+        {
+            get
+            {
+                return Patcher.IsReady(FleetSession.Feature) && Patcher.IsReady(FleetShips.Feature) && Patcher.IsReady(VoidJumpLink.Feature) &&
+                       Patcher.IsReady(ShipIsolation.Feature) && Patcher.IsReady(ShipResources.Feature);
             }
         }
 
@@ -206,6 +219,7 @@ namespace VoidCrewFleet
                     return;
                 }
                 Set(KeyTwo, on);
+                if (Settings.TwoShips != null) Settings.TwoShips.Value = on;
                 Log.Info("Two ships: " + (on ? "on" : "off") + ".");
             });
             Net.On(Msg.HubShipB, (sender, data) =>
@@ -255,6 +269,8 @@ namespace VoidCrewFleet
                 if (!HostInHub()) return;
                 var variant = (HubVariant)Net.Get(data, 0, (byte)0);
                 if (variant != HubVariant.None && variant != HubVariant.FleetPilgrimage && variant != HubVariant.FleetBattle) return;
+                // Activating the mission that is already chosen changes nothing (it used to reopen confirmed teams).
+                if (variant == Variant) return;
                 SelectVariantAsHost(variant);
             });
         }
@@ -292,12 +308,14 @@ namespace VoidCrewFleet
         /// <summary>
         /// Host, FLEET BATTLE: the teams are already picked, so the host sitting in the ready room starts the match (the
         /// game's short countdown for "everyone is seated"); nobody else's seat counts. Before the teams are confirmed,
-        /// sitting down starts nothing.
+        /// sitting down starts nothing. Clients don't run their own countdown (it would count their own seat): they show the
+        /// host's, which the game sends them.
         /// </summary>
         [GamePatch(Feature, "Gameplay.Quests.QuestStartProcess", "UpdateQuestProcess", PatchKind.Prefix)]
-        private static void StartCountdownPrefix(ref int playersInZoneCount)
+        private static bool StartCountdownPrefix(ref int playersInZoneCount)
         {
-            if (!PhotonNetwork.IsMasterClient || Variant != HubVariant.FleetBattle || !HostHasFleet) return;
+            if (Variant != HubVariant.FleetBattle || !HostHasFleet) return true;
+            if (!PhotonNetwork.IsMasterClient) return false;
             try
             {
                 bool seated = HostSeatedInReadyRoom();
@@ -309,7 +327,7 @@ namespace VoidCrewFleet
                         _lastSeatNotice = Time.unscaledTime;
                         Notice.Show("Confirm the teams first (CONFIRM TEAMS on the team screen); then sit down here to start the match.");
                     }
-                    return;
+                    return true;
                 }
                 playersInZoneCount = seated && PhotonNetwork.CurrentRoom != null ? Mathf.Max(1, (int)PhotonNetwork.CurrentRoom.PlayerCount) : 0;
             }
@@ -317,6 +335,7 @@ namespace VoidCrewFleet
             {
                 Log.Failure("Starting Fleet Battle from the ready room", e);
             }
+            return true;
         }
 
         private static bool HostSeatedInReadyRoom()
@@ -369,7 +388,6 @@ namespace VoidCrewFleet
             if (variant == HubVariant.None) return;
             if (variant == HubVariant.FleetBattle)
             {
-                Set(KeyTwo, true);
                 // Everyone picks a team now (the team screen opens on every client), under the host's last ship rules.
                 PvpTeams.Reset();
                 ShipRules.PublishSaved();
@@ -411,7 +429,17 @@ namespace VoidCrewFleet
             try
             {
                 if (!PhotonNetwork.IsMasterClient) return;
+                if (!FleetReady)
+                {
+                    // Clients then treat the room as one without the plugin's fleet features.
+                    Set(KeyOn, 0);
+                    Log.WarnOnce("fleet not ready", "Some of the patches two ships need didn't apply (a game update?), so missions use one ship.");
+                    return;
+                }
                 Set(KeyOn, FleetPlan.Protocol);
+                // The host's last TWO SHIPS choice (off for a new player); later changes in this room are kept as they are.
+                object two;
+                if (!TryGet(KeyTwo, out two)) Set(KeyTwo, Settings.TwoShips != null && Settings.TwoShips.Value);
                 if (Variant != HubVariant.None) Set(KeyVariant, (byte)HubVariant.None);
                 // The Customizer forgets its ship 2 choice between missions; tell it again what the room's ship 2 uses.
                 if (!ChosenShipB.IsNull) CustomizerLink.SetShip2(ChosenShipB);
@@ -430,6 +458,25 @@ namespace VoidCrewFleet
         {
             if (_applyingVariant || !PhotonNetwork.IsMasterClient || Variant == HubVariant.None) return;
             Set(KeyVariant, (byte)HubVariant.None);
+        }
+
+        /// <summary>
+        /// Host: choosing the saved run ends a fleet mission choice too (the game picks it through its own notification),
+        /// and closes the team screen, so the saved run starts the normal way.
+        /// </summary>
+        [GamePatch(Feature, "Gameplay.Hub.HubQuestManager", "NotifyPreservedQuestSelected", PatchKind.Postfix, Optional = true)]
+        private static void PreservedSelectedPostfix()
+        {
+            try
+            {
+                if (!PhotonNetwork.IsMasterClient || Variant == HubVariant.None) return;
+                Set(KeyVariant, (byte)HubVariant.None);
+                PvpTeams.Reset();
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Switching from a fleet mission to the saved run", e);
+            }
         }
 
         /// <summary>
@@ -493,6 +540,7 @@ namespace VoidCrewFleet
             {
                 FleetSession.Attach(gameSession, null);
                 Log.Failure("Preparing the fleet mission (it starts with one ship instead)", e);
+                Notice.ShowAll("The fleet mission couldn't be prepared, so it starts with one ship (details in the host's BepInEx log).");
             }
         }
 

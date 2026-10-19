@@ -282,5 +282,147 @@ namespace VoidCrewFleet
             }
             if (replaced == 0) Log.Warn("Two ships: " + original.DeclaringType.FullName + "." + original.Name + " no longer reads the player ship; the game may have changed.");
         }
+        // ---------------------------------------------------------------- sector twists and hazards act on every ship
+
+        private static bool _everyShip;
+        private static readonly FieldInfo BlackHolePlatformField = GameMember.Field("Gameplay.SectorGameplay.BlackHole", "_playerShipPlatform");
+
+        /// <summary>
+        /// A world effect's method that acts on "the player ship" (a sector twist's stat modifiers, a module disabler, an
+        /// interference event) runs once per player ship, each in turn as "the player ship", so every client changes every
+        /// ship alike. Without this each client changed only the ship its own player was on (the stats are local to each
+        /// client, and the host decides damage from them).
+        /// </summary>
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ApplyPlayerShipModifier", "RunModifierToPlayerShip", PatchKind.Prefix)]
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ApplyPlayerShipModifier", "RemovePlayerShipModifier", PatchKind.Prefix)]
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ScorchingPulse", "RunModifierToPlayerShip", PatchKind.Prefix)]
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ScorchingPulse", "RemovePlayerShipModifier", PatchKind.Prefix)]
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ModuleDisabler", "DeactivateAllModulesOfType", PatchKind.Prefix)]
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.Interference", "ToggleRandomSystem", PatchKind.Prefix)]
+        private static bool EveryShipPrefix(object __instance, MethodBase __originalMethod, object[] __args)
+        {
+            if (_everyShip || !FleetShips.Active) return true;
+            var ships = new List<PlayerControlledShip>(FleetShips.All);
+            _everyShip = true;
+            try
+            {
+                foreach (PlayerControlledShip ship in ships)
+                {
+                    if (ship == null) continue;
+                    BeginOverride(ship);
+                    try
+                    {
+                        __originalMethod.Invoke(__instance, __args);
+                    }
+                    catch (Exception e)
+                    {
+                        Log.Failure("Running " + __originalMethod.DeclaringType.Name + "." + __originalMethod.Name + " for " + FleetShips.Describe(ship), e);
+                    }
+                    finally
+                    {
+                        EndOverride();
+                    }
+                }
+            }
+            finally
+            {
+                _everyShip = false;
+            }
+            return false;
+        }
+
+        /// <summary>An interference event's random defect hits every ship (the game kept the defect controller of one).</summary>
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.Interference", "ActivateRandomDefect", PatchKind.Prefix)]
+        private static bool InterferenceDefectPrefix(Component __instance)
+        {
+            if (!FleetShips.Active) return true;
+            try
+            {
+                var view = __instance.GetComponent<Photon.Pun.PhotonView>();
+                if (view == null || !view.IsMine) return false;
+                foreach (PlayerControlledShip ship in new List<PlayerControlledShip>(FleetShips.All))
+                {
+                    var defects = ship != null ? ship.GetComponent<Gameplay.Defects.PlayerShipDefectDamageController>() : null;
+                    if (defects != null) defects.ActivateRandomDefect();
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Giving every ship an interference defect", e);
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// When a module disabler ends, the game clears the malfunction effect on one ship's modules; the other ships' are
+        /// cleared here (the game's own pass then does the remaining ship).
+        /// </summary>
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ModuleDisabler", "OnDisable", PatchKind.Prefix)]
+        private static void ModuleDisablerOffPrefix(object ___moduleTarget)
+        {
+            if (!FleetShips.Active || ___moduleTarget == null) return;
+            try
+            {
+                ClientGame game = ClientGame.Current;
+                PlayerControlledShip current = game != null ? game.PlayerShip : null;
+                MethodInfo getModules = typeof(PlayerControlledShip).GetMethod("GetModules", new[] { ___moduleTarget.GetType() });
+                if (getModules == null) return;
+                foreach (PlayerControlledShip ship in new List<PlayerControlledShip>(FleetShips.All))
+                {
+                    if (ship == null || ship == current) continue;
+                    var modules = getModules.Invoke(ship, new[] { ___moduleTarget }) as System.Collections.IEnumerable;
+                    if (modules == null) continue;
+                    foreach (object module in modules)
+                    {
+                        var component = module as Component;
+                        var effect = component != null ? component.GetComponent<VFX.MalfunctionEffect>() : null;
+                        if (effect != null) effect.ToggleMalfunctionEffect(false);
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Clearing a module disabler's effect on every ship", e);
+            }
+        }
+
+        /// <summary>
+        /// Host: a black hole pulls and damages the player ship nearest to it, each physics step. The game kept the ship the
+        /// host was on when it spawned (and damaged whichever ship the host was on at the time).
+        /// </summary>
+        [GamePatch(Feature, "Gameplay.SectorGameplay.BlackHole", "FixedUpdate", PatchKind.Prefix)]
+        private static void BlackHolePrefix(Component __instance, out bool __state)
+        {
+            __state = false;
+            if (!FleetShips.Active || !Photon.Pun.PhotonNetwork.IsMasterClient || BlackHolePlatformField == null) return;
+            try
+            {
+                PlayerControlledShip nearest = null;
+                float best = float.MaxValue;
+                Vector3 here = __instance.transform.position;
+                foreach (PlayerControlledShip ship in FleetShips.All)
+                {
+                    if (ship == null || ship.StartedDeath || ship.Platform == null) continue;
+                    float distance = (ship.Platform.Position - here).sqrMagnitude;
+                    if (distance >= best) continue;
+                    best = distance;
+                    nearest = ship;
+                }
+                if (nearest == null) return;
+                BlackHolePlatformField.SetValue(__instance, nearest.Platform);
+                BeginOverride(nearest);
+                __state = true;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Pointing a black hole at the nearest ship", e);
+            }
+        }
+
+        [GamePatch(Feature, "Gameplay.SectorGameplay.BlackHole", "FixedUpdate", PatchKind.Finalizer)]
+        private static void BlackHoleFinalizer(bool __state)
+        {
+            if (__state) EndOverride();
+        }
     }
 }

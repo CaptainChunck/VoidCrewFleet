@@ -1,3 +1,4 @@
+using System;
 using Photon.Pun;
 
 namespace VoidCrewFleet
@@ -14,6 +15,13 @@ namespace VoidCrewFleet
     {
         public const string Feature = "Progression pause";
 
+        private static GameSession _pausedSession;
+        private static bool _trackersSkipped;
+
+        /// <summary>
+        /// Whether this mission gives no progression. Once a mission is paused it stays paused until the hub, so players
+        /// leaving before the end (a 7-player run dropping to 6) don't turn its end-of-run rewards back on.
+        /// </summary>
         public static bool Paused
         {
             get
@@ -22,7 +30,10 @@ namespace VoidCrewFleet
                 {
                     GameSession session = GameSessionManager.ActiveSession;
                     if (session == null || session.IsHub || !ModRegistration.SessionUsesFleet) return false;
-                    return FleetSession.Mode != FleetMode.OneShip || PhotonNetwork.PlayerList.Length > 6;
+                    if (ReferenceEquals(session, _pausedSession)) return true;
+                    if (FleetSession.Mode == FleetMode.OneShip && PhotonNetwork.PlayerList.Length <= 6) return false;
+                    _pausedSession = session;
+                    return true;
                 }
                 catch
                 {
@@ -84,6 +95,72 @@ namespace VoidCrewFleet
         private static bool BlockPhotonQuestProgressPrefix()
         {
             return !Block("quest progress");
+        }
+
+        /// <summary>
+        /// Daily and weekly quests: the game marks a quest done (gone until the next day or week) before it pays the
+        /// reward, which the guard blocks, so a quest finished in a paused mission would be used up for nothing. It stays
+        /// open instead; its progress starts again from zero in the next mission, so nothing carries over.
+        /// </summary>
+        [GamePatch(Feature, "CG.Profile.PlayerMetaquestData", "SetQuestComplete", PatchKind.Prefix, Optional = true)]
+        private static bool BlockMetaquestPrefix(ref bool __result)
+        {
+            if (!Block("daily and weekly quests")) return true;
+            __result = false;
+            return false;
+        }
+
+        [GamePatch(Feature, "CG.Profile.CloudPlayerMetaquestSync", "SetQuestComplete", PatchKind.Prefix, Optional = true)]
+        private static bool BlockCloudMetaquestPrefix(ref bool __result)
+        {
+            if (!Block("daily and weekly quests")) return true;
+            __result = false;
+            return false;
+        }
+
+        /// <summary>
+        /// A paused mission tracks no quest, metric or achievement progress at all, so nothing from it counts in a later
+        /// mission either (achievement metrics carry over between missions). Both halves are skipped together: finishing
+        /// trackers that never started would save zeros.
+        /// </summary>
+        [GamePatch(Feature, "PlayerMetricTracker", "ActivateTrackers", PatchKind.Prefix, Optional = true)]
+        private static bool ActivateTrackersPrefix()
+        {
+            _trackersSkipped = Block("quest and achievement tracking");
+            return !_trackersSkipped;
+        }
+
+        [GamePatch(Feature, "PlayerMetricTracker", "FinalizeTrackers", PatchKind.Prefix, Optional = true)]
+        private static bool FinalizeTrackersPrefix()
+        {
+            return !_trackersSkipped;
+        }
+
+        private static bool _saveNoticeShown;
+
+        /// <summary>
+        /// Host: fleet runs aren't saved. The game's save holds one ship, so a resumed fleet run would come back as a
+        /// one-ship run that earns progression for everything gathered with two ships.
+        /// </summary>
+        [GamePatch(Feature, "GameSessionManager", "PreserveSession", PatchKind.Prefix, Optional = true)]
+        private static bool PreserveSessionPrefix()
+        {
+            try
+            {
+                if (FleetSession.ShipCount < 2 && !Paused) return true;
+                Log.InfoOnce("no fleet saves", "Not saving this run: fleet runs (and runs without progression) can't be continued later.");
+                if (!_saveNoticeShown)
+                {
+                    _saveNoticeShown = true;
+                    Notice.ShowAll("Fleet runs aren't saved: the game's save holds only one ship.");
+                }
+                return false;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking whether to save the run", e);
+                return true;
+            }
         }
     }
 }

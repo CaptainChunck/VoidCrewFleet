@@ -78,7 +78,7 @@ namespace VoidCrewFleet
                     Notice.Show(FleetApi.TeamOf(PhotonNetwork.LocalPlayer.ActorNumber) < 0
                         ? "Pick a team first: only a ship's own team can change its loadout."
                         : "Only " + team + " players can change the " + team + " ship.");
-                    if (_root != null && _editingShipB) _root.schedule.Execute(MarkShipB).ExecuteLater(300);
+                    if (_root != null) _root.schedule.Execute(MarkChoice).ExecuteLater(300);
                     return false;
                 }
             }
@@ -94,7 +94,7 @@ namespace VoidCrewFleet
                 HubFleet.RequestShipB(shipDef.AssetGuid);
             }
             // SELECT marks the shown loadout as chosen by itself; show ship 2's real choice again once that is done.
-            if (_root != null) _root.schedule.Execute(MarkShipB).ExecuteLater(300);
+            if (_root != null) _root.schedule.Execute(MarkChoice).ExecuteLater(300);
             return false;
         }
 
@@ -254,7 +254,7 @@ namespace VoidCrewFleet
             _bar.Add(rows);
 
             _hint = Ui.GameLabel("", "ui-text-color__white");
-            _hint.style.fontSize = 15;
+            _hint.style.fontSize = 16;
             _hint.style.whiteSpace = WhiteSpace.Normal;
             _hint.style.marginTop = 6;
             _hint.style.backgroundColor = new Color(Ui.GameDarkGrey.r, Ui.GameDarkGrey.g, Ui.GameDarkGrey.b, 0.9f);
@@ -439,9 +439,11 @@ namespace VoidCrewFleet
         {
             if (FleetApi.IsTeamMatch)
             {
-                // TEAMS & RULES: the host opens the lobby screen again for everyone (the teams are kept until changed).
-                if (PhotonNetwork.IsMasterClient) PvpTeams.Reset();
-                else Notice.Show("Only the host can open the teams and ship rules again.");
+                // TEAMS & RULES: while the teams are picked it brings this player's lobby screen back (after HIDE). Once they
+                // are confirmed, the host opens team picking again for everyone (the teams are kept until changed), and the
+                // other players look at the teams and the rules.
+                if (PvpTeams.PickingTeams || !PhotonNetwork.IsMasterClient) PvpTeamScreen.ShowLocally();
+                else PvpTeams.Reset();
                 return;
             }
             if (HubFleet.Variant != HubVariant.None) return;
@@ -486,6 +488,29 @@ namespace VoidCrewFleet
         }
 
         /// <summary>The list and SELECTED marker show ship 2's choice while ship 2 is being set up.</summary>
+        /// <summary>After a refused or redirected SELECT: the SELECTED mark shows the real choice of the ship being set up.</summary>
+        private static void MarkChoice()
+        {
+            if (_terminal == null) return;
+            try
+            {
+                var display = DisplayField != null ? DisplayField.GetValue(_terminal) as ModuleLayout : null;
+                if (display == null || display.CurrentLoadout == null) return;
+                if (_editingShipB)
+                {
+                    if (HubFleet.ChosenShipB.IsNull) display.Selected(false);
+                    else MarkShipB();
+                    return;
+                }
+                ShipLoadoutDataDef chosen = HubShipManager.Instance != null ? HubShipManager.Instance.CurrentShipSelected : null;
+                display.Selected(chosen != null && chosen.AssetGuid == display.CurrentLoadout.AssetGuid);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Marking the chosen loadout", e);
+            }
+        }
+
         private static void MarkShipB()
         {
             if (_terminal == null || !_editingShipB || HubFleet.ChosenShipB.IsNull) return;

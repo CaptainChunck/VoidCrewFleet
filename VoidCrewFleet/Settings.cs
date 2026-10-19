@@ -8,6 +8,7 @@ namespace VoidCrewFleet
     {
         public static ConfigEntry<bool> Enabled;
         public static ConfigEntry<int> MaxPlayers;
+        public static ConfigEntry<bool> TwoShips;
         public static ConfigEntry<float> ShipSpacing;
         public static ConfigEntry<float> PvpStartDistance;
         public static ConfigEntry<float> EnemyMultiplier;
@@ -28,6 +29,8 @@ namespace VoidCrewFleet
             MaxPlayers = config.Bind("Lobby", "MaxPlayers", 16,
                 new ConfigDescription("How many players a room you host can hold (8 per ship). The game's own limit is 6.",
                     new AcceptableValueRange<int>(4, 16)));
+            TwoShips = config.Bind("Lobby", "TwoShips", false,
+                "Whether rooms you host start with TWO SHIPS on (the FLEET panel at the loadout terminal changes it, and this follows).");
 
             ShipSpacing = config.Bind("Two ships", "ShipSpacing", 160f,
                 new ConfigDescription("How far apart, in metres, the two ships start and arrive in each sector (centre to centre, side by side).",

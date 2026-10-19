@@ -26,7 +26,12 @@ namespace VoidCrewFleet
         public const string Feature = "Modded-session rules";
 
         public static readonly GUIDUnion ModId = new GUIDUnion("f1ee7c0de5f1ee7c0de5f1ee7c0de5a1");
-        public static readonly GUIDUnion MarkerId = new GUIDUnion("f1ee7c0de5f1ee7c0de5f1ee7c0de5a2");
+        /// <summary>
+        /// The runtime asset the game's mod check requires in rooms this player hosts. It carries the network protocol, so a
+        /// player with an incompatible version is sent back by the game with its "missing mods" message naming the host's
+        /// version, instead of joining and desyncing.
+        /// </summary>
+        public static readonly GUIDUnion MarkerId = new GUIDUnion("f1ee7c0de5f1ee7c0de5f1ee7c0de5" + (0x80 + FleetPlan.Protocol).ToString("x2"));
 
         private const SessionModificationEffect Effect = SessionModificationEffect.ChangesQuestGeneration | SessionModificationEffect.ProgressionAltering;
 

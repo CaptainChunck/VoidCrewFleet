@@ -82,10 +82,25 @@ namespace VoidCrewFleet
             if (_dispensingSlot != 1) return;
             FleetPlan plan = FleetSession.Current;
             if (plan == null) return;
-            // Ship 2: its own loadout's homunculus, else the mission's own override, else the default one.
+            // Ship 2: its own loadout's homunculus, else the mission's own override, else the default one. The session copies
+            // ship 1's loadout homunculus into its override, which isn't the mission's: ship 2 doesn't take that one.
             if (!plan.ShipBHomunculus.IsNull) __result = new ResourceAssets.CarryableRef(plan.ShipBHomunculus);
-            else if (!__instance.HomunculusOverride.IsNull) __result = new ResourceAssets.CarryableRef(__instance.HomunculusOverride);
+            else if (!__instance.HomunculusOverride.IsNull && !IsShipAHomunculus(__instance)) __result = new ResourceAssets.CarryableRef(__instance.HomunculusOverride);
             else __result = DataTable<DefaultAssetTable>.Instance.DefaultHomunculus;
+        }
+
+        private static bool IsShipAHomunculus(GameSession session)
+        {
+            try
+            {
+                var loadout = session.ToLoadShipData;
+                return loadout != null && loadout.HomunculusOverride != null && !loadout.HomunculusOverride.IsNull &&
+                       loadout.HomunculusOverride.AssetGuid == session.HomunculusOverride;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         // ---------------------------------------------------------------- each ship's lights

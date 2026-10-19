@@ -215,6 +215,34 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
+        /// Host, a few times a second: in the hub, once the teams are confirmed, a player who joins later goes to the smaller
+        /// team (as in a match), so they can set up their team's ship without the host reopening team picking.
+        /// </summary>
+        public static void KeepHubTeamsComplete()
+        {
+            try
+            {
+                if (!PhotonNetwork.IsMasterClient || !GameSessionManager.InHub || !HubFleet.HostHasFleet || HubFleet.Variant != HubVariant.FleetBattle || !Locked) return;
+                Dictionary<int, int> teams = FleetShips.CrewMap();
+                bool changed = false;
+                foreach (Player player in PhotonNetwork.PlayerList.OrderBy(p => p.ActorNumber))
+                {
+                    if (teams.ContainsKey(player.ActorNumber)) continue;
+                    int team = Count(teams, 0) <= Count(teams, 1) ? 0 : 1;
+                    teams[player.ActorNumber] = team;
+                    changed = true;
+                    Net.ToActor(player.ActorNumber, Msg.Notice, "You joined the " + TeamName(team) + " team (the teams were already confirmed). Set up the " + TeamName(team) +
+                                                               " ship at the loadout terminal.");
+                }
+                if (changed) FleetShips.PublishCrew(teams);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Giving a late joiner a team", e);
+            }
+        }
+
+        /// <summary>
         /// Host, when the hub loads, FLEET BATTLE is chosen or a match starts: no result, sabotage or hack from an earlier
         /// match, and the teams are picked again (unless a match starts with the teams confirmed in the hub).
         /// </summary>

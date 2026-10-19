@@ -30,6 +30,7 @@ namespace VoidCrewFleet
 
         private static readonly List<PlayerControlledShip> Registered = new List<PlayerControlledShip>();
         private static readonly Dictionary<int, PlayerControlledShip> OwnerCache = new Dictionary<int, PlayerControlledShip>();
+        private static readonly Dictionary<int, float> NotOnShip = new Dictionary<int, float>();
 
         /// <summary>True when more than one player ship exists: only then does anything here differ from the game.</summary>
         public static bool Active
@@ -63,6 +64,7 @@ namespace VoidCrewFleet
             if (ship == null || Registered.Contains(ship)) return;
             Registered.Add(ship);
             OwnerCache.Clear();
+            NotOnShip.Clear();
             if (Registered.Count > 1) Log.Info("Player ship " + Registered.Count + " is in the game (view " + ViewId(ship) + ").");
         }
 
@@ -71,6 +73,7 @@ namespace VoidCrewFleet
             bool hadTwo = Registered.Count > 1;
             Registered.Remove(ship);
             OwnerCache.Clear();
+            NotOnShip.Clear();
             Prune();
             // One ship left: the game's own "player ship" becomes that ship (it may still point at the lost one).
             if (!hadTwo || Registered.Count != 1) return;
@@ -156,10 +159,17 @@ namespace VoidCrewFleet
 
         /// <summary>The host's own latest crew list: the room property only updates after a round trip to the server.</summary>
         private static int[] _hostCrew;
+        private static string _hostCrewRoom;
 
         private static int[] Crew()
         {
-            if (_hostCrew != null && PhotonNetwork.IsMasterClient) return _hostCrew;
+            if (_hostCrew != null)
+            {
+                // Only while this player is the host, in the room the list was made in: a player who hosted an earlier
+                // room and inherits the host role in another must not bring the old room's crews (actor numbers repeat).
+                if (PhotonNetwork.IsMasterClient && PhotonNetwork.CurrentRoom != null && PhotonNetwork.CurrentRoom.Name == _hostCrewRoom) return _hostCrew;
+                _hostCrew = null;
+            }
             object value;
             if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null || !PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeyCrew, out value)) return null;
             return value as int[];
@@ -198,6 +208,7 @@ namespace VoidCrewFleet
                 flat[i++] = pair.Value;
             }
             _hostCrew = flat;
+            _hostCrewRoom = PhotonNetwork.CurrentRoom.Name;
             PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyCrew, flat } });
         }
 
@@ -315,6 +326,8 @@ namespace VoidCrewFleet
             PlayerControlledShip cached;
             if (Assigned.TryGetValue(id, out cached) && cached != null) return cached;
             if (OwnerCache.TryGetValue(id, out cached) && cached != null) return cached;
+            float until;
+            if (NotOnShip.TryGetValue(id, out until) && Time.unscaledTime < until) return null;
 
             PlayerControlledShip ship = component.GetComponentInParent<PlayerControlledShip>();
             if (ship == null)
@@ -332,8 +345,14 @@ namespace VoidCrewFleet
                 var carryable = component as CarryableObject;
                 if (carryable != null && carryable.ParentPlatform != null) ship = carryable.ParentPlatform.GetComponent<PlayerControlledShip>();
             }
-            // Carryables move between ships, so only fixed parts are remembered.
+            // Carryables move between ships, so only fixed parts are remembered. "Not on a ship" is only remembered for a
+            // second: a part can be looked up before it is attached to its ship.
             if (ship != null && !(component is CarryableObject)) OwnerCache[id] = ship;
+            if (ship == null && !(component is CarryableObject))
+            {
+                if (NotOnShip.Count > 4096) NotOnShip.Clear();
+                NotOnShip[id] = Time.unscaledTime + 1f;
+            }
             return ship;
         }
 

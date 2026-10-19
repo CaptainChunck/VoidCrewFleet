@@ -72,6 +72,8 @@ namespace VoidCrewFleet
                 _getShip2Alloys = api.GetMethod("GetShip2Alloys", new[] { typeof(GUIDUnion) });
                 // Optional (Ship Customizer 0.7.0+): what Fleet Battle's ship rules can restrict.
                 _getRuleOptions = api.GetMethod("GetRuleOptions", Type.EmptyTypes);
+                if (_getRuleOptions != null && _getRuleOptions.ReturnType != typeof(string[])) _getRuleOptions = null;
+                if (_getShip2Alloys != null && _getShip2Alloys.ReturnType != typeof(int)) _getShip2Alloys = null;
                 if (getDef == null || _getStandIn == null || _setTerminalShip == null || _checkShip2 == null || _setShip2 == null || _buildShip2 == null)
                 {
                     Log.Warn("Ship Customizer's API is missing members, so ship 2 can't use CUSTOM of its own.");
@@ -79,8 +81,15 @@ namespace VoidCrewFleet
                 }
                 _getDef = getDef;
                 // Optional: when someone without the Customizer joins, it switches ship 2's CUSTOM off and says so here.
-                EventInfo cancelled = api.GetEvent("Ship2CustomCancelled", BindingFlags.Public | BindingFlags.Static);
-                if (cancelled != null) cancelled.AddEventHandler(null, (Action)HubFleet.Ship2CustomCancelled);
+                try
+                {
+                    EventInfo cancelled = api.GetEvent("Ship2CustomCancelled", BindingFlags.Public | BindingFlags.Static);
+                    if (cancelled != null && cancelled.EventHandlerType == typeof(Action)) cancelled.AddEventHandler(null, (Action)HubFleet.Ship2CustomCancelled);
+                }
+                catch (Exception e)
+                {
+                    Log.Failure("Listening to Ship Customizer's ship 2 CUSTOM notice", e);
+                }
                 Log.Info("Ship Customizer found: ship 2 can use its own CUSTOM loadout.");
             }
             catch (Exception e)

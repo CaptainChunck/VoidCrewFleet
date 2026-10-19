@@ -60,10 +60,20 @@ namespace VoidCrewFleet
             }
         }
 
+        private static readonly System.Collections.Generic.Dictionary<Action, Delegate[]> Lists = new System.Collections.Generic.Dictionary<Action, Delegate[]>();
+
+        /// <summary>Runs each handler on its own, so one failing doesn't stop the rest; the handler list is cached per subscription set.</summary>
         private static void Run(Action work, string what)
         {
             if (work == null) return;
-            foreach (Delegate handler in work.GetInvocationList())
+            Delegate[] handlers;
+            if (!Lists.TryGetValue(work, out handlers))
+            {
+                if (Lists.Count > 8) Lists.Clear();
+                handlers = work.GetInvocationList();
+                Lists[work] = handlers;
+            }
+            foreach (Delegate handler in handlers)
             {
                 try
                 {

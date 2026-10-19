@@ -126,7 +126,9 @@ namespace VoidCrewFleet
         {
             if (!HubFleet.HostHasFleet)
             {
-                Notice.Show("The host of this room doesn't run Void Crew Fleet, so fleet missions aren't available here.");
+                Notice.Show("The host of this room doesn't run this version of Void Crew Fleet, so fleet missions aren't available here.");
+                // The game marked the entry as activated before asking; show the room's real choice again.
+                Recheck();
                 return;
             }
             HubFleet.RequestVariant(variant);

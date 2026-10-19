@@ -61,7 +61,18 @@ namespace VoidCrewFleet
 
         public static void ApplyAll(Harmony harmony)
         {
-            foreach (Type host in typeof(Patcher).Assembly.GetTypes())
+            Type[] types;
+            try
+            {
+                types = typeof(Patcher).Assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException e)
+            {
+                Log.Warn("Some of the plugin's types couldn't load (" + (e.LoaderExceptions.Length > 0 ? e.LoaderExceptions[0].Message : "unknown") +
+                         "); the features in them are off.");
+                types = Array.FindAll(e.Types, t => t != null);
+            }
+            foreach (Type host in types)
             {
                 foreach (MethodInfo hook in host.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
                 {

@@ -210,7 +210,8 @@ namespace VoidCrewFleet
             {
                 PanelSettings panel = document != null ? document.panelSettings : null;
                 if (panel == null || panel.targetTexture != null) continue;
-                if (top == null || panel.sortingOrder > top.sortingOrder) top = panel;
+                // The Steam Deck's software cursor lives in a panel at 30000; ours stay under it.
+                if (panel.sortingOrder < 30000 && (top == null || panel.sortingOrder > top.sortingOrder)) top = panel;
                 if (panel.themeStyleSheet == null) continue;
                 int count;
                 themes.TryGetValue(panel.themeStyleSheet, out count);
@@ -219,7 +220,7 @@ namespace VoidCrewFleet
             if (top == null) return null;
             PanelSettings settings = UnityEngine.Object.Instantiate(top);
             settings.name = name + " panel";
-            settings.sortingOrder = Mathf.Max(sortingOrder, top.sortingOrder + 10);
+            settings.sortingOrder = Mathf.Min(Mathf.Max(sortingOrder, top.sortingOrder + 10), 29990);
             settings.clearColor = false;
             ThemeStyleSheet theme = null;
             int uses = 0;

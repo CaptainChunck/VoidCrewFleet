@@ -196,18 +196,21 @@ namespace VoidCrewFleet
         /// <summary>Every second or so: the markers follow the ship the local player is on (co-op lets you change ships).</summary>
         public static void Tick()
         {
-            if (FleetShips.Active && Patcher.IsReady(Feature)) KeepMarkersOnViewShip(ObjectMarkerViewer.Instance);
+            if (FleetSession.ShipCount > 1 && Patcher.IsReady(Feature)) KeepMarkersOnViewShip(ObjectMarkerViewer.Instance);
         }
 
         private static void KeepMarkersOnViewShip(ObjectMarkerViewer viewer)
         {
-            if (!FleetShips.Active || viewer == null || ViewerLocksField == null) return;
+            if (viewer == null || ViewerLocksField == null) return;
             try
             {
-                // Not set up yet: the game binds it to the view ship itself once a ship is there.
+                // Not set up yet (no component at all): the game binds it to the view ship itself once a ship is there. A
+                // destroyed component (the lost ship's) does need moving to the surviving ship.
                 var bound = ViewerLocksField.GetValue(viewer) as TargetLockComponent;
-                PlayerControlledShip ship = FleetShips.ViewShip;
-                if (bound == null || ship == null || FleetShips.OwnerOf(bound) == ship) return;
+                if (ReferenceEquals(bound, null)) return;
+                CG.Game.ClientGame game = CG.Game.ClientGame.Current;
+                PlayerControlledShip ship = FleetShips.Active ? FleetShips.ViewShip : (game != null ? game.PlayerShip : null);
+                if (ship == null || ship.StartedDeath || (bound != null && FleetShips.OwnerOf(bound) == ship)) return;
                 Rebind(viewer, bound, ship);
             }
             catch (Exception e)

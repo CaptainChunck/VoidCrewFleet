@@ -118,6 +118,16 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>
+        /// Whether the local player gets the game's full "ship lost" ending: the death camera, the fade to black, the HUD
+        /// and markers switched off. Only for players who die with the ship when the game is over for them; in co-op, while
+        /// another ship survives, they just die (the normal death screen) and are re-cloned aboard it.
+        /// </summary>
+        private static bool LocalGameOver
+        {
+            get { return LocalDies && (FleetSession.IsPvP || !AnotherShipSurvives); }
+        }
+
         // ---------------------------------------------------------------- the listeners
 
         /// <summary>
@@ -131,7 +141,7 @@ namespace VoidCrewFleet
             PlayerControlledShip own = FleetShips.OwnerOf(__instance);
             if (own != null && own != Dying) return false;
             if (own == null) Log.WarnOnce("death sequence owner", "A ship death sequence could not tell which ship it belongs to.");
-            if (LocalDies) return true;
+            if (LocalGameOver) return true;
             if (PhotonNetwork.IsMasterClient && FleetRuntime.Instance != null)
             {
                 float delay = __instance.startExplodeDelay + __instance.startStageTwoDelay + __instance.startStageThreeDelay + __instance.disableRenderersDelay +
@@ -171,13 +181,13 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "CG.Graphics.LocalPlayerOcclusionController", "OnPlayerShipDeathInitiated", PatchKind.Prefix)]
         private static bool OcclusionPrefix()
         {
-            return !Filtering || LocalDies;
+            return !Filtering || LocalGameOver;
         }
 
         [GamePatch(Feature, "UI.ObjectMarker.ObjectMarkerViewer", "OnShipDestroyed", PatchKind.Prefix)]
         private static bool MarkersPrefix()
         {
-            return !Filtering || LocalDies;
+            return !Filtering || LocalGameOver;
         }
 
         private static readonly System.Reflection.MethodInfo ForceEndMessage = GameMember.Method(typeof(CG.Client.Audio.VoiceController), "ForceEndMessage");
@@ -203,10 +213,11 @@ namespace VoidCrewFleet
             return false;
         }
 
+        /// <summary>The HUD lets go of the lost ship only at a game over; otherwise ShipMarkers moves it to the surviving ship.</summary>
         [GamePatch(Feature, "UI.MainHUD.ShipInfoHUD", "UnsubscribeFromPlayerShip", PatchKind.Prefix)]
         private static bool ShipHudPrefix()
         {
-            return !Filtering || LocalDies;
+            return !Filtering || LocalGameOver;
         }
 
         /// <summary>The mission's "the ship was destroyed" checks: in co-op only when no ship is left; PvP decides itself.</summary>

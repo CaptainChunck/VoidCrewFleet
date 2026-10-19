@@ -21,7 +21,8 @@ namespace VoidCrewFleet
     /// </summary>
     internal static class PvpTeamScreen
     {
-        private sealed class CursorRequest : IShowCursorSource
+        /// <summary>This screen's requests to the game: show the cursor, and switch its controls to menu mode.</summary>
+        private sealed class CursorRequest : IShowCursorSource, IInputActionMapRequest
         {
         }
 
@@ -52,6 +53,13 @@ namespace VoidCrewFleet
         private static string _signature;
         private static bool _visible;
         private static bool _cursorShown;
+        private static bool _inputBlocked;
+        private static float _inputAsserted;
+        private static bool _dismissed;
+        private static bool _viewing;
+        private static float _leaveArmedUntil;
+        private static Button _hideButton;
+        private static Button _changeButton;
 
         public static bool Visible
         {
@@ -75,7 +83,19 @@ namespace VoidCrewFleet
                 Log.Info("PvP: showing the team screen.");
             }
             SetCursor(true);
+            SetInput(true);
             Refresh();
+        }
+
+        /// <summary>
+        /// Brings the lobby screen up for the local player: back after HIDE while the teams are picked, or, once they are
+        /// confirmed, to look at the teams and the ship rules (read-only).
+        /// </summary>
+        public static void ShowLocally()
+        {
+            _dismissed = false;
+            _viewing = true;
+            Tick();
         }
 
         /// <summary>A notice for the local player (a full team, a refused confirm) while the screen hides the chat.</summary>
@@ -91,9 +111,20 @@ namespace VoidCrewFleet
             if (!FleetRuntime.GameReady || !PhotonNetwork.InRoom) return false;
             try
             {
-                if (!PvpTeams.PickingTeams) return false;
                 GameStateMachine machine = GameStateMachine.Instance;
-                return machine != null && (machine.CurrentState is GSSpawn || machine.CurrentState is GSIngame);
+                if (machine == null || !(machine.CurrentState is GSSpawn || machine.CurrentState is GSIngame)) return false;
+                if (PvpTeams.PickingTeams)
+                {
+                    // The game's own menus come first (this screen would cover the escape menu); HIDE puts it away until reopened.
+                    return !_dismissed && !MenuScreenController.IsOpen();
+                }
+                _dismissed = false;
+                if (!_viewing || !FleetApi.IsTeamMatch || !GameSessionManager.InHub)
+                {
+                    _viewing = false;
+                    return false;
+                }
+                return !MenuScreenController.IsOpen();
             }
             catch
             {
@@ -112,6 +143,35 @@ namespace VoidCrewFleet
                     Notice.Show("Enemy players aboard your ship? Punch them with " + Settings.PunchKey.Value + " (five punches knock one out).");
             }
             SetCursor(false);
+            SetInput(false);
+        }
+
+        /// <summary>
+        /// While the screen is up the game's controls are in menu mode (as under its own menus), so the character behind it
+        /// doesn't walk or turn. Re-asserted every second: another screen may have put its own request on top since.
+        /// </summary>
+        private static void SetInput(bool block)
+        {
+            try
+            {
+                if (block)
+                {
+                    if (_inputBlocked && Time.unscaledTime - _inputAsserted < 1f) return;
+                    InputActionMapRequests.AddOrChangeRequest(CursorOwner, InputStateRequestType.UI);
+                    _inputBlocked = true;
+                    _inputAsserted = Time.unscaledTime;
+                }
+                else if (_inputBlocked)
+                {
+                    InputActionMapRequests.RemoveRequest(CursorOwner);
+                    _inputBlocked = false;
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Switching the game's controls for the team screen", e);
+                _inputBlocked = block;
+            }
         }
 
         private static void SetCursor(bool show)
@@ -143,6 +203,8 @@ namespace VoidCrewFleet
             if (root == null) return false;
             root.pickingMode = PickingMode.Ignore;
             Build(root);
+            // A rebuilt screen starts hidden: let Tick show it again.
+            _visible = false;
             return true;
         }
 
@@ -247,6 +309,12 @@ namespace VoidCrewFleet
             _leaveButton = Ui.GameButton("LEAVE LOBBY", Leave, "metem-button-size__small", "metem-button__cancel");
             Ui.Margin(_leaveButton, 0, 12, 0, 0);
             buttons.Add(_leaveButton);
+            _hideButton = Ui.GameButton("HIDE", HideLocally, "metem-button-size__small");
+            Ui.Margin(_hideButton, 0, 12, 0, 0);
+            buttons.Add(_hideButton);
+            _changeButton = Ui.GameButton("CHANGE MISSION", ChangeMission, "metem-button-size__small");
+            Ui.Margin(_changeButton, 0, 12, 0, 0);
+            buttons.Add(_changeButton);
             _hostButtons = Ui.HorizontalRow();
             Button balance = Ui.GameButton("AUTO-BALANCE", PvpTeams.AutoBalance, "metem-button-size__small");
             Ui.Margin(balance, 0, 12, 0, 0);
@@ -284,7 +352,8 @@ namespace VoidCrewFleet
             TeamCounts[team].style.marginBottom = 8;
             content.Add(TeamCounts[team]);
 
-            TeamLists[team] = Ui.Column();
+            // Scrolls when a team is long (8 players) on a small screen.
+            TeamLists[team] = new ScrollView(ScrollViewMode.Vertical);
             TeamLists[team].style.flexGrow = 1;
             content.Add(TeamLists[team]);
 
@@ -306,7 +375,8 @@ namespace VoidCrewFleet
             hint.style.color = Ui.GameBrightGrey;
             hint.style.marginBottom = 8;
             content.Add(hint);
-            _waitingList = Ui.Column();
+            // Everyone starts here when FLEET BATTLE is chosen: up to 16 players, so it scrolls.
+            _waitingList = new ScrollView(ScrollViewMode.Vertical);
             _waitingList.style.flexGrow = 1;
             content.Add(_waitingList);
             return section;
@@ -357,7 +427,8 @@ namespace VoidCrewFleet
             Dictionary<int, int> teams = FleetShips.CrewMap();
             Player[] players = PhotonNetwork.PlayerList.OrderBy(p => p.ActorNumber).ToArray();
             bool host = PhotonNetwork.IsMasterClient;
-            string signature = Signature(teams, players, host);
+            bool picking = PvpTeams.PickingTeams;
+            string signature = Signature(teams, players, host) + (picking ? "|picking" : "|locked") + (Time.unscaledTime < _leaveArmedUntil ? "|leave" : "");
             if (signature == _signature) return;
             _signature = signature;
 
@@ -373,7 +444,7 @@ namespace VoidCrewFleet
                 {
                     int team;
                     if (!teams.TryGetValue(player.ActorNumber, out team) || (team != 0 && team != 1)) team = -1;
-                    (team >= 0 ? TeamLists[team] : _waitingList).Add(PlayerRow(player, team, host));
+                    (team >= 0 ? TeamLists[team] : _waitingList).Add(PlayerRow(player, team, host && picking));
                 }
 
                 int max = PvpTeams.MaxPerTeam;
@@ -388,18 +459,28 @@ namespace VoidCrewFleet
                     bool joined = mine == team;
                     bool full = !joined && count >= max;
                     join.text = joined ? "YOU ARE " + PvpTeams.TeamName(team) : (full ? PvpTeams.TeamName(team) + " IS FULL" : "JOIN " + PvpTeams.TeamName(team));
-                    join.SetEnabled(!full);
+                    join.style.display = picking || joined ? DisplayStyle.Flex : DisplayStyle.None;
+                    join.SetEnabled(!full && picking);
                     join.EnableInClassList("metem-button-selected", joined);
                     join.style.unityBackgroundImageTintColor = full ? new StyleColor(StyleKeyword.Null) : new StyleColor(FleetApi.TeamColor(team));
                 }
 
                 string why;
                 bool balanced = PvpTeams.Balanced(teams, out why);
-                _hostButtons.style.display = host ? DisplayStyle.Flex : DisplayStyle.None;
+                _hostButtons.style.display = host && picking ? DisplayStyle.Flex : DisplayStyle.None;
                 _confirmButton.SetEnabled(balanced);
                 bool inHub = GameSessionManager.InHub;
-                if (_leaveButton != null) _leaveButton.text = inHub ? "LEAVE LOBBY" : "LEAVE MATCH";
-                if (host)
+                if (_leaveButton != null) _leaveButton.text = Time.unscaledTime < _leaveArmedUntil ? "CLICK AGAIN TO LEAVE" : (inHub ? "LEAVE LOBBY" : "LEAVE MATCH");
+                _hideButton.text = picking ? "HIDE" : "CLOSE";
+                _hideButton.style.display = inHub ? DisplayStyle.Flex : DisplayStyle.None;
+                _changeButton.style.display = host && picking && inHub ? DisplayStyle.Flex : DisplayStyle.None;
+                if (!picking)
+                {
+                    _status.text = "The teams are confirmed. " + (host
+                        ? "To change them or the ship rules, press TEAMS & RULES on the FLEET panel."
+                        : "Only the host can change the teams and the ship rules.");
+                }
+                else if (host)
                 {
                     _status.text = balanced
                         ? (inHub
@@ -485,8 +566,8 @@ namespace VoidCrewFleet
         private static Button MoveButton(string text, Color color, Action onClick)
         {
             Button button = Ui.GameButton(text, onClick, "metem-button-size__small");
-            button.style.height = 26;
-            button.style.fontSize = 15;
+            button.style.height = 32;
+            button.style.fontSize = 16;
             button.style.paddingLeft = 12;
             button.style.paddingRight = 12;
             button.style.paddingTop = 0;
@@ -496,11 +577,39 @@ namespace VoidCrewFleet
             return button;
         }
 
+        /// <summary>LEAVE asks once more: one slipped click (easy with a VR pointer) shouldn't drop a player to the main menu.</summary>
         private static void Leave()
         {
+            if (Time.unscaledTime > _leaveArmedUntil)
+            {
+                _leaveArmedUntil = Time.unscaledTime + 4f;
+                _leaveButton.text = "CLICK AGAIN TO LEAVE";
+                _signature = null;
+                return;
+            }
             Log.Info("PvP: leaving the match from the team screen.");
             Hide();
             GameStateMachine.Instance.ChangeState<GSQuitFromMenu>();
+        }
+
+        /// <summary>Puts the screen away for this player; TEAMS & RULES on the FLEET panel brings it back.</summary>
+        private static void HideLocally()
+        {
+            if (PvpTeams.PickingTeams)
+            {
+                _dismissed = true;
+                Notice.Show("The team screen is hidden. TEAMS & RULES on the loadout terminal's FLEET panel brings it back.");
+            }
+            _viewing = false;
+            Hide();
+        }
+
+        /// <summary>Host: back out of FLEET BATTLE (the galaxy map is behind this screen) to choose another mission.</summary>
+        private static void ChangeMission()
+        {
+            if (!PhotonNetwork.IsMasterClient) return;
+            HubFleet.RequestVariant(HubVariant.None);
+            Notice.ShowAll("The host is choosing another mission: FLEET BATTLE is off.");
         }
     }
 }

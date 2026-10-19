@@ -45,6 +45,22 @@ namespace VoidCrewFleet
             if (Scaling) ___currentIntensity = __state + (___currentIntensity - __state) / Multiplier;
         }
 
+        /// <summary>
+        /// A new host (or a respawned unit) takes over live units at their full intensity; scale it like a spawn, or the
+        /// scaled removals that follow leave phantom intensity behind and fewer enemies come for the rest of the mission.
+        /// </summary>
+        [GamePatch(Feature, "Gameplay.NPC.AI.Spawner", "EvaluateIfUnitIsMine", PatchKind.Prefix, Optional = true)]
+        private static void TakeOverPrefix(float ___currentIntensity, out float __state)
+        {
+            __state = ___currentIntensity;
+        }
+
+        [GamePatch(Feature, "Gameplay.NPC.AI.Spawner", "EvaluateIfUnitIsMine", PatchKind.Postfix, Optional = true)]
+        private static void TakeOverPostfix(ref float ___currentIntensity, float __state)
+        {
+            if (Scaling) ___currentIntensity = __state + (___currentIntensity - __state) / Multiplier;
+        }
+
         [GamePatch(Feature, "Gameplay.NPC.AI.Spawner", "TrackedUnitDestroyed", PatchKind.Prefix)]
         private static void DestroyedPrefix(float ___currentIntensity, out float __state)
         {

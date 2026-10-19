@@ -51,6 +51,7 @@ namespace VoidCrewFleet
             FleetRuntime.Slow += HackTerminal.EnsureRegistered;
             FleetRuntime.Slow += HubFleet.Poll;
             FleetRuntime.Slow += ShipSpawn.KeepCrewsUpToDate;
+            FleetRuntime.Slow += PvpTeams.KeepHubTeamsComplete;
             FleetRuntime.Slow += PvpTeamScreen.Tick;
             FleetRuntime.Slow += PvpCombat.KeepFactions;
             FleetRuntime.Slow += PvpCombat.KeepHostility;

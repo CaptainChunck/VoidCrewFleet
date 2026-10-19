@@ -18,3 +18,6 @@ dist/
 
 # Local design notes (contain local paths and game-code excerpts)
 docs/
+
+# Claude Code agent worktrees
+.claude/
