@@ -34,6 +34,7 @@ namespace VoidCrewFleet
                                              InteractionMode.SchematicView;
 
         private static readonly FieldInfo ChatOpenField = GameMember.Field(typeof(TextChat), "_chatOpened");
+        private static readonly FieldInfo ClickingField = GameMember.Field(typeof(EnvironmentInteract), "currentInteractable");
         private static readonly Dictionary<int, float> LastHitFrom = new Dictionary<int, float>();
         private static float _nextPunch;
         private static float _nextHint;
@@ -69,14 +70,15 @@ namespace VoidCrewFleet
                 Keyboard keyboard = Keyboard.current;
                 Key key = Settings.PunchKey.Value;
                 if (keyboard != null && key != Key.None && keyboard[key].wasPressedThisFrame) TryPunch(false);
-                // Fire punches too (a mouse button, or the VR controller's trigger), with empty hands and an enemy in reach.
+                // Fire punches too (a mouse button, or the VR controller's trigger), with empty hands and an enemy in reach,
+                // unless it is using something (Fire is also the game's Use).
                 InputAction fire = Fire();
-                if (fire != null && fire.WasPressedThisFrame() && !PvpHack.Busy && HandsEmpty()) TryPunch(true);
+                if (fire != null && fire.WasPressedThisFrame() && !PvpHack.Busy && FirePunches()) TryPunch(true);
                 if (Time.unscaledTime >= _nextHint)
                 {
                     _nextHint = Time.unscaledTime + HintSeconds;
                     Player target = CanPunch() ? FindTarget() : null;
-                    string keys = Settings.PunchKey.Value.ToString().ToUpperInvariant() + (HandsEmpty() ? " OR " + FireName(fire) : "");
+                    string keys = Settings.PunchKey.Value.ToString().ToUpperInvariant() + (target != null && FirePunches() ? " OR " + FireName(fire) : "");
                     ShowHint(target != null ? keys + "  PUNCH " + NameOf(target).ToUpperInvariant() : null);
                 }
             }
@@ -124,6 +126,20 @@ namespace VoidCrewFleet
         {
             LocalPlayer me = LocalPlayer.Instance;
             return me != null && me.Payload == null;
+        }
+
+        /// <summary>
+        /// Fire punches: hands empty, and Fire isn't using something instead. Fire is also the game's Use: it presses the
+        /// button, lever or panel under the crosshair, or picks up the item there, and a click or lever pull holds on while
+        /// the button is down.
+        /// </summary>
+        private static bool FirePunches()
+        {
+            if (!HandsEmpty()) return false;
+            LocalPlayer me = LocalPlayer.Instance;
+            if (me.RaycastHandler != null && me.RaycastHandler.Current != null) return false;
+            EnvironmentInteract clicking = me.Locomotion != null ? me.Locomotion.GetAbility<EnvironmentInteract>() : null;
+            return clicking == null || GameMember.Read<UnityEngine.Object>(ClickingField, clicking, null) == null;
         }
 
         /// <param name="onlyAtSomeone">From Fire: punch only when an enemy is in reach (a click elsewhere isn't a punch).</param>
