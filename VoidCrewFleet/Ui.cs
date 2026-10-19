@@ -16,26 +16,13 @@ namespace VoidCrewFleet
     /// </summary>
     internal static class Ui
     {
-        public static readonly Color Gold = new Color(0.96f, 0.71f, 0.22f, 1f);
-        public static readonly Color Window = new Color(0.06f, 0.065f, 0.07f, 0.97f);
-        public static readonly Color Backdrop = new Color(0f, 0f, 0f, 0.6f);
-        public static readonly Color Row = new Color(0.13f, 0.135f, 0.14f, 1f);
-        public static readonly Color RowHover = new Color(0.22f, 0.225f, 0.23f, 1f);
-        public static readonly Color ButtonColor = new Color(0.17f, 0.175f, 0.18f, 0.95f);
-        public static readonly Color ButtonHover = new Color(0.3f, 0.3f, 0.31f, 0.95f);
-        public static readonly Color Text = new Color(0.93f, 0.93f, 0.93f, 1f);
-        public static readonly Color TextDim = new Color(0.62f, 0.63f, 0.65f, 1f);
         public static readonly Color Warning = new Color(1f, 0.45f, 0.35f, 1f);
-        public static readonly Color TeamA = new Color(0.3f, 0.65f, 1f, 1f);
-        public static readonly Color TeamB = new Color(1f, 0.42f, 0.3f, 1f);
 
         // The game's own palette (its SharedUIColorTheme).
         public static readonly Color GameOrange = new Color32(0xF6, 0xAE, 0x3C, 0xFF);
         public static readonly Color GameDarkGrey = new Color32(0x30, 0x30, 0x30, 0xFF);
         public static readonly Color GameLightGrey = new Color32(0x69, 0x6A, 0x6D, 0xFF);
         public static readonly Color GameBrightGrey = new Color32(0xDF, 0xDF, 0xDF, 0xFF);
-        public static readonly Color GameLightBlue = new Color32(0xBD, 0xE7, 0xFB, 0xFF);
-        public static readonly Color GameDecoBrown = new Color32(0x5E, 0x54, 0x4A, 0xFF);
         public static readonly Color GameBackdrop = new Color32(0x00, 0x00, 0x00, 0xEB);
         public static readonly Color GameItemBackground = new Color32(0x14, 0x13, 0x10, 0xFF);
 
@@ -63,31 +50,6 @@ namespace VoidCrewFleet
             Padding(label, 0, 0);
             label.style.whiteSpace = WhiteSpace.Normal;
             return label;
-        }
-
-        /// <summary>A flat button: a box with a label, highlighted on hover.</summary>
-        public static VisualElement Button(string text, Action onClick, int size = 20)
-        {
-            var button = new VisualElement();
-            button.style.flexDirection = FlexDirection.Row;
-            button.style.alignItems = Align.Center;
-            button.style.justifyContent = Justify.Center;
-            Padding(button, 6, 14);
-            Margin(button, 0, 6, 0, 0);
-            Radius(button, 3);
-            Border(button, 1, new Color(1f, 1f, 1f, 0.18f));
-            button.style.backgroundColor = ButtonColor;
-            button.Add(Label(text, size, Text, true));
-            Hover(button, ButtonColor, ButtonHover);
-            Click(button, onClick);
-            return button;
-        }
-
-        /// <summary>Changes the text of a button made by <see cref="Button"/>.</summary>
-        public static void SetButtonText(VisualElement button, string text)
-        {
-            var label = button.Q<Label>();
-            if (label != null) label.text = text;
         }
 
         /// <summary>Makes any element clickable with the left mouse button, the same way the game's lists are.</summary>
