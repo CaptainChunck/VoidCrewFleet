@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1
+- **Ship 2's own starting alloys.** When ship 2 has a loadout of its own, it starts with its own alloys:
+  - with Ship Customizer 0.5.1 or newer, the alloys set on its CUSTOM loadout;
+  - otherwise, the game's own starting amount.
+
+  As a copy of ship 1 (AS SHIP 1), it still starts with ship 1's amount. Until now ship 2 always started with ship 1's
+  amount, even when ship 1 was a CUSTOM loadout with its own starting alloys.
+- **FleetApi.ReadsShip2Alloys** tells Ship Customizer that Fleet does this, so Ship Customizer offers starting alloys
+  for ship 2's CUSTOM loadout.
+
 ## 0.2.0
 - **Teams are picked in the lobby.**
   - When the host picks FLEET BATTLE, the team screen opens for everyone. Team badges show above players' heads.

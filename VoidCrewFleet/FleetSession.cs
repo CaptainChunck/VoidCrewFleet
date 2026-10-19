@@ -41,6 +41,12 @@ namespace VoidCrewFleet
         /// <summary>Host only: what the second ship spawns with. Not sent; clients receive the ship through Photon.</summary>
         public ShipLoadout ShipBLoadout;
 
+        /// <summary>
+        /// Host only: ship 2's starting alloys. -2 = the same as ship 1 (ship 2 is a copy of it), -1 = the game's own amount
+        /// (ship 2 has a loadout of its own), 0 or more = its CUSTOM loadout's starting alloys (Ship Customizer).
+        /// </summary>
+        public int ShipBAlloys = -2;
+
         /// <summary>PvP: what the airlock hacking terminal costs in the fabricator (the host's setting, the same for everyone).</summary>
         public int HackCost = HackTerminal.DefaultCost;
 

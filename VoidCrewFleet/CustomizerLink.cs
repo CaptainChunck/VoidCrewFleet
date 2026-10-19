@@ -18,7 +18,7 @@ namespace VoidCrewFleet
 
         private static bool _looked;
         private static bool _installed;
-        private static MethodInfo _getDef, _getStandIn, _setTerminalShip, _checkShip2, _setShip2, _buildShip2;
+        private static MethodInfo _getDef, _getStandIn, _setTerminalShip, _checkShip2, _setShip2, _buildShip2, _getShip2Alloys;
 
         /// <summary>Whether the Customizer is installed at all (even one without the API).</summary>
         public static bool Installed
@@ -68,6 +68,8 @@ namespace VoidCrewFleet
                 _checkShip2 = api.GetMethod("CheckShip2", new[] { typeof(GUIDUnion), typeof(int) });
                 _setShip2 = api.GetMethod("SetShip2", new[] { typeof(GUIDUnion) });
                 _buildShip2 = api.GetMethod("BuildShip2", new[] { typeof(GUIDUnion) });
+                // Optional (Ship Customizer 0.5.1+): ship 2's own CUSTOM starting alloys.
+                _getShip2Alloys = api.GetMethod("GetShip2Alloys", new[] { typeof(GUIDUnion) });
                 if (getDef == null || _getStandIn == null || _setTerminalShip == null || _checkShip2 == null || _setShip2 == null || _buildShip2 == null)
                 {
                     Log.Warn("Ship Customizer's API is missing members, so ship 2 can't use CUSTOM of its own.");
@@ -161,6 +163,13 @@ namespace VoidCrewFleet
         public static ShipLoadout BuildShip2(GUIDUnion loadout)
         {
             return Call(() => _buildShip2, loadout) as ShipLoadout;
+        }
+
+        /// <summary>Host, at mission start: ship 2's CUSTOM starting alloys, or -1 for the game's own amount (or no such API).</summary>
+        public static int GetShip2Alloys(GUIDUnion loadout)
+        {
+            object value = Call(() => _getShip2Alloys, loadout);
+            return value is int ? (int)value : -1;
         }
 
         /// <summary>Calls an API member; the member is read after linking, so the very first call works too.</summary>

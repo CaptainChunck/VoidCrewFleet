@@ -478,6 +478,7 @@ namespace VoidCrewFleet
                     ShipB = shipB,
                     ShipBName = shipBName,
                     ShipBLoadout = shipBLoadout,
+                    ShipBAlloys = _shipBAlloys,
                     ShipBHomunculus = shipBLoadout.HomunculusOverride != null && !shipBLoadout.HomunculusOverride.IsNull
                         ? shipBLoadout.HomunculusOverride.AssetGuid
                         : GUIDUnion.Empty(),
@@ -499,8 +500,11 @@ namespace VoidCrewFleet
         /// is built by the Ship Customizer), otherwise a copy of exactly what ship 1 spawns with. That copy includes ship 1's
         /// CUSTOM loadout, or what the Customizer fell back to, because this prefix runs after the Customizer's.
         /// </summary>
+        private static int _shipBAlloys = -2;
+
         private static ShipLoadout PrepareShipB(GameSession session, out GUIDUnion guid, out string name)
         {
+            _shipBAlloys = -2;
             ShipLoadoutDataDef chosen = LoadoutDef(ChosenShipB);
             if (chosen != null && !AllowedByQuest(session, chosen))
             {
@@ -514,6 +518,8 @@ namespace VoidCrewFleet
                 {
                     guid = chosen.AssetGuid;
                     name = DescribeLoadout(chosen);
+                    // Its CUSTOM starting alloys, or the game's own amount when it has none set.
+                    _shipBAlloys = Math.Max(-1, CustomizerLink.GetShip2Alloys(chosen.AssetGuid));
                     return custom;
                 }
                 // CUSTOM can't be used for this mission (the Customizer said why): its game loadout instead.
@@ -523,6 +529,7 @@ namespace VoidCrewFleet
             {
                 guid = chosen.AssetGuid;
                 name = DescribeLoadout(chosen);
+                _shipBAlloys = -1;
                 return ShipLoadout.FromJObject(chosen.Asset.ShipLoadout.AsJObject());
             }
             guid = session.ToLoadShipGuid;

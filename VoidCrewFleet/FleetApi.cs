@@ -27,6 +27,15 @@ namespace VoidCrewFleet
         /// </summary>
         public static event Action TeamsChanged;
 
+        /// <summary>
+        /// True: at the start of a run Fleet gives ship 2 its own starting alloys (its CUSTOM loadout's, through Ship
+        /// Customizer's GetShip2Alloys, or else the game's own amount) unless ship 2 is a copy of ship 1.
+        /// </summary>
+        public static bool ReadsShip2Alloys
+        {
+            get { return true; }
+        }
+
         /// <summary>True while the room's mission is FLEET BATTLE (picked in the hub), or a PvP match is running.</summary>
         public static bool IsTeamMatch
         {

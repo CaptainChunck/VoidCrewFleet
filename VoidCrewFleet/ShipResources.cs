@@ -23,7 +23,8 @@ namespace VoidCrewFleet
     /// - the game's own count (HUD, ship voice lines, ship status, clone tube screen) is the count of the ship the local
     ///   player belongs to right now (FleetShips.ViewShip), switched silently when that changes; fabricator terminals
     ///   always show their own ship's count;
-    /// - both ships start with the game's own starting amounts, and the end-of-mission tally counts the player's own ship.
+    /// - both ships start with the game's own starting amounts, except that ship 2 with a loadout of its own starts with its
+    ///   own alloys (its CUSTOM loadout's, or the game's default); the end-of-mission tally counts the player's own ship.
     /// With one ship nothing is tagged or redirected.
     /// </summary>
     internal static class ShipResources
@@ -253,9 +254,24 @@ namespace VoidCrewFleet
             for (int slot = 0; slot < 2; slot++)
             {
                 if (changeCause == ResourceChangeAlloy.DEBUG && slot != Shown()) continue;
-                Send(__instance, slot, true, alloyAmount, false, (byte)changeCause, GUIDUnion.Empty());
+                int amount = slot == 1 ? ShipBStartAlloys(__instance, alloyAmount, changeCause) : alloyAmount;
+                Send(__instance, slot, true, amount, false, (byte)changeCause, GUIDUnion.Empty());
             }
             return false;
+        }
+
+        /// <summary>
+        /// Ship 2's amount when the run starts: the same as ship 1 when it is a copy of ship 1; with a loadout of its own, its
+        /// CUSTOM starting alloys (Ship Customizer), or else the game's own amount (not ship 1's CUSTOM amount).
+        /// </summary>
+        private static int ShipBStartAlloys(GameSessionSuppliesManager manager, int sessionAmount, ResourceChangeAlloy changeCause)
+        {
+            if (changeCause != ResourceChangeAlloy.GAME_SESSION_PROGRESS_TRACKER_START && changeCause != ResourceChangeAlloy.GAME_STATE_INGAME_ENTER) return sessionAmount;
+            FleetPlan plan = FleetSession.Current;
+            if (plan == null || plan.ShipBAlloys == -2) return sessionAmount;
+            int amount = plan.ShipBAlloys >= 0 ? plan.ShipBAlloys : manager.GetTotalPlayerAlloyBonus();
+            Log.Info("Ship 2 starts with " + amount + " alloys (" + (plan.ShipBAlloys >= 0 ? "its CUSTOM loadout's" : "the game's own amount") + "); ship 1 with " + sessionAmount + ".");
+            return amount;
         }
 
         [GamePatch(Feature, "GameSessionSuppliesManager", "SetBiomassAmountNoNotification", PatchKind.Prefix)]

@@ -25,6 +25,8 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
 
   Doing something on one ship doesn't set anything off on the other. In co-op, pings and damage markers are shared with
   both crews.
+- **Starting alloys:** with a loadout of its own, ship 2 starts with its own alloys: its CUSTOM loadout's (Ship
+  Customizer 0.5.1+), otherwise the game's starting amount. As a copy of ship 1 (AS SHIP 1), it starts with ship 1's.
 
 ### Missions (galaxy map)
 - **The game's own missions** can be flown with two ships.
@@ -100,6 +102,7 @@ rules ask for mods that change the game.
   - Ship 1 can use its CUSTOM loadout.
   - With Ship Customizer 0.4.0 or newer, ship 2 can have a CUSTOM loadout of its own. Choose SHIP 2 in the FLEET
     panel, then CUSTOM.
+  - With Ship Customizer 0.5.1 or newer, ship 2's CUSTOM loadout has its own starting alloys (Fleet 0.2.1 or newer).
 - **Void Crew VR UI Fix** (optional): the mod's screens use the game's own UI system, so they show in VR.
 - Neither is required.
 
