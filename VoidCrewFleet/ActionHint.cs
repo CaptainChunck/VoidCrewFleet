@@ -6,7 +6,9 @@ namespace VoidCrewFleet
 {
     /// <summary>
     /// The one line of action text below the middle of the screen ("V  PUNCH ...", "HOLD FIRE  ATTACH ..."), shared by
-    /// the features that show one, so they don't overwrite each other: the highest priority text that is set shows.
+    /// the features that show one, so they don't overwrite each other: the highest priority text that is set shows. It is
+    /// drawn like the game's own key prompts: the key (the text before the first double space) in a key-cap box, then
+    /// the action in the HUD's bold white text.
     /// </summary>
     internal static class ActionHint
     {
@@ -15,6 +17,8 @@ namespace VoidCrewFleet
 
         private static readonly Dictionary<string, KeyValuePair<int, string>> Texts = new Dictionary<string, KeyValuePair<int, string>>();
         private static UIDocument _document;
+        private static VisualElement _row;
+        private static Label _key;
         private static Label _label;
 
         /// <summary>Sets (or with null or empty text, clears) one feature's text.</summary>
@@ -45,17 +49,21 @@ namespace VoidCrewFleet
             }
             if (shown == null)
             {
-                if (_label != null) _label.style.display = DisplayStyle.None;
+                if (_row != null) _row.style.display = DisplayStyle.None;
                 return;
             }
             if (!Ensure()) return;
-            _label.text = shown;
-            _label.style.display = DisplayStyle.Flex;
+            int split = shown.IndexOf("  ", System.StringComparison.Ordinal);
+            string key = split > 0 ? shown.Substring(0, split).Trim() : null;
+            _key.text = key ?? "";
+            _key.style.display = string.IsNullOrEmpty(key) ? DisplayStyle.None : DisplayStyle.Flex;
+            _label.text = split > 0 ? shown.Substring(split).Trim() : shown;
+            _row.style.display = DisplayStyle.Flex;
         }
 
         private static bool Ensure()
         {
-            if (_label != null && _label.panel != null) return true;
+            if (_row != null && _row.panel != null) return true;
             if (_document == null)
             {
                 _document = Ui.CreateOverlay("Void Crew Fleet action hint", 4000);
@@ -64,14 +72,27 @@ namespace VoidCrewFleet
             VisualElement root = _document.rootVisualElement;
             if (root == null) return false;
             root.pickingMode = PickingMode.Ignore;
-            _label = Ui.Label("", 22, Ui.Warning, true);
-            _label.style.position = Position.Absolute;
-            _label.style.left = 0;
-            _label.style.right = 0;
-            _label.style.top = new Length(57, LengthUnit.Percent);
-            _label.style.unityTextAlign = TextAnchor.MiddleCenter;
-            _label.style.display = DisplayStyle.None;
-            root.Add(_label);
+            _row = new VisualElement { pickingMode = PickingMode.Ignore };
+            _row.style.position = Position.Absolute;
+            _row.style.left = 0;
+            _row.style.right = 0;
+            _row.style.top = new Length(57, LengthUnit.Percent);
+            _row.style.flexDirection = FlexDirection.Row;
+            _row.style.justifyContent = Justify.Center;
+            _row.style.alignItems = Align.Center;
+
+            _key = Ui.HudLabel("", 17, Color.white);
+            _key.style.backgroundColor = new Color(0f, 0f, 0f, 0.55f);
+            Ui.Border(_key, 2, Color.white);
+            Ui.Radius(_key, 3);
+            Ui.Padding(_key, 1, 8);
+            _key.style.marginRight = 10;
+            _key.style.unityTextAlign = TextAnchor.MiddleCenter;
+            _row.Add(_key);
+            _label = Ui.HudLabel("", 19, Color.white);
+            _row.Add(_label);
+            _row.style.display = DisplayStyle.None;
+            root.Add(_row);
             return true;
         }
     }

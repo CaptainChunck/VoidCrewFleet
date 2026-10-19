@@ -43,7 +43,16 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
   3. At the loadout terminal the FLEET panel shows the **BLUE SHIP** (ship 1) and **RED SHIP** (ship 2) in team colours.
      Only a ship's own team can change its loadout, Ship Customizer's CUSTOM included.
   4. The host starts the match by **sitting in a ready-room seat**, and everyone spawns aboard their team's ship.
-  The host can reopen team picking with FLEET BATTLE TEAMS on the FLEET panel.
+  The host can reopen the lobby screen with TEAMS & RULES on the FLEET panel; the current teams are kept.
+- **Ship rules** (with Ship Customizer 0.7.0 or newer): the lobby screen's SHIP RULES tab is where the host decides
+  what a CUSTOM loadout may use in the match:
+  - the allowed MK tiers (the fabricator may start at the highest one);
+  - the allowed categories;
+  - single options to ban;
+  - a starting-alloys limit.
+
+  Everyone sees the rules. The Customizer greys out what they refuse at the loadout terminal, and the host's game
+  removes it from the ships when the match starts. The game's own loadouts are not affected.
 - **The arena:**
   - one of the game's asteroid fields, with rocks between the ships to take cover behind;
   - mirrored salvage on each side: supply and generic containers near home, a wreck to search on the flank, and an
@@ -90,6 +99,7 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
 | PvP | Arena | auto | Where Fleet Battle is fought: auto, Dz-A, Or-A, Oz-B, Defiance or off (host). |
 | PvP | PunchKey | V | The punch key (Fire with empty hands also punches). |
 | PvP | HackTerminalCost | 10 | The hacking terminal's fabricator price in alloys (host). |
+| PvP | ShipRules | (empty) | Your last Fleet Battle ship rules; set them on the lobby screen, not here. |
 | Diagnostics | VerboseLogging | false | More detail in the BepInEx log. |
 | Diagnostics | AutoTest | Off | Developer self-test; leave it Off to play. |
 
@@ -103,6 +113,7 @@ rules ask for mods that change the game.
   - With Ship Customizer 0.4.0 or newer, ship 2 can have a CUSTOM loadout of its own. Choose SHIP 2 in the FLEET
     panel, then CUSTOM.
   - With Ship Customizer 0.5.1 or newer, ship 2's CUSTOM loadout has its own starting alloys (Fleet 0.2.1 or newer).
+  - With Ship Customizer 0.7.0 or newer, CUSTOM loadouts follow Fleet Battle's ship rules (Fleet 0.3.0 or newer).
 - **Void Crew VR UI Fix** (optional): the mod's screens use the game's own UI system, so they show in VR.
 - Neither is required.
 

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.0
+- **Fleet Battle ship rules.** The lobby screen has a SHIP RULES tab where the host decides what a CUSTOM loadout
+  (Ship Customizer) may use in the match:
+  - which MK tiers may be fitted (MK I, II and/or III); the fabricator may start at the highest allowed tier;
+  - which categories (weapons, defense, support modules, ammo, crates, homunculi and so on);
+  - single options to ban;
+  - how many starting alloys a CUSTOM loadout may set (no limit, the game's default, or a cap).
+
+  Everyone sees the rules, in one line on the lobby screen and on the tab. Ship Customizer 0.7.0 or newer greys out
+  what they refuse at the loadout terminal and, on the host, removes it from the ships when the match starts. The
+  game's own loadouts are not affected. The host's last rules come back in their next Fleet Battle lobby.
+- **Looks like the game.** Fleet's screens are built from the game's own style sheets and art:
+  - The FLEET section of the loadout terminal uses the terminal's own parts: its header and decorative line, its
+    LOADOUTS rows (gold for the ship being set up, a team-colour marker in Fleet Battle) and its small button.
+  - The Fleet Battle lobby screen looks like one of the hub's terminals. It has the terminal background with its
+    meander bars, section headers over the decorative lines, RESOURCES-style rows, the game's buttons, and CONFIRM
+    TEAMS as the big hex button where SELECT sits on the loadout terminal.
+  - In a match, the punch and hacking-terminal prompts show their key in a key-cap box like the game's prompts. The
+    airlock hack countdowns use the HUD's bold text and colours.
+- **Fixed:** the loadout terminal's team colour in Fleet Battle never showed, because it sat under the terminal's
+  background picture. It now tints the terminal blue or red.
+- The FLEET section's team-match button is now **TEAMS & RULES**. The host uses it to reopen the lobby screen; the
+  current teams are kept.
+- FleetApi: ShipRulesActive, IsTierAllowed, FabricatorMaxLevel, IsCategoryAllowed, IsItemAllowed, MaxStartAlloys and
+  ShipRulesChanged, for Ship Customizer.
+
 ## 0.2.1
 - **Ship 2's own starting alloys.** When ship 2 has a loadout of its own, it starts with its own alloys:
   - with Ship Customizer 0.5.1 or newer, the alloys set on its CUSTOM loadout;

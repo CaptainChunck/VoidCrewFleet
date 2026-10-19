@@ -31,17 +31,24 @@ namespace VoidCrewFleet
         private static readonly VisualElement[] TeamLists = new VisualElement[2];
         private static readonly Label[] TeamCounts = new Label[2];
         private static readonly Label[] TeamShips = new Label[2];
-        private static readonly VisualElement[] JoinButtons = new VisualElement[2];
+        private static readonly Button[] JoinButtons = new Button[2];
 
         private static UIDocument _document;
         private static VisualElement _screen;
         private static VisualElement _waitingList;
         private static VisualElement _hostButtons;
-        private static VisualElement _confirmButton;
+        private static Button _confirmButton;
         private static Label _status;
-        private static VisualElement _leaveButton;
+        private static Button _leaveButton;
         private static Label _flash;
         private static float _flashUntil;
+        private static VisualElement _tabs;
+        private static Button _teamsTab;
+        private static Button _rulesTab;
+        private static Label _rulesSummary;
+        private static VisualElement _teamsView;
+        private static VisualElement _rulesView;
+        private static bool _showRules;
         private static string _signature;
         private static bool _visible;
         private static bool _cursorShown;
@@ -139,65 +146,125 @@ namespace VoidCrewFleet
             return true;
         }
 
+        /// <summary>The lobby screen's width (in the game's 1920 x 1080 reference pixels) and its three sections'.</summary>
+        private const float ScreenWidth = 1640f;
+        public const float SectionWidth = 500f;
+
         private static void Build(VisualElement root)
         {
+            Ui.UseGameStyles(root);
             _screen = new VisualElement { name = "FleetTeamScreen" };
             Ui.Fill(_screen);
-            _screen.style.backgroundColor = new Color(0f, 0f, 0f, 0.9f);
+            _screen.style.backgroundColor = Ui.GameBackdrop;
             _screen.style.alignItems = Align.Center;
             _screen.style.justifyContent = Justify.Center;
             _screen.pickingMode = PickingMode.Position;
 
-            VisualElement window = Ui.WindowBox(1060);
-            window.style.alignItems = Align.Stretch;
+            // A screen in the style of the game's hub terminals (the loadout terminal's): its background picture, the
+            // meander bars along the top and bottom, sections with big white headers over its decorative lines, rows like
+            // its RESOURCES list, and its big hex button for the one thing to do at the end.
+            var panel = new VisualElement { name = "Terminal" };
+            panel.style.width = ScreenWidth;
+            panel.style.backgroundColor = Ui.GameItemBackground;
+            Sprite background = Ui.GameSprite("UIBackground01IL");
+            if (background != null) panel.style.backgroundImage = new StyleBackground(background);
+            Ui.Border(panel, 1, Ui.GameLightGrey);
 
-            Label title = Ui.Label("FLEET BATTLE", 36, Ui.Gold, true);
-            title.style.unityTextAlign = TextAnchor.MiddleCenter;
-            window.Add(title);
-            Label subtitle = Ui.Label("Choose your team. Each team crews one ship: destroy the other team's ship to win. " +
-                                      "Teams stay even; with an odd number of players one team has one more.", 17, Ui.Text);
-            subtitle.style.unityTextAlign = TextAnchor.MiddleCenter;
-            Ui.Margin(subtitle, 6, 0, 18, 0);
-            window.Add(subtitle);
+            VisualElement topBar = Ui.GameDecoBar();
+            Ui.Margin(topBar, 15, 0, 10, 0);
+            panel.Add(topBar);
 
-            VisualElement columns = Ui.HorizontalRow();
-            columns.style.alignItems = Align.Stretch;
-            columns.style.justifyContent = Justify.SpaceBetween;
-            columns.Add(TeamColumn(0));
-            columns.Add(WaitingColumn());
-            columns.Add(TeamColumn(1));
-            window.Add(columns);
+            var body = new VisualElement();
+            Ui.Padding(body, 0, 30);
 
-            _status = Ui.Label("", 17, Ui.Text);
-            _status.style.unityTextAlign = TextAnchor.MiddleCenter;
-            _status.style.marginTop = 16;
-            window.Add(_status);
+            VisualElement headerRow = Ui.HorizontalRow();
+            headerRow.style.justifyContent = Justify.SpaceBetween;
+            Label title = Ui.GameLabel("FLEET BATTLE", "ui-text-size__large", "ui-text-color__white", "loadout-panel-header", "ui-text-dropshadow");
+            title.style.unityFontStyleAndWeight = FontStyle.Bold;
+            headerRow.Add(title);
+            // With Ship Customizer: a SHIP RULES tab beside the teams.
+            _tabs = Ui.HorizontalRow();
+            _teamsTab = Ui.GameButton("TEAMS", () => ShowRules(false), "metem-button-size__small");
+            Ui.Margin(_teamsTab, 0, 0, 0, 10);
+            _tabs.Add(_teamsTab);
+            _rulesTab = Ui.GameButton("SHIP RULES", () => ShowRules(true), "metem-button-size__small");
+            Ui.Margin(_rulesTab, 0, 0, 0, 10);
+            _tabs.Add(_rulesTab);
+            headerRow.Add(_tabs);
+            body.Add(headerRow);
+            body.Add(Ui.GameDivider());
 
-            _flash = Ui.Label("", 16, Ui.Warning, true);
-            _flash.style.unityTextAlign = TextAnchor.MiddleCenter;
-            _flash.style.marginTop = 4;
-            _flash.style.minHeight = 20;
-            window.Add(_flash);
+            VisualElement infoRow = Ui.HorizontalRow();
+            infoRow.style.justifyContent = Justify.SpaceBetween;
+            infoRow.style.marginTop = 8;
+            Label subtitle = Ui.GameLabel("Pick a team. Each team crews one ship; destroy the other team's ship to win. Teams stay even.",
+                "ui-text-size__medium", "ui-text-color__white", "ui-text-dropshadow");
+            subtitle.style.flexShrink = 1;
+            infoRow.Add(subtitle);
+            _rulesSummary = Ui.GameLabel("", "ui-text-size__medium", "ui-text-dropshadow");
+            _rulesSummary.style.unityFontStyleAndWeight = FontStyle.Bold;
+            _rulesSummary.style.unityTextAlign = TextAnchor.MiddleRight;
+            _rulesSummary.style.flexShrink = 1;
+            _rulesSummary.style.marginLeft = 20;
+            infoRow.Add(_rulesSummary);
+            body.Add(infoRow);
 
+            _teamsView = Ui.HorizontalRow();
+            _teamsView.style.alignItems = Align.Stretch;
+            _teamsView.style.justifyContent = Justify.SpaceBetween;
+            _teamsView.style.height = ShipRulesView.Height;
+            _teamsView.style.marginTop = 14;
+            _teamsView.Add(TeamColumn(0));
+            _teamsView.Add(WaitingColumn());
+            _teamsView.Add(TeamColumn(1));
+            body.Add(_teamsView);
+            _rulesView = ShipRulesView.Build();
+            _rulesView.style.marginTop = 14;
+            _rulesView.style.display = DisplayStyle.None;
+            body.Add(_rulesView);
+
+            // The status on the left; on the right LEAVE, and for the host AUTO-BALANCE and CONFIRM TEAMS, the big hex
+            // button where the loadout terminal has SELECT.
             VisualElement bottom = Ui.HorizontalRow();
-            bottom.style.justifyContent = Justify.Center;
-            bottom.style.marginTop = 12;
+            bottom.style.justifyContent = Justify.SpaceBetween;
+            bottom.style.marginTop = 10;
+            VisualElement texts = Ui.Column();
+            texts.style.flexShrink = 1;
+            texts.style.flexGrow = 1;
+            texts.style.marginRight = 20;
+            _status = Ui.GameLabel("", "ui-text-size__medium", "ui-text-color__white", "ui-text-dropshadow");
+            texts.Add(_status);
+            _flash = Ui.GameLabel("", "ui-text-size__medium", "ui-text-dropshadow");
+            _flash.style.color = Ui.GameOrange;
+            _flash.style.unityFontStyleAndWeight = FontStyle.Bold;
+            _flash.style.marginTop = 4;
+            _flash.style.minHeight = 26;
+            texts.Add(_flash);
+            bottom.Add(texts);
+
+            VisualElement buttons = Ui.HorizontalRow();
+            buttons.style.flexShrink = 0;
+            _leaveButton = Ui.GameButton("LEAVE LOBBY", Leave, "metem-button-size__small", "metem-button__cancel");
+            Ui.Margin(_leaveButton, 0, 12, 0, 0);
+            buttons.Add(_leaveButton);
             _hostButtons = Ui.HorizontalRow();
-            VisualElement balance = Ui.Button("AUTO-BALANCE", PvpTeams.AutoBalance, 18);
+            Button balance = Ui.GameButton("AUTO-BALANCE", PvpTeams.AutoBalance, "metem-button-size__small");
             Ui.Margin(balance, 0, 12, 0, 0);
             _hostButtons.Add(balance);
-            _confirmButton = Ui.Button("CONFIRM TEAMS", PvpTeams.Confirm, 18);
-            _confirmButton.style.backgroundColor = new Color(0.45f, 0.33f, 0.1f, 0.95f);
-            Ui.Border(_confirmButton, 1, Ui.Gold);
-            Ui.Margin(_confirmButton, 0, 40, 0, 0);
+            _confirmButton = Ui.GameButton("CONFIRM TEAMS", PvpTeams.Confirm, "metem-button-size__large");
+            _confirmButton.style.width = 360;
+            Ui.Margin(_confirmButton, 0, 0, 0, 0);
             _hostButtons.Add(_confirmButton);
-            bottom.Add(_hostButtons);
-            _leaveButton = Ui.Button("LEAVE MATCH", Leave, 18);
-            Ui.Margin(_leaveButton, 0, 0, 0, 0);
-            bottom.Add(_leaveButton);
-            window.Add(bottom);
+            buttons.Add(_hostButtons);
+            bottom.Add(buttons);
+            body.Add(bottom);
+            panel.Add(body);
 
-            _screen.Add(window);
+            VisualElement bottomBar = Ui.GameDecoBar();
+            Ui.Margin(bottomBar, 10, 0, 15, 0);
+            panel.Add(bottomBar);
+
+            _screen.Add(panel);
             _screen.style.display = DisplayStyle.None;
             root.Add(_screen);
             Ui.Announce(_screen);
@@ -205,55 +272,87 @@ namespace VoidCrewFleet
 
         private static VisualElement TeamColumn(int team)
         {
-            Color color = team == 0 ? Ui.TeamA : Ui.TeamB;
-            VisualElement column = Ui.Column();
-            column.style.width = 340;
-            column.style.backgroundColor = new Color(color.r * 0.16f, color.g * 0.16f, color.b * 0.16f, 0.95f);
-            Ui.Border(column, 2, color);
-            Ui.Radius(column, 5);
-            Ui.Padding(column, 10, 12);
+            Label header;
+            VisualElement content;
+            VisualElement section = Ui.GameSection(PvpTeams.TeamName(team) + " TEAM", SectionWidth, out header, out content);
+            header.style.color = FleetApi.TeamColor(team);
 
-            column.Add(Ui.Label(PvpTeams.TeamName(team) + " TEAM", 26, color, true));
-            TeamShips[team] = Ui.Label("", 14, Ui.TextDim);
-            column.Add(TeamShips[team]);
-            TeamCounts[team] = Ui.Label("", 15, Ui.Text);
-            Ui.Margin(TeamCounts[team], 4, 0, 8, 0);
-            column.Add(TeamCounts[team]);
+            TeamShips[team] = Ui.GameLabel("", "ui-text-size__medium", "ui-text-color__white", "ui-text-dropshadow");
+            content.Add(TeamShips[team]);
+            TeamCounts[team] = Ui.GameLabel("", "ui-text-size__medium", "ui-text-dropshadow");
+            TeamCounts[team].style.color = Ui.GameBrightGrey;
+            TeamCounts[team].style.marginBottom = 8;
+            content.Add(TeamCounts[team]);
 
             TeamLists[team] = Ui.Column();
-            TeamLists[team].style.minHeight = RowsPerTeam * 36;
             TeamLists[team].style.flexGrow = 1;
-            column.Add(TeamLists[team]);
+            content.Add(TeamLists[team]);
 
-            JoinButtons[team] = Ui.Button("JOIN " + PvpTeams.TeamName(team), () => PvpTeams.Join(team), 18);
-            Ui.Margin(JoinButtons[team], 10, 0, 0, 0);
-            column.Add(JoinButtons[team]);
-            return column;
+            JoinButtons[team] = Ui.GameButton("JOIN " + PvpTeams.TeamName(team), () =>
+            {
+                if (FleetShips.CrewSlot(FleetShips.LocalActor) != team) PvpTeams.Join(team);
+            }, "metem-button-size__small");
+            Ui.Margin(JoinButtons[team], 8, 0, 0, 0);
+            content.Add(JoinButtons[team]);
+            return section;
         }
 
         private static VisualElement WaitingColumn()
         {
-            VisualElement column = Ui.Column();
-            column.style.width = 300;
-            column.style.backgroundColor = new Color(0.1f, 0.1f, 0.11f, 0.95f);
-            Ui.Border(column, 1, new Color(1f, 1f, 1f, 0.15f));
-            Ui.Radius(column, 5);
-            Ui.Padding(column, 10, 12);
-            column.Add(Ui.Label("NOT ON A TEAM YET", 20, Ui.TextDim, true));
-            Label hint = Ui.Label("Players here have not picked a side.", 14, Ui.TextDim);
-            Ui.Margin(hint, 4, 0, 8, 0);
-            column.Add(hint);
+            Label header;
+            VisualElement content;
+            VisualElement section = Ui.GameSection("NO TEAM YET", SectionWidth, out header, out content);
+            Label hint = Ui.GameLabel("Players here have not picked a side.", "ui-text-size__medium", "ui-text-dropshadow");
+            hint.style.color = Ui.GameBrightGrey;
+            hint.style.marginBottom = 8;
+            content.Add(hint);
             _waitingList = Ui.Column();
             _waitingList.style.flexGrow = 1;
-            column.Add(_waitingList);
-            return column;
+            content.Add(_waitingList);
+            return section;
         }
 
         // ---------------------------------------------------------------- updating
 
+        internal static void ShowRules(bool on)
+        {
+            _showRules = on && ShipRulesView.Available;
+            _teamsView.style.display = _showRules ? DisplayStyle.None : DisplayStyle.Flex;
+            _rulesView.style.display = _showRules ? DisplayStyle.Flex : DisplayStyle.None;
+            _teamsTab.EnableInClassList("metem-button-selected", !_showRules);
+            _rulesTab.EnableInClassList("metem-button-selected", _showRules);
+            if (_showRules) ShipRulesView.Refresh();
+        }
+
+        private static void RefreshRules()
+        {
+            bool available = ShipRulesView.Available;
+            _tabs.style.display = available ? DisplayStyle.Flex : DisplayStyle.None;
+            _rulesSummary.style.display = available ? DisplayStyle.Flex : DisplayStyle.None;
+            if (!available)
+            {
+                if (_showRules) ShowRules(false);
+                return;
+            }
+            ShipRules.Rules rules = ShipRules.Shown;
+            _rulesSummary.text = "SHIP RULES: " + ShipRules.Describe(rules).ToUpperInvariant();
+            _rulesSummary.style.color = rules.Restricts ? Ui.GameOrange : Ui.GameBrightGrey;
+            _teamsTab.EnableInClassList("metem-button-selected", !_showRules);
+            _rulesTab.EnableInClassList("metem-button-selected", _showRules);
+            if (_showRules) ShipRulesView.Refresh();
+        }
+
         private static void Refresh()
         {
             if (_flash != null && _flash.text.Length > 0 && Time.unscaledTime > _flashUntil) _flash.text = "";
+            try
+            {
+                RefreshRules();
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Updating the ship rules on the team screen", e);
+            }
 
             Dictionary<int, int> teams = FleetShips.CrewMap();
             Player[] players = PhotonNetwork.PlayerList.OrderBy(p => p.ActorNumber).ToArray();
@@ -266,7 +365,7 @@ namespace VoidCrewFleet
             {
                 for (int team = 0; team < 2; team++)
                 {
-                    TeamShips[team].text = "Ship " + (team + 1) + ": " + PvpTeams.ShipName(team);
+                    TeamShips[team].text = ("Ship " + (team + 1) + ": " + PvpTeams.ShipName(team)).ToUpperInvariant();
                     TeamLists[team].Clear();
                 }
                 _waitingList.Clear();
@@ -283,9 +382,15 @@ namespace VoidCrewFleet
                 for (int team = 0; team < 2; team++)
                 {
                     int count = PvpTeams.Count(teams, team);
-                    TeamCounts[team].text = count + " of " + max + (max == 1 ? " player" : " players");
-                    JoinButtons[team].SetEnabled(mine != team && count < max);
-                    Ui.SetButtonText(JoinButtons[team], mine == team ? "YOU ARE " + PvpTeams.TeamName(team) : "JOIN " + PvpTeams.TeamName(team));
+                    TeamCounts[team].text = (count + " of " + max + (max == 1 ? " player" : " players")).ToUpperInvariant();
+                    // Your own team's button is filled in its colour (the game's selected button); a full team's is disabled.
+                    Button join = JoinButtons[team];
+                    bool joined = mine == team;
+                    bool full = !joined && count >= max;
+                    join.text = joined ? "YOU ARE " + PvpTeams.TeamName(team) : (full ? PvpTeams.TeamName(team) + " IS FULL" : "JOIN " + PvpTeams.TeamName(team));
+                    join.SetEnabled(!full);
+                    join.EnableInClassList("metem-button-selected", joined);
+                    join.style.unityBackgroundImageTintColor = full ? new StyleColor(StyleKeyword.Null) : new StyleColor(FleetApi.TeamColor(team));
                 }
 
                 string why;
@@ -293,7 +398,7 @@ namespace VoidCrewFleet
                 _hostButtons.style.display = host ? DisplayStyle.Flex : DisplayStyle.None;
                 _confirmButton.SetEnabled(balanced);
                 bool inHub = GameSessionManager.InHub;
-                if (_leaveButton != null) Ui.SetButtonText(_leaveButton, inHub ? "LEAVE LOBBY" : "LEAVE MATCH");
+                if (_leaveButton != null) _leaveButton.text = inHub ? "LEAVE LOBBY" : "LEAVE MATCH";
                 if (host)
                 {
                     _status.text = balanced
@@ -331,39 +436,63 @@ namespace VoidCrewFleet
         private static VisualElement PlayerRow(Player player, int team, bool host)
         {
             bool me = player.IsLocal;
-            VisualElement row = Ui.HorizontalRow();
-            row.style.justifyContent = Justify.SpaceBetween;
-            row.style.backgroundColor = Ui.Row;
-            row.style.minHeight = 32;
-            row.style.marginBottom = 4;
-            Ui.Radius(row, 3);
-            Ui.Padding(row, 3, 8);
-            if (me) Ui.Border(row, 1, Ui.Gold);
+            // A row like the terminal's RESOURCES list, with the game's "active" orange edge on your own.
+            VisualElement row = Ui.GameListRow();
+            if (me)
+            {
+                row.style.borderLeftWidth = 10;
+                row.style.borderLeftColor = Ui.GameOrange;
+            }
 
+            VisualElement left = Ui.HorizontalRow();
+            left.style.flexShrink = 1;
             string name = string.IsNullOrEmpty(player.NickName) ? "Player " + player.ActorNumber : player.NickName;
-            Label label = Ui.Label(name + (player.IsMasterClient ? "  (host)" : "") + (me ? "  (you)" : ""), 16, me ? Ui.Gold : Ui.Text, me);
+            Label label = Ui.GameLabel(name, "ui-text-size__medium");
+            label.style.fontSize = 22;
+            label.style.color = me ? Ui.GameOrange : Color.white;
+            label.style.unityFontStyleAndWeight = me ? FontStyle.Bold : FontStyle.Normal;
             label.style.flexShrink = 1;
             label.style.overflow = Overflow.Hidden;
-            row.Add(label);
+            left.Add(label);
+            if (player.IsMasterClient) left.Add(Tag("HOST"));
+            if (me) left.Add(Tag("YOU"));
+            row.Add(left);
 
             if (host)
             {
                 int actor = player.ActorNumber;
                 VisualElement moves = Ui.HorizontalRow();
                 moves.style.flexShrink = 0;
-                if (team != 0) moves.Add(MoveButton("BLUE", Ui.TeamA, () => PvpTeams.Move(actor, 0)));
-                if (team != 1) moves.Add(MoveButton("RED", Ui.TeamB, () => PvpTeams.Move(actor, 1)));
+                if (team != 0) moves.Add(MoveButton("BLUE", FleetApi.TeamColor(0), () => PvpTeams.Move(actor, 0)));
+                if (team != 1) moves.Add(MoveButton("RED", FleetApi.TeamColor(1), () => PvpTeams.Move(actor, 1)));
                 row.Add(moves);
             }
             return row;
         }
 
-        private static VisualElement MoveButton(string text, Color color, Action onClick)
+        private static Label Tag(string text)
         {
-            VisualElement button = Ui.Button(text, onClick, 13);
-            Ui.Padding(button, 2, 8);
+            Label tag = Ui.GameLabel(text, "ui-text-size__small");
+            tag.style.fontSize = 15;
+            tag.style.unityFontStyleAndWeight = FontStyle.Bold;
+            tag.style.color = Ui.GameBrightGrey;
+            tag.style.marginLeft = 10;
+            tag.style.flexShrink = 0;
+            return tag;
+        }
+
+        /// <summary>The game's small button, shrunk to fit a row, with its outline in the team's colour.</summary>
+        private static Button MoveButton(string text, Color color, Action onClick)
+        {
+            Button button = Ui.GameButton(text, onClick, "metem-button-size__small");
+            button.style.height = 26;
+            button.style.fontSize = 15;
+            button.style.paddingLeft = 12;
+            button.style.paddingRight = 12;
+            button.style.paddingTop = 0;
+            button.style.paddingBottom = 0;
             Ui.Margin(button, 0, 0, 0, 6);
-            Ui.Border(button, 1, color);
+            button.style.unityBackgroundImageTintColor = color;
             return button;
         }
 

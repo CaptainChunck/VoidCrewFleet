@@ -7,9 +7,9 @@ namespace VoidCrewFleet
 {
     /// <summary>
     /// For other plugins, reached through reflection (plugin GUID com.captainchunck.voidcrew.fleet), so neither needs the
-    /// other. Ship Customizer uses it to let only a ship's own team change that ship's loadout in Fleet Battle (PvP).
-    /// Ships are numbered 1 and 2; teams are 0 (BLUE, crews ship 1) and 1 (RED, crews ship 2). Every member can be
-    /// called at any time and never throws.
+    /// other. Ship Customizer uses it to let only a ship's own team change that ship's loadout in Fleet Battle (PvP), and
+    /// to follow the host's ship rules there. Ships are numbered 1 and 2; teams are 0 (BLUE, crews ship 1) and 1 (RED,
+    /// crews ship 2). Every member can be called at any time and never throws.
     /// </summary>
     public static class FleetApi
     {
@@ -20,12 +20,108 @@ namespace VoidCrewFleet
         private static readonly Color Red = new Color(1f, 0.33f, 0.27f, 1f);
 
         private static string _signature;
+        private static string _rulesSignature;
 
         /// <summary>
         /// Raised on every client when the room's team match starts or ends, or a player's team or the teams' lock
         /// changes (checked a few times a second).
         /// </summary>
         public static event Action TeamsChanged;
+
+        /// <summary>
+        /// Raised on every client when the host's ship rules change, or start or stop applying (checked a few times a second).
+        /// </summary>
+        public static event Action ShipRulesChanged;
+
+        /// <summary>
+        /// True in a team match (Fleet Battle) while the host's ship rules restrict anything a CUSTOM loadout may use. The
+        /// members below only refuse anything while it is true.
+        /// </summary>
+        public static bool ShipRulesActive
+        {
+            get
+            {
+                try
+                {
+                    return IsTeamMatch && ShipRules.Current.Restricts;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        /// <summary>Whether an MK tier (1, 2 or 3) may be fitted; tier 0 (untiered) is always allowed.</summary>
+        public static bool IsTierAllowed(int tier)
+        {
+            try
+            {
+                return !ShipRulesActive || ShipRules.Current.TierAllowed(tier);
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        /// <summary>The highest fabricator starting level allowed: 0 is MK I, 2 is MK III (the highest allowed tier, less one).</summary>
+        public static int FabricatorMaxLevel
+        {
+            get
+            {
+                try
+                {
+                    return ShipRulesActive ? ShipRules.Current.HighestTier - 1 : 2;
+                }
+                catch
+                {
+                    return 2;
+                }
+            }
+        }
+
+        /// <summary>Whether one of Ship Customizer's categories (its own upper-case names, e.g. "WEAPONS") may be used.</summary>
+        public static bool IsCategoryAllowed(string category)
+        {
+            try
+            {
+                return !ShipRulesActive || ShipRules.Current.CategoryAllowed(category);
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        /// <summary>Whether one of Ship Customizer's options (its code: "m:", "w:", "i:" or "c:" and the GUID's hex) may be used.</summary>
+        public static bool IsItemAllowed(string code)
+        {
+            try
+            {
+                return !ShipRulesActive || ShipRules.Current.ItemAllowed(code);
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        /// <summary>The most starting alloys a CUSTOM loadout may set: int.MaxValue no limit, -1 only the game's own amount.</summary>
+        public static int MaxStartAlloys
+        {
+            get
+            {
+                try
+                {
+                    return ShipRulesActive ? ShipRules.Current.MaxAlloys : int.MaxValue;
+                }
+                catch
+                {
+                    return int.MaxValue;
+                }
+            }
+        }
 
         /// <summary>
         /// True: at the start of a run Fleet gives ship 2 its own starting alloys (its CUSTOM loadout's, through Ship
@@ -114,9 +210,28 @@ namespace VoidCrewFleet
             {
                 return;
             }
-            if (signature == _signature) return;
-            _signature = signature;
-            Action handlers = TeamsChanged;
+            if (signature != _signature)
+            {
+                _signature = signature;
+                Raise(TeamsChanged, "the teams changed");
+            }
+
+            string rules;
+            try
+            {
+                rules = (ShipRulesActive ? "1" : "0") + ShipRules.CurrentJson;
+            }
+            catch
+            {
+                return;
+            }
+            if (rules == _rulesSignature) return;
+            _rulesSignature = rules;
+            Raise(ShipRulesChanged, "the ship rules changed");
+        }
+
+        private static void Raise(Action handlers, string what)
+        {
             if (handlers == null) return;
             foreach (Delegate handler in handlers.GetInvocationList())
             {
@@ -126,7 +241,7 @@ namespace VoidCrewFleet
                 }
                 catch (Exception e)
                 {
-                    Log.Failure("Telling another plugin that the teams changed", e);
+                    Log.Failure("Telling another plugin that " + what, e);
                 }
             }
         }

@@ -14,6 +14,7 @@ namespace VoidCrewFleet
         public static ConfigEntry<Key> PunchKey;
         public static ConfigEntry<int> HackTerminalCost;
         public static ConfigEntry<string> PvpArena;
+        public static ConfigEntry<string> PvpShipRules;
         public static ConfigEntry<bool> VerboseLogging;
         public static ConfigEntry<AutoTestMode> AutoTest;
         public static ConfigEntry<bool> AutoTestJump;
@@ -52,6 +53,8 @@ namespace VoidCrewFleet
             HackTerminalCost = config.Bind("PvP", "HackTerminalCost", HackTerminal.DefaultCost,
                 new ConfigDescription("How many alloys the Airlock Hacking Terminal costs in the fabricator. Only the host's setting counts.",
                     new AcceptableValueRange<int>(1, 60)));
+            PvpShipRules = config.Bind("PvP", "ShipRules", "",
+                "Your last Fleet Battle ship rules (set them on the lobby screen's SHIP RULES tab); a lobby you host starts with them.");
 
             VerboseLogging = config.Bind("Diagnostics", "VerboseLogging", false,
                 "Write extra detail to the BepInEx log.");

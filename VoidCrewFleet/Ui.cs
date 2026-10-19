@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using CG.Client;
 using UI;
 using UI.Core.Audio;
@@ -8,9 +9,10 @@ using UnityEngine.UIElements;
 namespace VoidCrewFleet
 {
     /// <summary>
-    /// Small helpers for building UI Toolkit elements in code. Everything is styled inline, so it looks the same whatever
-    /// style sheets the panel has loaded, and clicks use the game's own click filters so they behave like its buttons.
-    /// Only UI Toolkit (or uGUI) is used, never IMGUI: VR UI Fix draws screen-space UI Toolkit panels into the headset.
+    /// Small helpers for building UI Toolkit elements in code. Screens meant to look like the game's own use the game's
+    /// style classes (its buttons, headers, decorative lines and popup frames, from its own style sheets); small overlays
+    /// are styled inline. Clicks use the game's own click filters so they behave like its buttons. Only UI Toolkit (or
+    /// uGUI) is used, never IMGUI: VR UI Fix draws screen-space UI Toolkit panels into the headset.
     /// </summary>
     internal static class Ui
     {
@@ -26,6 +28,29 @@ namespace VoidCrewFleet
         public static readonly Color Warning = new Color(1f, 0.45f, 0.35f, 1f);
         public static readonly Color TeamA = new Color(0.3f, 0.65f, 1f, 1f);
         public static readonly Color TeamB = new Color(1f, 0.42f, 0.3f, 1f);
+
+        // The game's own palette (its SharedUIColorTheme).
+        public static readonly Color GameOrange = new Color32(0xF6, 0xAE, 0x3C, 0xFF);
+        public static readonly Color GameDarkGrey = new Color32(0x30, 0x30, 0x30, 0xFF);
+        public static readonly Color GameLightGrey = new Color32(0x69, 0x6A, 0x6D, 0xFF);
+        public static readonly Color GameBrightGrey = new Color32(0xDF, 0xDF, 0xDF, 0xFF);
+        public static readonly Color GameLightBlue = new Color32(0xBD, 0xE7, 0xFB, 0xFF);
+        public static readonly Color GameDecoBrown = new Color32(0x5E, 0x54, 0x4A, 0xFF);
+        public static readonly Color GameBackdrop = new Color32(0x00, 0x00, 0x00, 0xEB);
+        public static readonly Color GameItemBackground = new Color32(0x14, 0x13, 0x10, 0xFF);
+
+        private static readonly Dictionary<string, Sprite> Sprites = new Dictionary<string, Sprite>();
+
+        /// <summary>The game's own style sheets its popups use. Without the first four a screen keeps its own look.</summary>
+        private static readonly string[] GameSheetNames =
+        {
+            "SharedUIColorTheme", "SharedUI_TextStyles", "SharedUI_Styles", "PopupBaseStyle",
+            // Optional: the panel theme already brings the buttons; the scrollbars and sounds are niceties, and the loadout
+            // terminal's sheet (loaded in the hub) makes section lines light up under the pointer as the terminal's do.
+            "SharedUI_Buttons", "SharedUI_AudioStyles", "ListScrollStyle", "ShipLoadoutStyles"
+        };
+
+        private const int RequiredGameSheets = 4;
 
         public static Label Label(string text, int size, Color color, bool bold = false)
         {
@@ -212,16 +237,171 @@ namespace VoidCrewFleet
             return overlay;
         }
 
-        /// <summary>A dark rounded window, centred by its parent.</summary>
-        public static VisualElement WindowBox(float width)
+        // ---------------------------------------------------------------- the game's own look
+
+        /// <summary>
+        /// Attaches the game's own style sheets (found by name among the loaded ones) to an element of one of our overlays,
+        /// so the game's classes style it the way they style the game's popups. False when one isn't loaded: the caller then
+        /// sets the same look inline.
+        /// </summary>
+        public static bool UseGameStyles(VisualElement element)
         {
-            var box = new VisualElement();
-            box.style.width = width;
-            box.style.backgroundColor = Window;
-            Padding(box, 18, 22);
-            Radius(box, 6);
-            Border(box, 1, new Color(1f, 1f, 1f, 0.15f));
-            return box;
+            var found = new Dictionary<string, StyleSheet>();
+            foreach (StyleSheet sheet in Resources.FindObjectsOfTypeAll<StyleSheet>())
+            {
+                if (sheet != null && Array.IndexOf(GameSheetNames, sheet.name) >= 0 && !found.ContainsKey(sheet.name)) found[sheet.name] = sheet;
+            }
+            var missing = new List<string>();
+            for (int i = 0; i < GameSheetNames.Length; i++)
+            {
+                StyleSheet sheet;
+                if (found.TryGetValue(GameSheetNames[i], out sheet))
+                {
+                    if (!element.styleSheets.Contains(sheet)) element.styleSheets.Add(sheet);
+                }
+                else if (i < RequiredGameSheets)
+                {
+                    missing.Add(GameSheetNames[i]);
+                }
+            }
+            if (missing.Count > 0) Log.Warn("The game's style sheets " + string.Join(", ", missing.ToArray()) + " aren't loaded: a Fleet screen uses its own look instead.");
+            return missing.Count == 0;
+        }
+
+        /// <summary>
+        /// One of the game's own buttons: its style classes (for example metem-button-size__small, the small version of
+        /// SELECT) with its hover and click sounds, and clicks wired the way the game wires its buttons.
+        /// </summary>
+        public static Button GameButton(string text, Action onClick, params string[] classes)
+        {
+            var button = new Button { text = text };
+            foreach (string name in classes) button.AddToClassList(name);
+            button.AddToClassList("audio-hover__button");
+            button.AddToClassList("audio-click__button");
+            button.AddClickedEvent(() =>
+            {
+                try
+                {
+                    onClick();
+                }
+                catch (Exception e)
+                {
+                    Log.Failure("Handling a click in Void Crew Fleet", e);
+                }
+            });
+            try
+            {
+                UIAudioProvider.AddSounds(button);
+            }
+            catch
+            {
+                // Sounds are a nicety.
+            }
+            return button;
+        }
+
+        /// <summary>A label in the game's own text style: its classes, for example ui-text-size__large and ui-text-dropshadow.</summary>
+        public static Label GameLabel(string text, params string[] classes)
+        {
+            var label = new Label(text) { pickingMode = PickingMode.Ignore };
+            foreach (string name in classes) label.AddToClassList(name);
+            return label;
+        }
+
+        /// <summary>Text in the style of the game's HUD: bold, upper case by convention, with its one-pixel drop shadow.</summary>
+        public static Label HudLabel(string text, int size, Color color)
+        {
+            Label label = Label(text, size, color, true);
+            label.style.textShadow = new StyleTextShadow(new TextShadow { offset = new Vector2(1f, 1f), blurRadius = 1f, color = Color.black });
+            return label;
+        }
+
+        /// <summary>One of the game's UI sprites by name, while a screen that uses it is loaded; null otherwise.</summary>
+        public static Sprite GameSprite(string name)
+        {
+            Sprite sprite;
+            if (Sprites.TryGetValue(name, out sprite) && sprite != null) return sprite;
+            foreach (Sprite candidate in Resources.FindObjectsOfTypeAll<Sprite>())
+            {
+                if (candidate == null || candidate.name != name) continue;
+                Sprites[name] = candidate;
+                return candidate;
+            }
+            return null;
+        }
+
+        /// <summary>The meander bar along the top and bottom of the game's terminal screens (.metem-decorative-bar-repeating).</summary>
+        public static VisualElement GameDecoBar()
+        {
+            var bar = new VisualElement { pickingMode = PickingMode.Ignore };
+            bar.style.flexDirection = FlexDirection.Row;
+            bar.style.height = 15;
+            bar.style.flexShrink = 0;
+            var pattern = new VisualElement { pickingMode = PickingMode.Ignore };
+            pattern.AddToClassList("metem-decorative-bar-repeating");
+            bar.Add(pattern);
+            return bar;
+        }
+
+        /// <summary>
+        /// A section in the style of the loadout terminal's (SHIP SYSTEMS, RESOURCES): a big white header over the game's
+        /// decorative line, then the content, and the line again below. With the terminal's style sheet loaded the lines
+        /// turn white under the pointer, as its own do.
+        /// </summary>
+        public static VisualElement GameSection(string title, float width, out Label header, out VisualElement content)
+        {
+            var section = new VisualElement();
+            section.AddToClassList("ship-loadout-subpanel");
+            section.style.width = width;
+            section.style.minWidth = 0;
+            section.style.paddingLeft = 10;
+            section.style.paddingRight = 10;
+            header = GameLabel(title, "ui-text-size__large", "ui-text-color__white", "loadout-panel-header", "ui-text-dropshadow");
+            header.style.unityFontStyleAndWeight = FontStyle.Bold;
+            section.Add(header);
+            section.Add(GameDivider());
+            content = new VisualElement();
+            content.style.flexGrow = 1;
+            content.style.paddingLeft = 5;
+            content.style.paddingRight = 5;
+            content.style.marginTop = 6;
+            content.style.marginBottom = 6;
+            section.Add(content);
+            section.Add(GameDivider());
+            return section;
+        }
+
+        /// <summary>A row like the loadout terminal's RESOURCES list: dark grey, 34 px, its content spread along it.</summary>
+        public static VisualElement GameListRow()
+        {
+            var row = new VisualElement();
+            row.style.flexDirection = FlexDirection.Row;
+            row.style.alignItems = Align.Center;
+            row.style.justifyContent = Justify.SpaceBetween;
+            row.style.flexShrink = 0;
+            row.style.minHeight = 34;
+            row.style.backgroundColor = GameDarkGrey;
+            row.style.paddingLeft = 10;
+            row.style.paddingRight = 10;
+            row.style.paddingTop = 3;
+            row.style.paddingBottom = 3;
+            row.style.marginBottom = 4;
+            return row;
+        }
+
+        /// <summary>The game's decorative line under a section header (.metem-decorative__box-border), optionally recoloured.</summary>
+        public static VisualElement GameDivider(Color? color = null)
+        {
+            var line = new VisualElement { pickingMode = PickingMode.Ignore };
+            line.AddToClassList("metem-decorative__box-border");
+            line.style.flexShrink = 0;
+            if (color.HasValue)
+            {
+                line.style.borderLeftColor = color.Value;
+                line.style.borderRightColor = color.Value;
+                line.style.borderBottomColor = color.Value;
+            }
+            return line;
         }
     }
 }

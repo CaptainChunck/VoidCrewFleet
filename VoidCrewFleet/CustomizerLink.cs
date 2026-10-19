@@ -18,7 +18,7 @@ namespace VoidCrewFleet
 
         private static bool _looked;
         private static bool _installed;
-        private static MethodInfo _getDef, _getStandIn, _setTerminalShip, _checkShip2, _setShip2, _buildShip2, _getShip2Alloys;
+        private static MethodInfo _getDef, _getStandIn, _setTerminalShip, _checkShip2, _setShip2, _buildShip2, _getShip2Alloys, _getRuleOptions;
 
         /// <summary>Whether the Customizer is installed at all (even one without the API).</summary>
         public static bool Installed
@@ -70,6 +70,8 @@ namespace VoidCrewFleet
                 _buildShip2 = api.GetMethod("BuildShip2", new[] { typeof(GUIDUnion) });
                 // Optional (Ship Customizer 0.5.1+): ship 2's own CUSTOM starting alloys.
                 _getShip2Alloys = api.GetMethod("GetShip2Alloys", new[] { typeof(GUIDUnion) });
+                // Optional (Ship Customizer 0.7.0+): what Fleet Battle's ship rules can restrict.
+                _getRuleOptions = api.GetMethod("GetRuleOptions", Type.EmptyTypes);
                 if (getDef == null || _getStandIn == null || _setTerminalShip == null || _checkShip2 == null || _setShip2 == null || _buildShip2 == null)
                 {
                     Log.Warn("Ship Customizer's API is missing members, so ship 2 can't use CUSTOM of its own.");
@@ -170,6 +172,18 @@ namespace VoidCrewFleet
         {
             object value = Call(() => _getShip2Alloys, loadout);
             return value is int ? (int)value : -1;
+        }
+
+        /// <summary>Whether the Customizer can follow Fleet Battle's ship rules (it lists what they can restrict).</summary>
+        public static bool HasRules
+        {
+            get { return Linked && _getRuleOptions != null; }
+        }
+
+        /// <summary>Every option a CUSTOM loadout can use, as "code|category|tier|name"; empty without the API or before the hub loads.</summary>
+        public static string[] GetRuleOptions()
+        {
+            return Call(() => _getRuleOptions) as string[] ?? new string[0];
         }
 
         /// <summary>Calls an API member; the member is read after linking, so the very first call works too.</summary>

@@ -17,7 +17,7 @@ namespace VoidCrewFleet
     {
         public const string Guid = "com.captainchunck.voidcrew.fleet";
         public const string Name = "Void Crew Fleet";
-        public const string Version = "0.2.1";
+        public const string Version = "0.3.0";
 
         private GameObject _runtime;
         private bool _running;

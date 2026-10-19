@@ -489,15 +489,16 @@ namespace VoidCrewFleet
                 PlayerControlledShip ship = ShipOfView(entry.Ship);
                 int shipSlot = FleetShips.Slot(ship);
                 string shipName = PvpTeams.TeamName(shipSlot) + " SHIP";
+                // The game's colours: light blue for our own progress, light green for what we won, orange and red for threats.
                 if (entry.State == State.Hacking)
                 {
-                    if (entry.Team == mine) lines.Add("HACKING THE " + shipName + "'S AIRLOCK  " + Clock(left));
-                    else if (shipSlot == mine) lines.Add("<color=#FF6A5A>ENEMY HACKING OUR AIRLOCK  " + Clock(left) + "</color>");
+                    if (entry.Team == mine) lines.Add("<color=#BDE7FB>HACKING THE " + shipName + "'S AIRLOCK  " + Clock(left) + "</color>");
+                    else if (shipSlot == mine) lines.Add("<color=#F6AE3C>ENEMY HACKING OUR AIRLOCK  " + Clock(left) + "</color>");
                 }
                 else
                 {
-                    if (entry.Team == mine) lines.Add("<color=#7CFF8A>DOOR ACCESS TO THE " + shipName + "  " + Clock(left) + "</color>");
-                    else if (shipSlot == mine) lines.Add("<color=#FF6A5A>THE ENEMY CAN OPEN OUR DOORS  " + Clock(left) + "</color>");
+                    if (entry.Team == mine) lines.Add("<color=#83C886>DOOR ACCESS TO THE " + shipName + "  " + Clock(left) + "</color>");
+                    else if (shipSlot == mine) lines.Add("<color=#EC1E24>THE ENEMY CAN OPEN OUR DOORS  " + Clock(left) + "</color>");
                 }
             }
             return lines.Count > 0 ? string.Join("\n", lines.ToArray()) : null;
@@ -516,7 +517,7 @@ namespace VoidCrewFleet
                 if (_timerDocument == null || _timerDocument.rootVisualElement == null) return;
                 VisualElement root = _timerDocument.rootVisualElement;
                 root.pickingMode = PickingMode.Ignore;
-                _timerLabel = Ui.Label("", 22, Ui.Gold, true);
+                _timerLabel = Ui.HudLabel("", 20, Color.white);
                 _timerLabel.style.position = Position.Absolute;
                 _timerLabel.style.left = 0;
                 _timerLabel.style.right = 0;

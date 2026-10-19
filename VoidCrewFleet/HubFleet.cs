@@ -370,8 +370,9 @@ namespace VoidCrewFleet
             if (variant == HubVariant.FleetBattle)
             {
                 Set(KeyTwo, true);
-                // Everyone picks a team now (the team screen opens on every client).
+                // Everyone picks a team now (the team screen opens on every client), under the host's last ship rules.
                 PvpTeams.Reset();
+                ShipRules.PublishSaved();
             }
             try
             {

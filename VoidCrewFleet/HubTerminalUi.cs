@@ -29,9 +29,9 @@ namespace VoidCrewFleet
         private static LoadoutTerminal _terminal;
         private static VisualElement _root;
         private static VisualElement _bar;
-        private static VisualElement _twoButton;
-        private static VisualElement _shipAButton;
-        private static VisualElement _shipBButton;
+        private static Button _twoButton;
+        private static ShipRow _shipARow;
+        private static ShipRow _shipBRow;
         private static Label _hint;
         private static VisualElement _tint;
         private static bool _subscribed;
@@ -206,60 +206,126 @@ namespace VoidCrewFleet
             return string.IsNullOrEmpty(text) ? "-" : text.ToUpperInvariant();
         }
 
-        // ---------------------------------------------------------------- the bar
+        // ---------------------------------------------------------------- the FLEET section
+
+        /// <summary>Narrow enough to stay clear of the ship picture's hardpoints (the Ship Customizer makes them clickable).</summary>
+        private const float BarWidth = 196f;
+
+        /// <summary>A ship's row in the FLEET section: one of the terminal's own LOADOUTS rows, so it looks and highlights like them.</summary>
+        private sealed class ShipRow
+        {
+            public VisualElement Root;
+            public VisualElement Marker;
+            public Label Title;
+        }
 
         private static void EnsureBar()
         {
             if (_root == null || (_bar != null && _bar.parent == _root)) return;
-            // The terminal's right-hand strip, beside RESOURCES and above SELECT, is empty: a column of buttons goes there
-            // (the Ship Customizer's own buttons sit just above SELECT, below this column).
-            _bar = new VisualElement { name = "FleetShipBar" };
+            // The terminal's top-right corner, beside RESOURCES and above the ship picture, is free: a FLEET section in the
+            // terminal's own style goes there, with its header and decorative line, its LOADOUTS rows and its small button.
+            // The Ship Customizer's toolbar sits lower down, just above SELECT.
+            _bar = new VisualElement { name = "FleetShipBar", pickingMode = PickingMode.Ignore };
             _bar.style.position = Position.Absolute;
-            _bar.style.top = 70;
+            _bar.style.top = 50;
             _bar.style.right = 14;
-            _bar.style.width = 190;
+            _bar.style.width = BarWidth;
             _bar.style.flexDirection = FlexDirection.Column;
             _bar.style.alignItems = Align.Stretch;
-            _bar.style.backgroundColor = Ui.Window;
-            Ui.Padding(_bar, 8, 8);
-            Ui.Radius(_bar, 5);
-            Ui.Border(_bar, 1, new Color(1f, 1f, 1f, 0.15f));
 
-            Label title = Ui.Label("FLEET", 16, Ui.Gold, true);
-            title.style.unityTextAlign = TextAnchor.MiddleCenter;
-            title.style.marginBottom = 6;
-            _bar.Add(title);
+            _bar.Add(Ui.GameLabel("FLEET", "ui-text-size__large", "ui-text-color__white", "loadout-panel-header", "ui-text-dropshadow"));
+            _bar.Add(Ui.GameDivider());
 
-            _twoButton = ColumnButton(ToggleTwoShips);
-            _shipAButton = ColumnButton(() => EditShip(false));
-            _shipBButton = ColumnButton(() => EditShip(true));
+            _twoButton = Ui.GameButton("", ToggleTwoShips, "metem-button-size__small");
+            Ui.Margin(_twoButton, 8, 0, 0, 0);
+            _twoButton.style.paddingLeft = 8;
+            _twoButton.style.paddingRight = 8;
+            _twoButton.style.fontSize = 18;
             _bar.Add(_twoButton);
-            _bar.Add(_shipAButton);
-            _bar.Add(_shipBButton);
 
-            _hint = Ui.Label("", 12, Ui.TextDim);
+            // A faint backing keeps the rows readable over any ship picture; hover and selection paint over it.
+            var rows = new VisualElement { pickingMode = PickingMode.Ignore };
+            rows.style.marginTop = 6;
+            rows.style.backgroundColor = new Color(0f, 0f, 0f, 0.45f);
+            _shipARow = MakeShipRow(() => EditShip(false));
+            _shipBRow = MakeShipRow(() => EditShip(true));
+            rows.Add(_shipARow.Root);
+            rows.Add(_shipBRow.Root);
+            _bar.Add(rows);
+
+            _hint = Ui.GameLabel("", "ui-text-color__white");
+            _hint.style.fontSize = 15;
+            _hint.style.whiteSpace = WhiteSpace.Normal;
             _hint.style.marginTop = 6;
-            _hint.style.unityTextAlign = TextAnchor.UpperLeft;
+            _hint.style.backgroundColor = new Color(Ui.GameDarkGrey.r, Ui.GameDarkGrey.g, Ui.GameDarkGrey.b, 0.9f);
+            Ui.Padding(_hint, 5, 8);
             _bar.Add(_hint);
+            VisualElement bottom = Ui.GameDivider();
+            bottom.style.marginTop = 6;
+            _bar.Add(bottom);
 
             _root.Add(_bar);
             _bar.BringToFront();
             Ui.Announce(_bar);
         }
 
-        private static VisualElement ColumnButton(Action onClick)
+        /// <summary>A row made from the terminal's own LOADOUTS row template; by hand, with the same classes, if it is missing.</summary>
+        private static ShipRow MakeShipRow(Action onClick)
         {
-            VisualElement button = Ui.Button("", onClick, 13);
-            Ui.Margin(button, 0, 0, 5, 0);
-            Ui.Padding(button, 5, 6);
-            button.style.justifyContent = Justify.FlexStart;
-            var label = button.Q<Label>();
-            if (label != null)
+            var row = new ShipRow();
+            try
             {
-                label.style.whiteSpace = WhiteSpace.Normal;
-                label.style.unityTextAlign = TextAnchor.MiddleLeft;
+                VisualTreeAsset template = _terminal != null ? _terminal.ListEntryPrefab : null;
+                if (template != null) row.Root = template.Instantiate();
             }
-            return button;
+            catch (Exception e)
+            {
+                Log.Failure("Building a FLEET row from the terminal's own list row", e);
+                row.Root = null;
+            }
+            if (row.Root != null)
+            {
+                row.Title = row.Root.Q<Label>("Title");
+                row.Marker = row.Root.Q("RarityMarker");
+                // Its padlock means "rank too low", which never applies here.
+                VisualElement padlock = row.Root.Q("LockIcon");
+                if (padlock != null) padlock.style.display = DisplayStyle.None;
+            }
+            if (row.Root == null || row.Title == null)
+            {
+                row.Root = new VisualElement();
+                var entry = new VisualElement { pickingMode = PickingMode.Ignore };
+                entry.style.flexDirection = FlexDirection.Row;
+                entry.style.alignItems = Align.Center;
+                entry.style.paddingTop = 6;
+                entry.style.paddingBottom = 6;
+                row.Marker = new VisualElement { pickingMode = PickingMode.Ignore };
+                row.Marker.style.width = 10;
+                row.Marker.style.alignSelf = Align.Stretch;
+                row.Marker.style.marginRight = 10;
+                row.Title = Ui.GameLabel("", "ui-text-size__mediumPlus");
+                entry.Add(row.Marker);
+                entry.Add(row.Title);
+                row.Root.Add(entry);
+            }
+            row.Root.AddToClassList("metem-list-entry");
+            row.Root.AddToClassList("audio-hover__list");
+            row.Root.AddToClassList("audio-click__list");
+            row.Title.style.fontSize = 18;
+            row.Title.style.whiteSpace = WhiteSpace.Normal;
+            row.Title.style.flexShrink = 1;
+            row.Title.enableRichText = true;
+            Ui.Click(row.Root, onClick);
+            return row;
+        }
+
+        /// <summary>A row's two lines ("SHIP 1: DESTROYER" over "ROOKIE"), whether it is the ship being set up, and its team colour.</summary>
+        private static void SetRow(ShipRow row, string slot, string ship, string loadout, bool selected, Color? team, bool enabled)
+        {
+            row.Title.text = "<size=80%>" + slot + (string.IsNullOrEmpty(ship) ? "" : ": " + ship) + "</size>\n" + loadout;
+            row.Root.SetEnabled(enabled);
+            row.Root.EnableInClassList("unity-collection-view__item--selected", selected && enabled);
+            if (row.Marker != null) row.Marker.style.backgroundColor = team.HasValue ? new StyleColor(team.Value) : new StyleColor(StyleKeyword.Null);
         }
 
         private static void Refresh()
@@ -281,59 +347,67 @@ namespace VoidCrewFleet
                 bool teams = FleetApi.IsTeamMatch;
                 if (!two && _editingShipB) EditShip(false);
 
-                Ui.SetButtonText(_twoButton, teams ? "FLEET BATTLE\nTEAMS" : (locked ? "FLEET MISSION\n2 SHIPS" : (two ? "TWO SHIPS: ON" : "TWO SHIPS: OFF")));
-                Ui.SetButtonText(_shipAButton, (teams ? "BLUE SHIP\n" : "SHIP 1\n") + Short(HubFleet.ShipADef));
-                Ui.SetButtonText(_shipBButton, !two ? "SHIP 2\nOFF"
-                    : (teams ? "RED SHIP\n" : "SHIP 2\n") + (HubFleet.ChosenShipB.IsNull ? "AS SHIP 1" : Short(HubFleet.ShipBDef, HubFleet.ShipBName)));
-                Highlight(_shipAButton, !_editingShipB, teams ? FleetApi.ShipColor(1) : (Color?)null);
-                Highlight(_shipBButton, _editingShipB, teams ? FleetApi.ShipColor(2) : (Color?)null);
-                _shipBButton.SetEnabled(two);
+                _twoButton.text = teams ? "TEAMS & RULES" : (two ? "TWO SHIPS: ON" : "TWO SHIPS: OFF");
                 _twoButton.SetEnabled(!locked || teams);
+
+                string ship, loadout;
+                SplitName(HubFleet.ShipADef, null, out ship, out loadout);
+                SetRow(_shipARow, teams ? "BLUE" : "SHIP 1", ship, loadout, !_editingShipB, teams ? FleetApi.ShipColor(1) : (Color?)null, true);
+                if (!two)
+                {
+                    ship = null;
+                    loadout = "OFF";
+                }
+                else if (HubFleet.ChosenShipB.IsNull)
+                {
+                    ship = null;
+                    loadout = "AS SHIP 1";
+                }
+                else
+                {
+                    SplitName(HubFleet.ShipBDef, HubFleet.ShipBName, out ship, out loadout);
+                }
+                SetRow(_shipBRow, teams ? "RED" : "SHIP 2", ship, loadout, _editingShipB, teams ? FleetApi.ShipColor(2) : (Color?)null, two);
 
                 if (teams)
                 {
-                    int ship = _editingShipB ? 2 : 1;
-                    string team = PvpTeams.TeamName(ship - 1);
+                    int shipNumber = _editingShipB ? 2 : 1;
+                    string team = PvpTeams.TeamName(shipNumber - 1);
                     int actor = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : -1;
                     int mine = FleetApi.TeamOf(actor);
-                    _hint.text = "The " + team + " team's ship. " + (FleetApi.CanEditShip(actor, ship)
-                        ? "You're " + team + ": pick its ship and loadout, then SELECT."
-                        : (mine < 0 ? "Pick a team first (FLEET BATTLE TEAMS)." : "Only " + team + " players can change it; you can look."));
+                    _hint.text = FleetApi.CanEditShip(actor, shipNumber)
+                        ? "The " + team + " ship: pick its ship and loadout, then SELECT."
+                        : (mine < 0 ? "You're not on a team: the host can open TEAMS & RULES again." : "The " + team + " ship: only " + team + " players can change it.");
                 }
                 else
                 {
                     _hint.text = _editingShipB
-                        ? "Choosing SHIP 2: pick a ship and loadout, then SELECT. Players are split evenly between the ships."
-                        : (two ? "Choosing SHIP 1. Press SHIP 2 to choose the second ship." : "One ship, up to 8 players. Turn TWO SHIPS on for a second ship.");
+                        ? "Setting up SHIP 2: pick a ship and loadout, then SELECT."
+                        : (two ? "Setting up SHIP 1. Press SHIP 2 to set up the second ship." : "One ship, up to 8 players. Turn TWO SHIPS on for a second ship.");
                 }
                 ShowTint(teams ? FleetApi.ShipColor(_editingShipB ? 2 : 1) : Color.clear);
                 if (_editingShipB) MarkShipB();
             }
             catch (Exception e)
             {
-                Log.Failure("Updating the two-ship bar", e);
+                Log.Failure("Updating the FLEET section", e);
             }
         }
 
-        private static string Short(ShipLoadoutDataDef def, string fallback = null)
+        /// <summary>A loadout as the FLEET rows show it: the ship ("DESTROYER") and the loadout ("ROOKIE").</summary>
+        private static void SplitName(ShipLoadoutDataDef def, string fallback, out string ship, out string loadout)
         {
             string text = def != null ? HubFleet.DescribeLoadout(def) : fallback;
-            if (string.IsNullOrEmpty(text)) return "-";
-            return text.Replace("METEM ", "").ToUpperInvariant();
-        }
-
-        /// <summary>The ship being set up is highlighted; in Fleet Battle each ship's button wears its team's colour.</summary>
-        private static void Highlight(VisualElement button, bool on, Color? team = null)
-        {
-            if (team.HasValue)
+            if (string.IsNullOrEmpty(text))
             {
-                Color colour = team.Value;
-                button.style.backgroundColor = new Color(colour.r * 0.35f, colour.g * 0.35f, colour.b * 0.35f, on ? 0.95f : 0.7f);
-                Ui.Border(button, on ? 2 : 1, on ? Ui.Gold : colour);
+                ship = null;
+                loadout = "-";
                 return;
             }
-            button.style.backgroundColor = on ? new Color(0.45f, 0.33f, 0.1f, 0.95f) : Ui.ButtonColor;
-            Ui.Border(button, 1, on ? Ui.Gold : new Color(1f, 1f, 1f, 0.18f));
+            text = text.Replace("METEM ", "").ToUpperInvariant();
+            int dash = text.IndexOf(" - ", System.StringComparison.Ordinal);
+            ship = dash > 0 ? text.Substring(0, dash) : null;
+            loadout = dash > 0 ? text.Substring(dash + 3) : text;
         }
 
         /// <summary>Fleet Battle: the terminal's background takes the team colour of the ship being set up.</summary>
@@ -345,7 +419,9 @@ namespace VoidCrewFleet
                 if (_tint != null) _tint.style.display = DisplayStyle.None;
                 return;
             }
-            if (_tint == null || _tint.parent != _root)
+            // Over the terminal's background picture (its #Terminal element draws it) and under everything on it.
+            VisualElement host = _root.Q("Terminal") ?? _root;
+            if (_tint == null || _tint.parent != host)
             {
                 _tint = new VisualElement { name = "FleetTeamTint", pickingMode = PickingMode.Ignore };
                 _tint.style.position = Position.Absolute;
@@ -353,9 +429,9 @@ namespace VoidCrewFleet
                 _tint.style.right = 0;
                 _tint.style.top = 0;
                 _tint.style.bottom = 0;
-                _root.Insert(0, _tint);
+                host.Insert(0, _tint);
             }
-            _tint.style.backgroundColor = new Color(colour.r, colour.g, colour.b, 0.2f);
+            _tint.style.backgroundColor = new Color(colour.r, colour.g, colour.b, 0.14f);
             _tint.style.display = DisplayStyle.Flex;
         }
 
@@ -363,9 +439,9 @@ namespace VoidCrewFleet
         {
             if (FleetApi.IsTeamMatch)
             {
-                // FLEET BATTLE TEAMS: the host opens team picking again for everyone.
+                // TEAMS & RULES: the host opens the lobby screen again for everyone (the teams are kept until changed).
                 if (PhotonNetwork.IsMasterClient) PvpTeams.Reset();
-                else Notice.Show("Only the host can open team picking again.");
+                else Notice.Show("Only the host can open the teams and ship rules again.");
                 return;
             }
             if (HubFleet.Variant != HubVariant.None) return;
