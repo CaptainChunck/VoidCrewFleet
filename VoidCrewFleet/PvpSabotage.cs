@@ -45,6 +45,18 @@ namespace VoidCrewFleet
         private static bool _contextIsSwitch;
         private static readonly Dictionary<long, Applied> Active = new Dictionary<long, Applied>();
 
+        /// <summary>
+        /// The host's own latest list. A room property only changes on the host itself once the server sends the change
+        /// back (the game broadcasts property changes to everyone), so right after a write the room still holds the old
+        /// list, and a second change built on it would undo the first. So from its first write in a room the host builds on
+        /// its own list, for as long as it is that room's host; any other client, and a new host until its first write,
+        /// reads the room property.
+        /// </summary>
+        private static int[] _hostEntries;
+
+        private static string _hostRoom;
+        private static int _hostActor = -1;
+
         // ---------------------------------------------------------------- the enemy player's client
 
         [GamePatch(Feature, "Gameplay.Enhancements.EnhancementCrypticActivator", "OnCrypticSuccess", PatchKind.Prefix)]
@@ -192,9 +204,26 @@ namespace VoidCrewFleet
             return "equipment";
         }
 
+        /// <summary>True while the host's own list is the one to use (see _hostEntries); forgets it once that no longer holds.</summary>
+        private static bool HostHasLatest()
+        {
+            if (_hostEntries == null) return false;
+            Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+            Photon.Realtime.Player master = PhotonNetwork.MasterClient;
+            if (room != null && PhotonNetwork.IsMasterClient && master != null && master.ActorNumber == _hostActor && room.Name == _hostRoom) return true;
+            // Another room, or not its host any more: the room property is the list again.
+            _hostEntries = null;
+            return false;
+        }
+
         private static List<int> ReadRoom()
         {
             var entries = new List<int>();
+            if (HostHasLatest())
+            {
+                entries.AddRange(_hostEntries);
+                return entries;
+            }
             object value;
             if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null && PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeySabotage, out value))
             {
@@ -207,7 +236,11 @@ namespace VoidCrewFleet
         private static void WriteRoom(List<int> entries)
         {
             if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null) return;
-            PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeySabotage, entries.Count > 0 ? entries.ToArray() : null } });
+            int[] data = entries.Count > 0 ? entries.ToArray() : null;
+            PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeySabotage, data } });
+            _hostEntries = data ?? new int[0];
+            _hostRoom = PhotonNetwork.CurrentRoom.Name;
+            _hostActor = FleetShips.LocalActor;
         }
 
         /// <summary>Host, when a match starts or the hub loads: nothing is sabotaged.</summary>
@@ -226,6 +259,8 @@ namespace VoidCrewFleet
         /// <summary>A few times a second: what is sabotaged stays off, and comes back on when its time is up.</summary>
         public static void Apply()
         {
+            // Notices a new room or host between matches too.
+            HostHasLatest();
             if (Active.Count == 0 && (!PvpCombat.Active || !PhotonNetwork.InRoom)) return;
             List<int> entries = PvpCombat.Active ? ReadRoom() : new List<int>();
             var current = new HashSet<long>();

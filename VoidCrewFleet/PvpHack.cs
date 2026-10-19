@@ -40,6 +40,15 @@ namespace VoidCrewFleet
         public const float AccessSeconds = 300f;
         private const int SightMask = (1 << 10) | (1 << 12) | (1 << 27);
 
+        /// <summary>Further than this from the enemy ship's rooms, none of its airlock panels can be in reach.</summary>
+        private const float NearShip = 30f;
+
+        /// <summary>How long a found outside panel is used before it is looked up again.</summary>
+        private const float PanelSeconds = 10f;
+
+        /// <summary>How often the countdown text is rebuilt (it only shows whole seconds).</summary>
+        private const float TimerSeconds = 0.25f;
+
         private enum State : byte
         {
             Hacking = 1,
@@ -106,11 +115,56 @@ namespace VoidCrewFleet
             public Material[] Materials;
         }
 
+        /// <summary>A ship's airlocks, in the order every client finds them (an airlock's index names it in messages).</summary>
+        private sealed class ShipAirlocks
+        {
+            public PlayerControlledShip Ship;
+            public Airlock[] Airlocks;
+        }
+
+        /// <summary>An airlock's control panel outside the ship (Panel is never set when it has none), and where it is.</summary>
+        private sealed class Outside
+        {
+            public Airlock Airlock;
+            public AirlockButtonPanel Panel;
+
+            /// <summary>The middle of the panel, in the panel's own space.</summary>
+            public Vector3 Middle;
+
+            /// <summary>Out of the outer door to space, in the airlock's own space.</summary>
+            public Vector3 Outward;
+
+            public float Until;
+        }
+
         private static readonly Dictionary<long, Entry> Entries = new Dictionary<long, Entry>();
         private static readonly Dictionary<long, Shown> Models = new Dictionary<long, Shown>();
-        private static readonly Dictionary<int, long> AirlockKeys = new Dictionary<int, long>();
+        private static readonly Dictionary<int, ShipAirlocks> AirlocksByShip = new Dictionary<int, ShipAirlocks>();
+        private static readonly Dictionary<int, Outside> OutsideByAirlock = new Dictionary<int, Outside>();
         private static readonly Dictionary<int, Room> CockpitRooms = new Dictionary<int, Room>();
+
+        /// <summary>Stands for "not read yet": never the value of a room property.</summary>
+        private static readonly object NotRead = new object();
+
         private static object _roomData;
+
+        /// <summary>
+        /// The host's own list (Entries) is the latest one. A room property only changes on the host itself once the server
+        /// sends the change back (the game broadcasts property changes to everyone), so right after a write the room still
+        /// holds the old list, and a second change built on it would undo the first. So from its first write in a room the
+        /// host builds on its own list, for as long as it is that room's host; any other client, and a new host until its
+        /// first write, reads the room property.
+        /// </summary>
+        private static bool _hostWrote;
+
+        private static string _hostRoom;
+        private static int _hostActor = -1;
+
+        private static string _timerText;
+        private static float _nextTimers;
+        private static long _takenKey;
+        private static int _takenSeconds = -1;
+        private static string _takenText;
 
         private static Step _holding;
         private static long _holdTarget;
@@ -153,48 +207,109 @@ namespace VoidCrewFleet
         {
             PlayerControlledShip owner = ShipOfView(ship);
             if (owner == null) return null;
-            Airlock[] airlocks = owner.GetComponentsInChildren<Airlock>(true);
+            Airlock[] airlocks = AirlocksOf(owner);
             return index >= 0 && index < airlocks.Length ? airlocks[index] : null;
         }
 
-        private static bool Identify(Airlock airlock, out long key)
+        /// <summary>
+        /// A ship's airlocks in hierarchy order, the same on every client. Found once per ship, and again when one of them is
+        /// destroyed.
+        /// </summary>
+        private static Airlock[] AirlocksOf(PlayerControlledShip ship)
         {
-            key = 0;
-            if (airlock == null) return false;
-            if (AirlockKeys.TryGetValue(airlock.GetInstanceID(), out key)) return true;
-            PlayerControlledShip ship = FleetShips.OwnerOf(airlock);
-            if (ship == null) return false;
-            int index = Array.IndexOf(ship.GetComponentsInChildren<Airlock>(true), airlock);
-            if (index < 0) return false;
-            key = KeyOf(FleetShips.ViewId(ship), index);
-            AirlockKeys[airlock.GetInstanceID()] = key;
+            int id = ship.GetInstanceID();
+            ShipAirlocks known;
+            if (AirlocksByShip.TryGetValue(id, out known) && known.Ship != null && AllThere(known.Airlocks)) return known.Airlocks;
+            if (known == null) ForgetLostShips();
+            known = new ShipAirlocks { Ship = ship, Airlocks = ship.GetComponentsInChildren<Airlock>(true) };
+            AirlocksByShip[id] = known;
+            return known.Airlocks;
+        }
+
+        private static bool AllThere(Airlock[] airlocks)
+        {
+            foreach (Airlock airlock in airlocks)
+            {
+                if (airlock == null) return false;
+            }
             return true;
         }
 
-        private static AirlockDoor OuterDoor(Airlock airlock)
+        /// <summary>Drops what is remembered about ships and airlocks that are gone (when a new ship turns up).</summary>
+        private static void ForgetLostShips()
+        {
+            var lostShips = new List<int>();
+            foreach (KeyValuePair<int, ShipAirlocks> known in AirlocksByShip)
+            {
+                if (known.Value.Ship == null) lostShips.Add(known.Key);
+            }
+            foreach (int id in lostShips) AirlocksByShip.Remove(id);
+            var lostAirlocks = new List<int>();
+            foreach (KeyValuePair<int, Outside> known in OutsideByAirlock)
+            {
+                if (known.Value.Airlock == null) lostAirlocks.Add(known.Key);
+            }
+            foreach (int id in lostAirlocks) OutsideByAirlock.Remove(id);
+        }
+
+        private static AirlockDoor Door(Airlock airlock, AirlockDoorType type)
         {
             if (airlock == null || airlock.airlockDoors == null) return null;
             foreach (AirlockDoor door in airlock.airlockDoors)
             {
-                if (door != null && door.airlockDoorType == AirlockDoorType.Outer) return door;
+                if (door != null && door.airlockDoorType == type) return door;
             }
             return null;
         }
 
-        /// <summary>The direction from an outer airlock door out to space.</summary>
-        private static Vector3 Outward(AirlockDoor door)
+        private static Vector3 DoorPoint(AbstractDoor door)
         {
-            Vector3 outward = door.transform.forward;
-            RoomPortal portal = door.Portal;
-            if (portal == null || portal.RoomConnections == null) return outward;
-            foreach (Room room in portal.RoomConnections)
+            return door.Portal != null ? door.Portal.transform.position : door.transform.position;
+        }
+
+        /// <summary>
+        /// The direction from an outer airlock door out to space: the door's own axis, pointing away from the inside of the
+        /// ship. The inside is the airlock's sample point of the ship's air, else its inner door, else the middle of the
+        /// ship's rooms. (The space room's connection point used before can be the doorway itself or the world's origin.)
+        /// </summary>
+        private static Vector3 Outward(Airlock airlock, AirlockDoor door)
+        {
+            Vector3 axis = door.transform.forward;
+            Vector3 doorPoint = DoorPoint(door);
+            float side = 0f;
+            string from = null;
+            RoomPoint air = airlock.ShipAtmospherePoint;
+            if (air != null)
             {
-                Vector3 local;
-                if (room == null || !room.InSpace || room.PortalConnectionPoints == null || !room.PortalConnectionPoints.TryGetValue(portal, out local)) continue;
-                if (Vector3.Dot(portal.transform.TransformPoint(local) - portal.transform.position, outward) < 0f) outward = -outward;
-                break;
+                side = Vector3.Dot(doorPoint - air.transform.position, axis);
+                from = "the ship's air next to the airlock";
             }
-            return outward;
+            if (Mathf.Abs(side) < 0.1f)
+            {
+                AirlockDoor inner = Door(airlock, AirlockDoorType.Inner);
+                if (inner != null)
+                {
+                    side = Vector3.Dot(doorPoint - DoorPoint(inner), axis);
+                    from = "the airlock's inner door";
+                }
+            }
+            if (Mathf.Abs(side) < 0.1f)
+            {
+                PlayerControlledShip ship = FleetShips.OwnerOf(airlock);
+                var rooms = ship != null && ship.Hull != null ? ship.Hull.RoomCollection : null;
+                if (rooms != null)
+                {
+                    side = Vector3.Dot(doorPoint - rooms.transform.TransformPoint(rooms.Bounds.center), axis);
+                    from = "the middle of the ship";
+                }
+            }
+            if (Mathf.Abs(side) < 0.1f)
+            {
+                Log.InfoOnce("hack outward door", "PvP: an airlock's outside is taken from its outer door's own facing (nothing inside the ship to go by).");
+                return axis;
+            }
+            Log.InfoOnce("hack outward " + from, "PvP: an airlock's outside is found from " + from + ".");
+            return side > 0f ? axis : -axis;
         }
 
         private static Bounds BoundsOf(Component component)
@@ -206,14 +321,52 @@ namespace VoidCrewFleet
             return bounds;
         }
 
-        /// <summary>The airlock's control panel outside the ship (the one furthest out past the outer door), or null.</summary>
+        /// <summary>True for a reference to something that has been destroyed since (not for one that was never set).</summary>
+        private static bool Destroyed(UnityEngine.Object thing)
+        {
+            return !ReferenceEquals(thing, null) && thing == null;
+        }
+
+        /// <summary>
+        /// The airlock's control panel outside the ship and where it is, looked up again after a few seconds or when the
+        /// airlock or its panel is destroyed.
+        /// </summary>
+        private static Outside OutsideOf(Airlock airlock)
+        {
+            if (airlock == null) return null;
+            int id = airlock.GetInstanceID();
+            Outside outside;
+            if (OutsideByAirlock.TryGetValue(id, out outside) && Time.unscaledTime < outside.Until && outside.Airlock != null && !Destroyed(outside.Panel)) return outside;
+            Vector3 outward;
+            AirlockButtonPanel panel = FindOutsidePanel(airlock, out outward);
+            outside = new Outside
+            {
+                Airlock = airlock,
+                Panel = panel,
+                Outward = airlock.transform.InverseTransformDirection(outward),
+                Until = Time.unscaledTime + PanelSeconds
+            };
+            if (panel != null) outside.Middle = panel.transform.InverseTransformPoint(BoundsOf(panel).center);
+            OutsideByAirlock[id] = outside;
+            return outside;
+        }
+
+        /// <summary>The airlock's control panel outside the ship, or null; and the direction out of its outer door.</summary>
         private static AirlockButtonPanel OutsidePanel(Airlock airlock, out Vector3 outward)
         {
+            Outside outside = OutsideOf(airlock);
+            outward = outside != null ? airlock.transform.TransformDirection(outside.Outward) : Vector3.forward;
+            return outside != null ? outside.Panel : null;
+        }
+
+        /// <summary>The airlock's control panel outside the ship (the one furthest out past the outer door), or null.</summary>
+        private static AirlockButtonPanel FindOutsidePanel(Airlock airlock, out Vector3 outward)
+        {
             outward = Vector3.forward;
-            AirlockDoor door = OuterDoor(airlock);
+            AirlockDoor door = Door(airlock, AirlockDoorType.Outer);
             if (door == null || airlock.ButtonPanels == null) return null;
-            outward = Outward(door);
-            Vector3 doorPoint = door.Portal != null ? door.Portal.transform.position : door.transform.position;
+            outward = Outward(airlock, door);
+            Vector3 doorPoint = DoorPoint(door);
             AirlockButtonPanel best = null;
             float bestOut = 0.3f;
             foreach (AirlockButtonPanel panel in airlock.ButtonPanels)
@@ -314,13 +467,28 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- the room property
 
+        /// <summary>True while the host's own list is the one to use (see _hostWrote); forgets that once it no longer holds.</summary>
+        private static bool HostHasLatest()
+        {
+            if (!_hostWrote) return false;
+            Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+            Photon.Realtime.Player master = PhotonNetwork.MasterClient;
+            if (room != null && PhotonNetwork.IsMasterClient && master != null && master.ActorNumber == _hostActor && room.Name == _hostRoom) return true;
+            // Another room, or not its host any more: the room property is the list again.
+            _hostWrote = false;
+            _roomData = NotRead;
+            return false;
+        }
+
         private static void ReadRoom()
         {
+            if (HostHasLatest()) return;
             object data = null;
             Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
             if (room != null && room.CustomProperties != null) room.CustomProperties.TryGetValue(RoomKey, out data);
             if (ReferenceEquals(data, _roomData)) return;
             _roomData = data;
+            _nextTimers = 0f;
             Entries.Clear();
             var entries = data as object[];
             if (entries == null) return;
@@ -339,28 +507,36 @@ namespace VoidCrewFleet
             object data = entries.Count > 0 ? entries.ToArray() : null;
             PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { RoomKey, data } });
             _roomData = data;
+            _hostWrote = true;
+            _hostRoom = PhotonNetwork.CurrentRoom.Name;
+            _hostActor = FleetShips.LocalActor;
+            _nextTimers = 0f;
         }
 
         /// <summary>Host, at the start of a PvP match: no hacks from an earlier one.</summary>
         public static void ResetRoom()
         {
             Entries.Clear();
-            AirlockKeys.Clear();
+            AirlocksByShip.Clear();
+            OutsideByAirlock.Clear();
             CockpitRooms.Clear();
-            _roomData = null;
+            _roomData = NotRead;
             _glow = null;
-            if (PhotonNetwork.IsMasterClient && PhotonNetwork.CurrentRoom != null)
-                PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { RoomKey, null } });
+            _nextTimers = 0f;
+            WriteRoom();
         }
 
         // ---------------------------------------------------------------- every frame, every client
 
         public static void Frame()
         {
+            // Notices a new room or host between matches too.
+            HostHasLatest();
             if (!Active)
             {
                 if (Models.Count > 0) ClearModels();
                 ShowTimers(null);
+                _nextTimers = 0f;
                 ActionHint.Set("hack", ActionHint.HackPriority, null);
                 Busy = false;
                 return;
@@ -369,7 +545,13 @@ namespace VoidCrewFleet
             {
                 ReadRoom();
                 ShowModels();
-                ShowTimers(TimerText());
+                // The countdowns only show whole seconds: their text is rebuilt a few times a second, not every frame.
+                if (Time.unscaledTime >= _nextTimers)
+                {
+                    _timerText = TimerText();
+                    _nextTimers = Time.unscaledTime + TimerSeconds;
+                }
+                ShowTimers(_timerText);
                 HandleInput();
                 KeepOutOfCockpit();
             }
@@ -535,14 +717,15 @@ namespace VoidCrewFleet
         {
             InputAction fire = PvpPunch.Fire();
             long target = 0;
-            Step step = PvpPunch.CanPunch() ? FindStep(out target) : Step.None;
+            string taken = null;
+            Step step = PvpPunch.CanPunch() ? FindStep(out target, out taken) : Step.None;
             Busy = step != Step.None;
             bool pressed = fire != null && fire.IsPressed();
             if (!pressed) _needRelease = false;
             if (step == Step.None)
             {
                 _holding = Step.None;
-                ActionHint.Set("hack", ActionHint.HackPriority, null);
+                ActionHint.Set("hack", ActionHint.HackPriority, taken);
                 return;
             }
             if (!pressed || _needRelease || step != _holding || target != _holdTarget)
@@ -570,9 +753,15 @@ namespace VoidCrewFleet
             else Net.ToHost(Msg.HackPull, ship, index);
         }
 
-        private static Step FindStep(out long target)
+        /// <summary>
+        /// What Fire does where the local player looks: pull an enemy terminal out of our airlock, or plug the held one into
+        /// an enemy airlock's outside panel. At an enemy airlock that is being hacked or is hacked already, nothing, but
+        /// "taken" says so.
+        /// </summary>
+        private static Step FindStep(out long target, out string taken)
         {
             target = 0;
+            taken = null;
             LocalPlayer me = LocalPlayer.Instance;
             Vector3 eye;
             Vector3 aim;
@@ -595,31 +784,62 @@ namespace VoidCrewFleet
                 }
             }
 
-            // Holding a terminal, looking at the outside panel of an enemy airlock that isn't being hacked.
+            // Holding a terminal, looking at the outside panel of an enemy airlock (from close by: nothing to do further off).
             if (!HackTerminal.Is(held)) return Step.None;
             PlayerControlledShip enemy = null;
             foreach (PlayerControlledShip ship in FleetShips.All)
             {
                 if (PvpBoarding.IsEnemyShip(ship)) enemy = ship;
             }
-            if (enemy == null) return Step.None;
+            if (enemy == null || FarFrom(enemy, eye)) return Step.None;
+            Airlock[] airlocks = AirlocksOf(enemy);
+            int view = FleetShips.ViewId(enemy);
             float bestAngle = AimAngle;
-            foreach (Airlock airlock in enemy.GetComponentsInChildren<Airlock>(true))
+            for (int i = 0; i < airlocks.Length; i++)
             {
-                Vector3 outward;
-                AirlockButtonPanel panel = OutsidePanel(airlock, out outward);
-                long key;
-                if (panel == null || !Identify(airlock, out key) || Entries.ContainsKey(key)) continue;
-                Vector3 centre = BoundsOf(panel).center;
+                Outside outside = OutsideOf(airlocks[i]);
+                if (outside == null || outside.Panel == null) continue;
+                Vector3 centre = outside.Panel.transform.TransformPoint(outside.Middle);
                 Vector3 to = centre - eye;
                 float distance = to.magnitude;
+                if (distance > Reach + 0.4f) continue;
                 float angle = Vector3.Angle(aim, to);
-                if (distance > Reach + 0.4f || angle >= bestAngle) continue;
+                if (angle >= bestAngle) continue;
                 if (Physics.Linecast(eye, centre - to.normalized * 0.25f, SightMask, QueryTriggerInteraction.Ignore)) continue;
                 bestAngle = angle;
-                target = key;
+                target = KeyOf(view, i);
             }
-            return target != 0 ? Step.Plug : Step.None;
+            if (target == 0) return Step.None;
+            Entry hack;
+            if (!Entries.TryGetValue(target, out hack)) return Step.Plug;
+            // Being hacked, or hacked already: nothing to plug in there.
+            taken = TakenText(hack);
+            target = 0;
+            return Step.None;
+        }
+
+        /// <summary>True when a point is further than NearShip from a ship's rooms, so none of its airlock panels is in reach.</summary>
+        private static bool FarFrom(PlayerControlledShip ship, Vector3 point)
+        {
+            var rooms = ship.Hull != null ? ship.Hull.RoomCollection : null;
+            if (rooms == null) return false;
+            Bounds bounds = rooms.Bounds;
+            Vector3 size = bounds.size;
+            if (!(size.x > 0f && size.y > 0f && size.z > 0f)) return false;
+            return bounds.SqrDistance(rooms.transform.InverseTransformPoint(point)) > NearShip * NearShip;
+        }
+
+        /// <summary>The hint at an enemy airlock that is being hacked or is hacked already (nothing to do there, so no key).</summary>
+        private static string TakenText(Entry entry)
+        {
+            int seconds = Mathf.Max(0, Mathf.CeilToInt((float)(entry.Until - PhotonNetwork.Time)));
+            if (_takenText == null || entry.Key != _takenKey || seconds != _takenSeconds)
+            {
+                _takenKey = entry.Key;
+                _takenSeconds = seconds;
+                _takenText = (entry.State == State.Hacking ? "AIRLOCK BEING HACKED " : "AIRLOCK ALREADY HACKED ") + Clock(seconds);
+            }
+            return _takenText;
         }
 
         private static bool InSight(Vector3 eye, Vector3 aim, Vector3 point)
@@ -657,7 +877,7 @@ namespace VoidCrewFleet
                 if (Time.unscaledTime - _inCockpitSince > 1.2f)
                 {
                     Vector3 exit;
-                    if (CockpitExit(cockpit, me.transform.position, out exit))
+                    if (CockpitExit(ship, cockpit, me.transform.position, out exit))
                         me.Locomotion.SetPositionAndRotation(exit, me.transform.rotation, true, true);
                     _inCockpitSince = -1f;
                 }
@@ -681,29 +901,106 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>A point just outside the cockpit, in the room past its nearest doorway.</summary>
-        private static bool CockpitExit(Room cockpit, Vector3 from, out Vector3 exit)
+        /// <summary>
+        /// A point just outside the cockpit, in the room past its nearest doorway (preferring a point known to be in that
+        /// room). See PastDoorway for the direction.
+        /// </summary>
+        private static bool CockpitExit(PlayerControlledShip ship, Room cockpit, Vector3 from, out Vector3 exit)
         {
             exit = Vector3.zero;
+            var rooms = ship.Hull != null ? ship.Hull.RoomCollection : null;
+            if (rooms == null || cockpit.PortalConnections == null) return false;
+            Vector3 middle;
+            if (!RoomMiddle(cockpit, out middle))
+            {
+                Helm helm = ship.GetModule<Helm>();
+                middle = helm != null ? helm.transform.position : cockpit.transform.position;
+            }
             float best = float.MaxValue;
-            if (cockpit.PortalConnections == null) return false;
+            string method = null;
             foreach (RoomPortal portal in cockpit.PortalConnections)
             {
                 if (portal == null || portal.RoomConnections == null) continue;
+                float distance = Vector3.Distance(from, portal.transform.position);
                 foreach (Room other in portal.RoomConnections)
                 {
-                    Vector3 local;
-                    if (other == null || other == cockpit || other.InSpace || other.PortalConnectionPoints == null || !other.PortalConnectionPoints.TryGetValue(portal, out local)) continue;
-                    Vector3 doorway = portal.transform.position;
-                    Vector3 beyond = portal.transform.TransformPoint(local);
-                    Vector3 point = doorway + (beyond - doorway).normalized * 1.5f;
-                    float distance = Vector3.Distance(from, doorway);
-                    if (distance >= best) continue;
-                    best = distance;
+                    if (other == null || other == cockpit || other.InSpace) continue;
+                    Vector3 point;
+                    string how;
+                    bool inside;
+                    if (!PastDoorway(rooms, cockpit, other, portal, middle, ship.transform.up, out point, out how, out inside)) continue;
+                    float score = inside ? distance : distance + 1000f;
+                    if (score >= best) continue;
+                    best = score;
                     exit = point;
+                    method = how;
                 }
             }
-            return best < float.MaxValue;
+            if (method == null) return false;
+            Log.InfoOnce("cockpit exit " + method, "PvP: an enemy is put out of a cockpit " + method + ".");
+            return true;
+        }
+
+        /// <summary>
+        /// 1.5 m past a doorway out of the cockpit into another room: away from the cockpit's middle, else toward that room's
+        /// own point at the doorway, else toward that room's middle; the first one found inside that room (and not in the
+        /// cockpit), or else the first one at all. (That room's point at the doorway is the doorway itself for a box room
+        /// around it, and the world's origin for a mesh room, so it only counts when it is near the doorway.)
+        /// </summary>
+        private static bool PastDoorway(RoomCollection rooms, Room cockpit, Room other, RoomPortal portal, Vector3 middle, Vector3 up, out Vector3 point,
+            out string how, out bool inside)
+        {
+            Vector3 doorway = portal.transform.position;
+            Vector3 local;
+            Vector3 toPoint = other.PortalConnectionPoints != null && other.PortalConnectionPoints.TryGetValue(portal, out local)
+                ? portal.transform.TransformPoint(local) - doorway
+                : Vector3.zero;
+            if (toPoint.magnitude > portal.RoomConnectRadius + 0.5f) toPoint = Vector3.zero;
+            Vector3 otherMiddle;
+            Vector3 toMiddle = RoomMiddle(other, out otherMiddle) ? otherMiddle - doorway : Vector3.zero;
+            Vector3[] directions = { doorway - middle, toPoint, toMiddle };
+            string[] methods = { "away from the cockpit's middle", "toward the next room's point at the doorway", "toward the next room's middle" };
+            point = doorway;
+            how = null;
+            inside = false;
+            for (int i = 0; i < directions.Length; i++)
+            {
+                Vector3 direction = Vector3.ProjectOnPlane(directions[i], up);
+                if (direction.sqrMagnitude < 0.01f) continue;
+                Vector3 candidate = doorway + direction.normalized * 1.5f;
+                Vector3 hit;
+                if (rooms.RoomSphereIntersect(other, candidate, 0.3f, out hit) && !rooms.RoomSphereIntersect(cockpit, candidate, 0.1f, out hit))
+                {
+                    point = candidate;
+                    how = methods[i];
+                    inside = true;
+                    return true;
+                }
+                if (how != null) continue;
+                point = candidate;
+                how = methods[i] + " (not checked to be in the next room)";
+            }
+            return how != null;
+        }
+
+        /// <summary>The middle of a room: of its collider's bounds, else of its box; false when neither is known.</summary>
+        private static bool RoomMiddle(Room room, out Vector3 middle)
+        {
+            middle = room.transform.position;
+            Collider collider = room.GetComponent<Collider>();
+            if (collider != null)
+            {
+                // Empty while the collider is switched off.
+                Bounds bounds = collider.bounds;
+                if (bounds.size.sqrMagnitude > 0.01f)
+                {
+                    middle = bounds.center;
+                    return true;
+                }
+            }
+            if (room.ColliderType != ColliderType.Box) return false;
+            middle = room.transform.TransformPoint(room.Center);
+            return true;
         }
 
         // ---------------------------------------------------------------- the host
@@ -844,7 +1141,7 @@ namespace VoidCrewFleet
         public static string DebugAccess(PlayerControlledShip ship, int team, float seconds)
         {
             if (!PhotonNetwork.IsMasterClient || ship == null) return "not the host, or no ship";
-            Airlock[] airlocks = ship.GetComponentsInChildren<Airlock>(true);
+            Airlock[] airlocks = AirlocksOf(ship);
             if (airlocks.Length == 0) return "the ship has no airlock";
             ReadRoom();
             int view = FleetShips.ViewId(ship);
