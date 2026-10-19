@@ -1,6 +1,6 @@
 {
   "name": "Void_Crew_Fleet",
-  "version_number": "0.1.1",
+  "version_number": "0.2.0",
   "website_url": "https://github.com/CaptainChunck/VoidCrewFleet",
   "description": "Two player ships per lobby and up to 16 players. Fly missions with two ships, the Fleet Pilgrimage, or Fleet Battle PvP: teams, boarding, sabotage, punching and airlock breaching charges.",
   "dependencies": [

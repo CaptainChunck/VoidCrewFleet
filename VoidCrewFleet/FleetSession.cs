@@ -22,7 +22,7 @@ namespace VoidCrewFleet
     /// <summary>The fleet settings of one mission, fixed when the host starts it.</summary>
     internal sealed class FleetPlan
     {
-        public const int Protocol = 1;
+        public const int Protocol = 2;
 
         public FleetMode Mode;
 
@@ -44,6 +44,9 @@ namespace VoidCrewFleet
         /// <summary>PvP: what the airlock hacking terminal costs in the fabricator (the host's setting, the same for everyone).</summary>
         public int HackCost = HackTerminal.DefaultCost;
 
+        /// <summary>PvP: the arena (auto, Dz-A, Or-A, Oz-B, Defiance or off); the host's setting.</summary>
+        public string Arena = "auto";
+
         public JObject ToJson()
         {
             return new JObject
@@ -54,7 +57,8 @@ namespace VoidCrewFleet
                 ["shipB"] = ShipB.AsHex(),
                 ["shipBName"] = ShipBName ?? "",
                 ["shipBHomunculus"] = ShipBHomunculus.AsHex(),
-                ["hackCost"] = HackCost
+                ["hackCost"] = HackCost,
+                ["arena"] = Arena ?? "auto"
             };
         }
 
@@ -69,6 +73,7 @@ namespace VoidCrewFleet
             if (json.TryGetValue("shipBHomunculus", out token) && !string.IsNullOrEmpty(token.Value<string>()))
                 plan.ShipBHomunculus = new GUIDUnion(token.Value<string>());
             if (json.TryGetValue("hackCost", out token)) plan.HackCost = token.Value<int>();
+            if (json.TryGetValue("arena", out token)) plan.Arena = token.Value<string>();
             return plan;
         }
 

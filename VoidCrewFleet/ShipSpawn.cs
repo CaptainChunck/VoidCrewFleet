@@ -71,11 +71,8 @@ namespace VoidCrewFleet
         {
             if (plan.Mode == FleetMode.PvP)
             {
-                float half = Settings.PvpStartDistance.Value * 0.5f;
-                a = new Vector3(0f, 0f, -half);
-                ra = Quaternion.identity;
-                b = new Vector3(0f, 0f, half);
-                rb = Quaternion.Euler(0f, 180f, 0f);
+                // On opposite sides of the arena's centre, facing each other (the origin without an arena).
+                PvpArena.StartPositions(Settings.PvpStartDistance.Value, out a, out ra, out b, out rb);
                 return;
             }
             float side = Settings.ShipSpacing.Value * 0.5f;

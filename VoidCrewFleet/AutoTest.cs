@@ -321,6 +321,8 @@ namespace VoidCrewFleet
                     text.AppendLine("  PvP: blue faction " + blue.faction + ", red faction " + red.faction + ", blue hostile to red " + blue.IsHostile(red) +
                                     ", red hostile to blue " + red.IsHostile(blue) + ", distance " + Vector3.Distance(blue.transform.position, red.transform.position).ToString("0") + " m");
                     text.AppendLine("  PvP: red parts " + FactionCounts(red) + "; blue parts " + FactionCounts(blue));
+                    text.AppendLine("  PvP arena: " + PvpArena.Describe());
+                    text.AppendLine("  PvP turrets: ship 1 " + PvpTurrets.DescribeShip(blue) + "; ship 2 " + PvpTurrets.DescribeShip(red));
                     text.AppendLine("  PvP hack: BLUE door access to RED " + PvpHack.HasAccess(0, red) + "; " + PvpBoarding.DescribeAccess(red) + "; " + DescribeTerminals());
                 }
             }

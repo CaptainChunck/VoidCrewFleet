@@ -13,6 +13,7 @@ namespace VoidCrewFleet
         public static ConfigEntry<float> EnemyMultiplier;
         public static ConfigEntry<Key> PunchKey;
         public static ConfigEntry<int> HackTerminalCost;
+        public static ConfigEntry<string> PvpArena;
         public static ConfigEntry<bool> VerboseLogging;
         public static ConfigEntry<AutoTestMode> AutoTest;
         public static ConfigEntry<bool> AutoTestJump;
@@ -42,6 +43,11 @@ namespace VoidCrewFleet
 
             PunchKey = config.Bind("PvP", "PunchKey", Key.V,
                 "The key that throws a punch at an enemy player in front of you (PvP only).");
+
+            PvpArena = config.Bind("PvP", "Arena", "auto",
+                new ConfigDescription("Where Fleet Battle is fought: auto (an asteroid field of the run's solar system), Dz-A (ice field), Or-A (lava and asteroids), " +
+                                      "Oz-B (asteroids), Defiance (the Survival arena), or off (the empty starting sector). Only the host's setting counts.",
+                    new AcceptableValueList<string>("auto", "Dz-A", "Or-A", "Oz-B", "Defiance", "off")));
 
             HackTerminalCost = config.Bind("PvP", "HackTerminalCost", HackTerminal.DefaultCost,
                 new ConfigDescription("How many alloys the Airlock Hacking Terminal costs in the fabricator. Only the host's setting counts.",

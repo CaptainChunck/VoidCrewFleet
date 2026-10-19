@@ -27,7 +27,8 @@ namespace VoidCrewFleet
             PvpMarkers.Feature,
             PvpVoice.Feature,
             PvpTurrets.Feature,
-            HackTerminal.Feature
+            HackTerminal.Feature,
+            PvpArena.Feature
         };
 
         public static void Listen()
@@ -56,6 +57,7 @@ namespace VoidCrewFleet
             FleetRuntime.Slow += PvpMatch.Tick;
             FleetRuntime.Slow += PvpSabotage.Apply;
             FleetRuntime.Slow += PvpHack.Tick;
+            FleetRuntime.Slow += PvpArena.Tick;
             FleetRuntime.Slow += PvpMarkers.Tick;
             FleetRuntime.Slow += ShipMarkers.Tick;
             FleetRuntime.Slow += HelmIsolation.Tick;

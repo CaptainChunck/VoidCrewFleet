@@ -30,15 +30,26 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
 - **The game's own missions** can be flown with two ships.
 - **FLEET PILGRIMAGE**: the Pilgrimage for two ships. Enemies come in greater numbers and every sector holds more
   objectives, so the two crews can split up and work on different objectives at the same time.
-- **FLEET BATTLE (PvP)**: two crews, one ship each, starting on opposite sides of an asteroid field.
+- **FLEET BATTLE (PvP)**: two crews, one ship each, starting on opposite sides of a large asteroid field with salvage
+  to fight over.
 
 ### Fleet Battle (PvP)
-- **Team screen** before anyone spawns:
-  - players join BLUE or RED;
-  - teams stay balanced (an odd count allows one extra);
-  - the host can move players, auto-balance, and must confirm the teams.
-- **Enemies look like enemies**: enemy ship markers, red name tags (only in sight and within 35 m), and no enemy pings
-  or damage markers.
+- **Teams in the lobby:**
+  1. When the host picks FLEET BATTLE on the galaxy map, a team screen opens for everyone. Players join BLUE or RED;
+     teams stay balanced (an odd count allows one extra). The host can move players, auto-balance and confirms.
+  2. Everyone on a team wears a **BLUE TEAM / RED TEAM** badge above their head.
+  3. At the loadout terminal the FLEET panel shows the **BLUE SHIP** (ship 1) and **RED SHIP** (ship 2) in team colours.
+     Only a ship's own team can change its loadout, Ship Customizer's CUSTOM included.
+  4. The host starts the match by **sitting in a ready-room seat**, and everyone spawns aboard their team's ship.
+  The host can reopen team picking with FLEET BATTLE TEAMS on the FLEET panel.
+- **The arena:**
+  - one of the game's asteroid fields, with rocks between the ships to take cover behind;
+  - mirrored salvage on each side: supply and generic containers near home, a wreck to search on the flank, and an
+    asteroid base, ammo container and VoidFish further out;
+  - an alloy supply drop every 5 minutes, the same distance from both ships;
+  - no enemy NPCs.
+- **Enemies look like enemies**: enemy ship markers, team-coloured name tags (enemies only in sight and within 35 m),
+  and no enemy pings or damage markers.
 - **The ships can damage each other.** Destroy the enemy ship to win, and a team with no players left forfeits.
 - **Boarding:**
   - Enemy players can come aboard through an airlock its crew left open, or one their team hacked (below).
@@ -48,8 +59,9 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
   - You can never use its helm, turrets, seats or terminals, enter its **cockpit**, or take its **homunculus**.
 - **Fighting aboard:** punch enemy players with **V**, or with **Fire** when your hands are empty. Five punches knock
   one out, and it aims where you look, VR included.
-- **Turrets vs. players:** point defenses and B.R.A.I.N. auto-turrets shoot enemy players floating in open space near
-  the ship.
+- **Turrets:** B.R.A.I.N. auto-turrets track the enemy ship properly: they aim at its hull and lead its real movement,
+  and hold fire when it's out of their arc. Point defenses and auto-turrets also shoot enemy players floating in open
+  space near the ship, but a visible enemy ship always comes first.
 - **Proximity voice** is forced on. You hear players on the same ship, or within 50 m in open space.
 - **Airlock Hacking Terminal:** a new fabricator item on the Resources tab, made from the Data Shard's model.
   1. Print it and carry it to the **control panel outside an enemy airlock**.
@@ -73,6 +85,7 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
 | Two ships | ShipSpacing | 160 | Distance between the two ships at the start and after a jump (m). |
 | Fleet Pilgrimage | EnemyMultiplier | 1.6 | How many more enemies the Fleet Pilgrimage sends (host). |
 | PvP | StartDistance | 3600 | How far apart the PvP ships start (m). |
+| PvP | Arena | auto | Where Fleet Battle is fought: auto, Dz-A, Or-A, Oz-B, Defiance or off (host). |
 | PvP | PunchKey | V | The punch key (Fire with empty hands also punches). |
 | PvP | HackTerminalCost | 10 | The hacking terminal's fabricator price in alloys (host). |
 | Diagnostics | VerboseLogging | false | More detail in the BepInEx log. |

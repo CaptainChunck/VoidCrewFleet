@@ -1,6 +1,23 @@
 # Changelog
 
 ## 0.2.0
+- **Teams are picked in the lobby.**
+  - When the host picks FLEET BATTLE, the team screen opens for everyone. Team badges show above players' heads.
+  - At the loadout terminal, the BLUE and RED ships are in team colours and only a ship's own team can change it.
+  - The host starts the match by sitting in the ready room, and everyone spawns on their team's ship.
+- **FleetApi** for other plugins: Ship Customizer 0.5.0 uses it to make the other team's CUSTOM view-only.
+- **A real arena:**
+  - Fleet Battle is fought in one of the game's asteroid fields, with rocks for cover;
+  - mirrored salvage on both sides (containers, a wreck, an asteroid base, a VoidFish);
+  - an alloy supply drop every 5 minutes;
+  - no enemy NPCs.
+- **B.R.A.I.N. auto-turrets against the enemy ship:**
+  - they aim at its hull and lead its real movement;
+  - they only fire while on target (they used to keep firing into space at the edge of their arc);
+  - the enemy's modules and shields no longer count as cover;
+  - a visible ship always beats an enemy player in space.
+- **Shields fixed with two ships:** each ship's shield segments were left at the world origin (80 m away in co-op,
+  1.8 km in PvP). They now sit on their ship.
 - **Airlock Hacking Terminal replaces the breaching charge.** Plug it into the control panel outside an enemy airlock.
   After a one-minute hack, your team can use that ship's doors for five minutes (not the cockpit's). Countdowns show on
   screen, and the defenders can pull it out while it hacks.
