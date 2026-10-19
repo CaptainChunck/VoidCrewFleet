@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.3.1
+Fixes from a full code review. Everyone in a room needs 0.3.1: the network protocol changed, and the game now tells a
+player with another version which one the room needs.
+
+**Rooms and missions**
+- TWO SHIPS is off in a new room (the host's last choice is remembered). Before, every room planned two ships, so
+  ordinary missions gave no progression.
+- Activating FLEET BATTLE again no longer reopens confirmed teams for everyone.
+- Choosing the saved run ends a fleet mission choice.
+- Clients show the host's ready-room countdown in Fleet Battle.
+- A mission falls back to one ship when a game update broke a patch two ships need.
+- A player who had hosted an earlier room no longer brings its crews along when they become host.
+
+**Progression and saves**
+- Daily and weekly quests finished in a mission without progression are no longer used up for nothing.
+- Quest and achievement tracking stays off there.
+- The pause holds until the hub, even if players leave.
+- Fleet runs aren't autosaved: a saved fleet run came back as a one-ship run that earned progression.
+
+**Co-op with two ships**
+- A lost ship's crew is re-cloned aboard the other ship without being left on a black screen with no HUD.
+- The HUD's hull, power and breakers, the target locks and the markers follow the ship you're on.
+- Sector twists and hazards (ship modifiers, scorching pulses, module disablers, interference, black holes) act on
+  every ship alike, not on whichever ship each player was on.
+- Ship 2 without a homunculus of its own no longer takes ship 1's loadout homunculus.
+- After the host leaves, the new host no longer spawns fewer Fleet Pilgrimage enemies.
+
+**Fleet Battle**
+- The lobby screen:
+  - blocks the game's controls behind it;
+  - its team lists scroll;
+  - LEAVE asks to be pressed again;
+  - it has HIDE / CLOSE, and the host's CHANGE MISSION;
+  - TEAMS & RULES shows the teams and rules to non-hosts;
+  - it steps aside for the game's own menus and the Steam Deck cursor.
+- A player who joins the hub after the teams are confirmed gets a team.
+- Match result:
+  - A team that empties after the host leaves still forfeits.
+  - When both ships die, the first loss decides, with one result for everyone.
+- Shots:
+  - Shots on an enemy shield do the same damage whoever fires them, with the target-lock bonus.
+  - A piercing round stops at the enemy shield or hull.
+- Fire no longer punches while you're using a button, lever, panel or item.
+- Auto-turret shots hit players by chance, more often up close. Two turrets no longer knock a boarder out in about a
+  second.
+- Hacking and sabotage:
+  - A hack or a sabotage can no longer be lost when two happen at once.
+  - The hacking terminal finds an airlock's outside, and puts enemies out of a cockpit, more reliably.
+  - An airlock already being hacked says so.
+- Boarding:
+  - The superior grappling hook can't take the enemy ship's items.
+  - The enemy's central computer power switch (the whole ship's power) is off-limits.
+  - Warnings say why something is off-limits.
+- Performance: proximity voice, carrying a hacking terminal and the countdowns do far less work every frame.
+- The ship rules tab redraws at once, and non-hosts can't press its controls.
+
 ## 0.3.0
 - **Fleet Battle ship rules.** The lobby screen has a SHIP RULES tab where the host decides what a CUSTOM loadout
   (Ship Customizer) may use in the match:

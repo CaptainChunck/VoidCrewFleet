@@ -12,8 +12,9 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
 ### Two ships, 16 players
 - Rooms hold up to 16 players (the game's own limit is 6). Players are split evenly between the ships, each ship with
   its own clone tubes.
-- The hub's **ship loadout terminal** gets a **FLEET** panel. Use it to turn **TWO SHIPS** on, and to choose
-  **SHIP 1** and **SHIP 2**, each with its own ship and loadout.
+- The hub's **ship loadout terminal** gets a **FLEET** panel. Use it to turn **TWO SHIPS** on (it's off in a new
+  room, and your last choice is remembered), and to choose **SHIP 1** and **SHIP 2**, each with its own ship and
+  loadout.
 - The two ships start side by side, both fly freely, and they void-jump together.
 - **Each ship is its own ship.** It has its own:
   - fabricator alloys and biomass;
@@ -43,7 +44,16 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
   3. At the loadout terminal the FLEET panel shows the **BLUE SHIP** (ship 1) and **RED SHIP** (ship 2) in team colours.
      Only a ship's own team can change its loadout, Ship Customizer's CUSTOM included.
   4. The host starts the match by **sitting in a ready-room seat**, and everyone spawns aboard their team's ship.
-  The host can reopen the lobby screen with TEAMS & RULES on the FLEET panel; the current teams are kept.
+
+  On the lobby screen:
+  - HIDE puts it away for you; TEAMS & RULES on the FLEET panel brings it back.
+  - The host's CHANGE MISSION backs out of FLEET BATTLE.
+  - LEAVE asks to be pressed again.
+
+  After the teams are confirmed:
+  - TEAMS & RULES lets the host reopen team picking (the current teams are kept), and shows the teams and rules to
+    everyone else.
+  - A player who joins later goes to the smaller team.
 - **Ship rules** (with Ship Customizer 0.7.0 or newer): the lobby screen's SHIP RULES tab is where the host decides
   what a CUSTOM loadout may use in the match:
   - the allowed MK tiers (the fabricator may start at the highest one);
@@ -64,15 +74,19 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
 - **The ships can damage each other.** Destroy the enemy ship to win, and a team with no players left forfeits.
 - **Boarding:**
   - Enemy players can come aboard through an airlock its crew left open, or one their team hacked (below).
-  - Aboard the enemy ship you can always use its **System Enhancement panels** and its systems' **power switches**.
-    Finishing a panel's minigame shuts that system down for **120 seconds**, and a power switch turns a turret, shield or
-    any other system off.
-  - You can never use its helm, turrets, seats or terminals, enter its **cockpit**, or take its **homunculus**.
-- **Fighting aboard:** punch enemy players with **V**, or with **Fire** when your hands are empty. Five punches knock
-  one out, and it aims where you look, VR included.
-- **Turrets:** B.R.A.I.N. auto-turrets track the enemy ship properly: they aim at its hull and lead its real movement,
-  and hold fire when it's out of their arc. Point defenses and auto-turrets also shoot enemy players floating in open
-  space near the ship, but a visible enemy ship always comes first.
+  - Aboard the enemy ship you can always use its **System Enhancement panels** and its systems' **power switches**
+    (except the central computer's, which is the whole ship's power). Finishing a panel's minigame shuts that system
+    down for **120 seconds**, and a power switch turns a turret, shield or any other system off.
+  - You can never use its helm, turrets, seats or terminals, enter its **cockpit**, or take its items or its
+    **homunculus**, not even with the superior grappling hook. A warning tells you why something is off-limits.
+- **Fighting aboard:** punch enemy players with **V**, or with **Fire** when your hands are empty and you aren't using
+  something. Five punches knock one out, and it aims where you look, VR included.
+- **Turrets:** B.R.A.I.N. auto-turrets track the enemy ship properly:
+  - they aim at its hull and lead its real movement;
+  - they hold fire when it's out of their arc.
+
+  Point defenses and auto-turrets also shoot enemy players floating in open space near the ship, but a visible enemy
+  ship always comes first. An auto-turret's shots hit a player by chance, more often up close.
 - **Proximity voice** is forced on. You hear players on the same ship, or within 50 m in open space.
 - **Airlock Hacking Terminal:** a new fabricator item on the Resources tab, made from the Data Shard's model.
   1. Print it and carry it to the **control panel outside an enemy airlock**.
@@ -85,7 +99,8 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
 ## Installation
 1. Install **BepInEx 5** for Void Crew, with a Thunderstore mod manager (BepInExPack) or by hand.
 2. Put `VoidCrewFleet.dll` in `BepInEx\plugins`. With a mod manager, install the zip from the release.
-3. Everyone who plays in your Fleet rooms needs the same version.
+3. Everyone in your Fleet rooms needs a compatible version. If not, the game sends a player back with its "missing
+   mods" message, which names the version the room needs.
 
 ## Settings (`BepInEx\config\com.captainchunck.voidcrew.fleet.cfg`)
 
@@ -93,6 +108,7 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
 |---|---|---|---|
 | General | Enabled | true | Turn the mod off without removing it. |
 | Lobby | MaxPlayers | 16 | Room size for rooms you host (4–16). |
+| Lobby | TwoShips | false | Whether rooms you host start with TWO SHIPS on (follows the FLEET panel). |
 | Two ships | ShipSpacing | 160 | Distance between the two ships at the start and after a jump (m). |
 | Fleet Pilgrimage | EnemyMultiplier | 1.6 | How many more enemies the Fleet Pilgrimage sends (host). |
 | PvP | StartDistance | 3600 | How far apart the PvP ships start (m). |
@@ -105,7 +121,10 @@ each other in **Fleet Battle**, a crew-versus-crew PvP mode.
 
 ## Progression
 Two-ship missions, PvP and rooms of more than 6 players **give no XP, rewards or achievements**, as Void Crew's modding
-rules ask for mods that change the game.
+rules ask for mods that change the game:
+- Daily and weekly quests aren't used up there; they stay open for a normal mission.
+- A mission that starts like that stays so even if players leave.
+- Fleet runs aren't saved, because the game's save holds only one ship.
 
 ## Compatibility
 - **[Ship Customizer](https://github.com/CaptainChunck/VoidCrewShipCustomizer)** (optional):
@@ -118,9 +137,13 @@ rules ask for mods that change the game.
 - Neither is required.
 
 ## Status
-This is an early release. A host alone has tested co-op two ships, the Fleet Pilgrimage, Ship Customizer's CUSTOM
-ship 2, and the PvP setup: teams, factions, airlock forcing and venting. The PvP features that need two real players
-haven't been played yet:
+This is an early release. A host alone has tested:
+- co-op with two ships;
+- the Fleet Pilgrimage;
+- Ship Customizer's CUSTOM ship 2;
+- the PvP setup: teams, ship rules, factions, airlock forcing and venting.
+
+The PvP features that need two real players haven't been played yet:
 - punching;
 - turrets shooting players;
 - boarding;
