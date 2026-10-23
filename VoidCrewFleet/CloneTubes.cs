@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -8,6 +9,7 @@ using CG.Ship.Modules;
 using CG.Space;
 using HarmonyLib;
 using Photon.Pun;
+using UnityEngine;
 
 namespace VoidCrewFleet
 {
@@ -19,7 +21,8 @@ namespace VoidCrewFleet
     /// game's own numbers). The game's spawn messages carry that code, and the game's lookups of a tube by index find the
     /// tube with that code, so a ship lost from the middle of the list doesn't renumber the others. The host then gives
     /// each player a tube on their own ship, the one they were given, and no other (in PvP nobody spawns before the teams
-    /// are confirmed; a player whose ship was lost doesn't spawn at all).
+    /// are confirmed; a player whose ship was lost doesn't spawn at all). These rules hold for the whole of a fleet mission,
+    /// also once only one of its ships is left.
     /// </summary>
     internal static class CloneTubes
     {
@@ -44,6 +47,15 @@ namespace VoidCrewFleet
 
         /// <summary>When set (PvP before the teams are confirmed), the host holds every spawn request in the queue.</summary>
         public static Func<bool> HoldSpawns;
+
+        /// <summary>
+        /// A fleet mission whose ships the host has spawned and published: every player spawns on their own ship only, however
+        /// many of its ships are left. (Should spawning the fleet have failed before that, spawning stays the game's own.)
+        /// </summary>
+        private static bool FleetMission
+        {
+            get { return FleetSession.ShipCount > 1 && FleetShips.PublishedCount > 1; }
+        }
 
         // ---------------------------------------------------------------- one list for all ships
 
@@ -77,7 +89,7 @@ namespace VoidCrewFleet
                 if (cts == null || cts.Count == 0 || cts[0] == null) return true;
                 CloneTubeModule module = cts[0].GetComponentInParent<CloneTubeModule>();
                 PlayerControlledShip ship = FleetShips.OwnerOf(cts[0]);
-                Registered.RemoveAll(r => r.Module == null || (module != null && r.Module == module) || r.Tubes == cts);
+                Registered.RemoveAll(r => r.Module == null || (module != null && r.Module == module));
                 Registered.Add(new ShipTubes { Ship = ship, ShipView = FleetShips.ViewId(ship), Module = module, Tubes = new List<CloneTube>(cts) });
                 ___clonetubes = Rebuild();
                 return false;
@@ -170,7 +182,11 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>The game's "tube number index" lookups: the tube with that code, else (the game's own meaning) its place in the list.</summary>
+        /// <summary>
+        /// The game's "tube number index" lookups: the tube with that code. Outside fleet missions also (the game's own
+        /// meaning) the tube at that place in the list; in a fleet mission a place in the list can be another ship's tube, so
+        /// a code this client doesn't know finds none.
+        /// </summary>
         public static CloneTube TubeAt(List<CloneTube> list, int index)
         {
             if (list == null) return null;
@@ -178,6 +194,7 @@ namespace VoidCrewFleet
             {
                 if (tube != null && tube.Index == index) return tube;
             }
+            if (FleetMission) return null;
             return index >= 0 && index < list.Count ? list[index] : null;
         }
 
@@ -228,11 +245,59 @@ namespace VoidCrewFleet
             return own != null && !own.StartedDeath ? own : null;
         }
 
+        /// <summary>The living ship with the lowest number, or null.</summary>
+        private static PlayerControlledShip FirstLivingShip()
+        {
+            List<int> alive = FleetShips.AliveSlots();
+            return alive.Count > 0 ? FleetShips.BySlot(alive[0]) : null;
+        }
+
+        /// <summary>
+        /// Host, a spawn request in a fleet mission. While the game handles it, "the player ship" is the player's own ship. A
+        /// player without one to spawn on (not placed yet, waiting for a seat, or DEAD) gets the living ship with the lowest
+        /// number instead, only so the game queues their request rather than dropping it (it drops one when "the player ship"
+        /// is gone or dying, which was whatever ship the host was on); the tube choice still gives them none.
+        /// </summary>
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "TrySpawnPlayer", PatchKind.Prefix)]
         private static void TrySpawnPrefix(Photon.Realtime.Player player)
         {
             _spawning = player;
-            ShipRedirect.BeginOverride(FleetShips.Active ? SpawnShipFor(player) : null);
+            PlayerControlledShip ship = null;
+            try
+            {
+                if (FleetMission)
+                {
+                    ReleaseTubesOf(player);
+                    ship = SpawnShipFor(player);
+                    if (ship == null) ship = FirstLivingShip();
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Reading a spawn request", e);
+            }
+            ShipRedirect.BeginOverride(ship);
+        }
+
+        /// <summary>
+        /// Host: a player asking for a tube is in none, so a tube still closed on their character lets go of it. The host
+        /// closes a tube on a player when it sends them there; when their client doesn't know that tube it refuses and asks
+        /// again (RespawnPrefix), and without this the tube would stay closed on nobody for the rest of the mission.
+        /// </summary>
+        private static void ReleaseTubesOf(Photon.Realtime.Player player)
+        {
+            Player character = player != null ? FleetShips.CharacterOf(player.ActorNumber) : null;
+            if (character == null) return;
+            foreach (ShipTubes entry in Registered)
+            {
+                foreach (CloneTube tube in entry.Tubes)
+                {
+                    if (tube == null || tube.GetOccupant() != character || tube.photonView == null || !tube.photonView.AmController) continue;
+                    tube.ReleaseOccupant();
+                    tube.ChangeState(tube.StateOpenAvailable);
+                    Log.Info("Clone tube " + tube.Index + " was still closed on " + player.NickName + ", who never reached it; it is free again.");
+                }
+            }
         }
 
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "TrySpawnPlayer", PatchKind.Finalizer)]
@@ -250,7 +315,7 @@ namespace VoidCrewFleet
             {
                 if (___playersQueuedToSpawn != null && ___playersQueuedToSpawn.Count > 0)
                 {
-                    if (FleetShips.Active && ___playersQueuedToSpawn.Count > 1 && !(HoldSpawns != null && HoldSpawns())) FrontLoad(___playersQueuedToSpawn);
+                    if (FleetMission && ___playersQueuedToSpawn.Count > 1 && !(HoldSpawns != null && HoldSpawns())) FrontLoad(___playersQueuedToSpawn);
                     _spawning = ___playersQueuedToSpawn.Peek();
                 }
             }
@@ -258,12 +323,13 @@ namespace VoidCrewFleet
             {
                 Log.Failure("Reading the spawn queue", e);
             }
-            ShipRedirect.BeginOverride(FleetShips.Active && _spawning != null ? SpawnShipFor(_spawning) : null);
+            ShipRedirect.BeginOverride(FleetMission && _spawning != null ? SpawnShipFor(_spawning) : null);
         }
 
         /// <summary>
-        /// The game only looks at the first player in its spawn queue. With two ships, a player waiting for a tube on a
-        /// busy ship would hold up everyone of the other ship, so the first player who can spawn right now goes first.
+        /// The game only looks at the first player in its spawn queue. In a fleet mission a player waiting for a tube on a
+        /// busy ship would hold up everyone of the other ships, and a spectator (who stays queued, never spawned) would hold
+        /// up everyone, so the first player who can spawn right now goes first.
         /// </summary>
         private static void FrontLoad(Queue<Photon.Realtime.Player> queue)
         {
@@ -289,7 +355,7 @@ namespace VoidCrewFleet
             _spawning = null;
         }
 
-        /// <summary>A free tube on the spawning player's ship (or none, which queues them).</summary>
+        /// <summary>A free tube on the spawning player's ship (or none, which queues them; a spectator always gets none).</summary>
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "GetNextFreeCloneTube", PatchKind.Prefix)]
         private static bool NextFreeTubePrefix(ref CloneTube __result)
         {
@@ -300,7 +366,7 @@ namespace VoidCrewFleet
                     __result = null;
                     return false;
                 }
-                if (!FleetShips.Active || _spawning == null) return true;
+                if (!FleetMission || _spawning == null) return true;
                 PlayerControlledShip ship = SpawnShipFor(_spawning);
                 __result = ship == null ? null : TubesOf(ship).FirstOrDefault(t => t.IsAvailable());
                 return false;
@@ -316,7 +382,7 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "SpawnPlayer", PatchKind.Prefix)]
         private static void SpawnPlayerPrefix(CloneTube tube)
         {
-            ShipRedirect.BeginOverride(FleetShips.Active && tube != null ? FleetShips.OwnerOf(tube) : null);
+            ShipRedirect.BeginOverride(FleetMission && tube != null ? FleetShips.OwnerOf(tube) : null);
         }
 
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "SpawnPlayer", PatchKind.Finalizer)]
@@ -325,15 +391,28 @@ namespace VoidCrewFleet
             ShipRedirect.EndOverride();
         }
 
-        /// <summary>A respawn message names a tube by its code; refuse codes this client doesn't know (its ship may be gone here).</summary>
+        /// <summary>
+        /// A respawn message names a tube by its code; refuse codes this client doesn't know (its ship may be gone here, or
+        /// its number not known yet) and ask again a moment later. Asking again also frees that tube on the host
+        /// (ReleaseTubesOf), which closed it on this player when it sent them there.
+        /// </summary>
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "RespawnPlayer", PatchKind.Prefix)]
         private static bool RespawnPrefix(int clonetubeIndex, List<CloneTube> ___clonetubes)
         {
             if (TubeAt(___clonetubes, clonetubeIndex) != null) return true;
             Log.Warn("The host sent clone tube " + clonetubeIndex + " but this client knows " + (___clonetubes != null ? ___clonetubes.Count : 0) +
                      " tubes and none with that number; asking to spawn again.");
-            if (SpawnSystem.Instance != null) SpawnSystem.Instance.RequestSpawn();
+            if (FleetRuntime.Instance != null) FleetRuntime.Instance.StartCoroutine(RequestSpawnLater());
+            else if (SpawnSystem.Instance != null) SpawnSystem.Instance.RequestSpawn();
             return false;
+        }
+
+        /// <summary>Asks the host for a tube again after a second, unless this player has been re-cloned meanwhile.</summary>
+        private static IEnumerator RequestSpawnLater()
+        {
+            yield return new WaitForSeconds(1f);
+            LocalPlayer me = LocalPlayer.Instance;
+            if (SpawnSystem.Instance != null && me != null && PlayerLife.IsDead(me)) SpawnSystem.Instance.RequestSpawn();
         }
     }
 }

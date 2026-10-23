@@ -21,10 +21,20 @@ namespace VoidCrewFleet
         private static object _lostIn;
         private static Button _button;
 
-        /// <summary>Every client: a ship of this mission was lost (a host who takes over later knows it too).</summary>
+        /// <summary>Every client: a ship of this mission was lost (a player who takes over as host later knows it too).</summary>
         public static void OnShipLost(PlayerControlledShip ship)
         {
             _lostIn = GameSessionManager.ActiveSession;
+        }
+
+        /// <summary>
+        /// A ship of this mission is lost: this client saw one start dying, or the ships the host published at the start
+        /// include one that is gone or dying (for a host who joined after the loss).
+        /// </summary>
+        private static bool ShipLostThisMission()
+        {
+            if (_lostIn != null && ReferenceEquals(_lostIn, GameSessionManager.ActiveSession)) return true;
+            return FleetShips.PublishedShipLost();
         }
 
         /// <summary>Host: the fleet carries on after a loss; say what the host can do.</summary>
@@ -43,7 +53,7 @@ namespace VoidCrewFleet
                 try
                 {
                     if (!PhotonNetwork.IsMasterClient || GameSessionManager.InHub || FleetSession.ShipCount < 2) return false;
-                    if (_lostIn == null || !ReferenceEquals(_lostIn, GameSessionManager.ActiveSession)) return false;
+                    if (!ShipLostThisMission()) return false;
                     ClientGame game = ClientGame.Current;
                     return game != null && game.GameState != ClientGameState.Ended;
                 }
