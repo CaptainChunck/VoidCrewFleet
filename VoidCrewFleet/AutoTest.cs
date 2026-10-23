@@ -783,10 +783,15 @@ namespace VoidCrewFleet
                 VoidDriveModule drive = ship.GetModule<VoidDriveModule>();
                 if (drive != null) drive.JumpCharge = 1f;
             }
-            Log.Info("[autotest] Pulling " + FleetShips.Describe(last) + "'s lever with every drive charged: it should lead.");
+            int leadBefore = VoidJumpLink.LeaderSlot;
+            Log.Info("[autotest] Pulling " + FleetShips.Describe(last) + "'s lever with every drive charged: it leads only if the game starts the jump " +
+                     "(escape vector, power and a powered helm), otherwise the lead stays.");
             lastDrive.TryStartImpulseJump();
             yield return new WaitForSeconds(2f);
-            Log.Info("[autotest] Lead ship now " + (VoidJumpLink.LeaderSlot + 1) + " (expected " + (FleetShips.Slot(last) + 1) + ").");
+            VoidJumpSystem pulled = last.GetComponentInChildren<VoidJumpSystem>();
+            bool started = pulled != null && pulled.ActiveState != null && !(pulled.ActiveState is VoidJumpInactive) && !(pulled.ActiveState is VoidJumpExitVectorSet);
+            Log.Info("[autotest] Lead ship now " + (VoidJumpLink.LeaderSlot + 1) + " (expected " + ((started ? FleetShips.Slot(last) : leadBefore) + 1) + ": the jump " +
+                     (started ? "started" : "didn't start") + ").");
             Report("lever");
             PlayerControlledShip lead = FleetShips.BySlot(VoidJumpLink.LeaderSlot);
             VoidJumpSystem system = lead != null ? lead.GetComponentInChildren<VoidJumpSystem>() : null;
@@ -829,13 +834,21 @@ namespace VoidCrewFleet
                             ", ships registered " + FleetShips.All.Count + ", active " + FleetShips.Active);
             foreach (PlayerControlledShip ship in FleetShips.All)
             {
-                VoidJumpSystem system = ship.GetComponentInChildren<VoidJumpSystem>();
-                CloneTubeModule tubes = ship.GetModule<CloneTubeModule>();
-                text.AppendLine("  " + FleetShips.Describe(ship) + ": view " + FleetShips.ViewId(ship) + ", pos " + ship.Platform.Position + ", sector " +
-                                (ship.Sector != null ? ship.Sector.Id.ToString() : "none") + ", jump " + (system != null && system.ActiveState != null ? system.ActiveState.GetType().Name : "?") +
-                                ", hp " + ship.HitPoints.ToString("0") + ", clone tubes " + (tubes != null ? string.Join(",", tubes.CloneTubes.Select(t => t.Index.ToString()).ToArray()) : "none") +
-                                ", crew " + FleetShips.CrewCount(FleetShips.Slot(ship)) + ", team " + FleetShips.TeamOfSlot(FleetShips.Slot(ship)) + ", faction " + ship.faction +
-                                (ship.StartedDeath ? ", DYING" : ""));
+                // The hub's ship has no platform or modules to report: one ship that can't be described doesn't end the report.
+                try
+                {
+                    VoidJumpSystem system = ship.GetComponentInChildren<VoidJumpSystem>();
+                    CloneTubeModule tubes = ship.GetModule<CloneTubeModule>();
+                    text.AppendLine("  " + FleetShips.Describe(ship) + ": view " + FleetShips.ViewId(ship) + ", pos " + ship.Platform.Position + ", sector " +
+                                    (ship.Sector != null ? ship.Sector.Id.ToString() : "none") + ", jump " + (system != null && system.ActiveState != null ? system.ActiveState.GetType().Name : "?") +
+                                    ", hp " + ship.HitPoints.ToString("0") + ", clone tubes " + (tubes != null ? string.Join(",", tubes.CloneTubes.Select(t => t.Index.ToString()).ToArray()) : "none") +
+                                    ", crew " + FleetShips.CrewCount(FleetShips.Slot(ship)) + ", team " + FleetShips.TeamOfSlot(FleetShips.Slot(ship)) + ", faction " + ship.faction +
+                                    (ship.StartedDeath ? ", DYING" : ""));
+                }
+                catch (Exception e)
+                {
+                    text.AppendLine("  " + FleetShips.Describe(ship) + ": can't be described here (" + e.GetType().Name + ")");
+                }
             }
             text.AppendLine("  crews: " + string.Join(", ", FleetShips.Crews().Values.Select(e => e.ToString()).ToArray()) + "; lead ship " + (VoidJumpLink.LeaderSlot + 1) +
                             "; roster: " + string.Join(", ", (PvpRoster.Seats() ?? new System.Collections.Generic.List<RosterSeat>()).Select(r => r.ToString()).ToArray()));
