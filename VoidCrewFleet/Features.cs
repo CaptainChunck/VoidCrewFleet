@@ -54,6 +54,8 @@ namespace VoidCrewFleet
             ShipDeath.ShipLost += ShipResources.OnShipLost;
             ShipDeath.ShipLost += Spectator.OnShipLost;
             ShipDeath.ShipLost += FleetReturn.OnShipLost;
+            ShipDeath.ShipLost += ShipMarkers.OnShipLost;
+            ShipDeath.ShipLost += CloneTubeScreen.OnShipLost;
             CloneTubes.HoldSpawns = () => PvpTeams.Choosing;
             FleetRuntime.Slow += HackTerminal.EnsureRegistered;
             FleetRuntime.Slow += HubFleet.Poll;
