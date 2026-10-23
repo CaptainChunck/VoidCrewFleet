@@ -27,13 +27,27 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "CG.Space.PlayerControlledShip", "Awake", PatchKind.Postfix)]
         private static void ShipAwakePostfix(PlayerControlledShip __instance)
         {
-            FleetShips.Register(__instance);
+            try
+            {
+                FleetShips.Register(__instance);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Registering a player ship", e);
+            }
         }
 
         [GamePatch(Feature, "CG.Space.PlayerControlledShip", "OnDestroy", PatchKind.Prefix)]
         private static void ShipDestroyPrefix(PlayerControlledShip __instance)
         {
-            FleetShips.Unregister(__instance);
+            try
+            {
+                FleetShips.Unregister(__instance);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Unregistering a player ship", e);
+            }
         }
 
         // ---------------------------------------------------------------- one physics scene per ship
@@ -61,7 +75,14 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "Gameplay.SpacePlatforms.MovingSpacePlatform", "SetUpSimulationScene", PatchKind.Postfix)]
         private static void SimulationScenePostfix(MovingSpacePlatform __instance, string __state)
         {
-            if (__state != null && __instance != null) __instance.gameObject.name = __state;
+            try
+            {
+                if (__state != null && __instance != null) __instance.gameObject.name = __state;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Naming a ship's physics scene", e);
+            }
         }
 
         // ---------------------------------------------------------------- spawning
@@ -144,16 +165,25 @@ namespace VoidCrewFleet
         private static void LoadShipPostfix(GameSession __instance, PlayerControlledShip __result)
         {
             _spawningShipA = false;
-            if (!PhotonNetwork.IsMasterClient) return;
-            FleetPlan plan = FleetSession.Current;
-            if (plan == null || plan.Mode == FleetMode.OneShip || plan.ShipCount < 2)
+            FleetPlan plan;
+            try
             {
-                FleetShips.ClearRoom();
-                return;
+                if (!PhotonNetwork.IsMasterClient) return;
+                plan = FleetSession.Current;
+                if (plan == null || plan.Mode == FleetMode.OneShip || plan.ShipCount < 2)
+                {
+                    FleetShips.ClearRoom();
+                    return;
+                }
+                if (__result == null)
+                {
+                    Log.Warn("Ship 1 did not spawn, so the other ships are not spawned either.");
+                    return;
+                }
             }
-            if (__result == null)
+            catch (Exception e)
             {
-                Log.Warn("Ship 1 did not spawn, so the other ships are not spawned either.");
+                Log.Failure("Reading the fleet plan", e);
                 return;
             }
             try

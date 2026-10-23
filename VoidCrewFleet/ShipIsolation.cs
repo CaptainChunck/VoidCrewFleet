@@ -1,8 +1,14 @@
 using System;
+using System.Collections.Generic;
+using System.Reflection;
+using System.Reflection.Emit;
 using CG.Client.Ship.Hull;
+using CG.Ship;
 using CG.Ship.Tracking;
 using CG.Space;
 using Gameplay.Power;
+using HarmonyLib;
+using UnityEngine;
 
 namespace VoidCrewFleet
 {
@@ -11,7 +17,8 @@ namespace VoidCrewFleet
     /// come from; here the code raising them says which ship it is (ShipEvents), and each ship's own listeners ignore the
     /// other ship's events:
     /// - a power breaker tripping, and enemies starting to track the ship, flash only that ship's lights;
-    /// - a ship's "danger" state (enemies around it) is worked out for that ship, and only its own lights follow it.
+    /// - a ship's "danger" state (enemies around it) is worked out for that ship (for every ship in one pass a frame), and
+    ///   only its own lights follow it.
     /// </summary>
     internal static class ShipIsolation
     {
@@ -59,6 +66,104 @@ namespace VoidCrewFleet
             ShipRedirect.EndOverride();
         }
 
+        private static readonly MethodInfo CombatFeedbackMethod = GameMember.Method(typeof(PlayerShipUtils), "AnyShipShouldTriggerCombatFeedback");
+        private static readonly MethodInfo InDangerMethod = new Func<PlayerControlledShip, bool>(InDanger).Method;
+
+        /// <summary>This frame's danger of every ship (InDanger): the ships, and whether a hostile ship is after each.</summary>
+        private static readonly List<PlayerControlledShip> DangerShips = new List<PlayerControlledShip>();
+
+        private static readonly List<bool> DangerFlags = new List<bool>();
+        private static int _dangerFrame = -1;
+        private static bool _dangerKnown;
+
+        /// <summary>
+        /// The danger check goes over every object in the sector, for each ship every frame (with six ships, six passes that
+        /// each read "the player ship" twice per object). One pass a frame answers it for every ship instead (InDanger).
+        /// </summary>
+        [GamePatch(Feature, "CG.Space.PlayerControlledShip", "UpdateDangerState", PatchKind.Transpiler, Optional = true)]
+        private static IEnumerable<CodeInstruction> DangerStateTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
+        {
+            int replaced = 0;
+            foreach (CodeInstruction instruction in instructions)
+            {
+                if (CombatFeedbackMethod != null && instruction.opcode == OpCodes.Call && Equals(instruction.operand, CombatFeedbackMethod))
+                {
+                    // Stack: [] -> [this] -> InDanger -> [bool].
+                    var self = new CodeInstruction(OpCodes.Ldarg_0);
+                    self.labels.AddRange(instruction.labels);
+                    self.blocks.AddRange(instruction.blocks);
+                    yield return self;
+                    yield return new CodeInstruction(OpCodes.Call, InDangerMethod);
+                    replaced++;
+                    continue;
+                }
+                yield return instruction;
+            }
+            if (replaced == 0) Log.Warn("Ships kept apart: " + original.DeclaringType.FullName + "." + original.Name + " no longer checks for hostile ships; the game may have changed.");
+        }
+
+        /// <summary>
+        /// Put in by the transpiler: whether a hostile ship that warns its target (the game's combat feedback) is after this
+        /// ship, as the game's own check answers it, worked out for every ship in one pass over the sector's objects, once a
+        /// frame. With one ship (or a ship that came after this frame's pass) it is the game's own check.
+        /// </summary>
+        public static bool InDanger(PlayerControlledShip ship)
+        {
+            if (FleetShips.Active)
+            {
+                int frame = Time.frameCount;
+                if (frame != _dangerFrame)
+                {
+                    _dangerFrame = frame;
+                    _dangerKnown = FindDanger();
+                }
+                if (_dangerKnown)
+                {
+                    for (int i = 0; i < DangerShips.Count; i++)
+                    {
+                        if (ReferenceEquals(DangerShips[i], ship)) return DangerFlags[i];
+                    }
+                }
+            }
+            return PlayerShipUtils.AnyShipShouldTriggerCombatFeedback();
+        }
+
+        /// <summary>
+        /// The game's check for every ship at once: an object in the sector that isn't the ship itself, is a spacecraft with
+        /// warning feedback and is hostile to the ship. False when it failed (each ship then asks the game itself).
+        /// </summary>
+        private static bool FindDanger()
+        {
+            DangerShips.Clear();
+            DangerFlags.Clear();
+            try
+            {
+                List<PlayerControlledShip> ships = FleetShips.All;
+                for (int i = 0; i < ships.Count; i++)
+                {
+                    DangerShips.Add(ships[i]);
+                    DangerFlags.Add(false);
+                }
+                List<OrbitObject> objects = GameSessionManager.ActiveOrbitObjects;
+                for (int o = 0; o < objects.Count; o++)
+                {
+                    OrbitObject thing = objects[o];
+                    var craft = thing as SpaceCraft;
+                    if (ReferenceEquals(craft, null) || (craft.AggroFeedback & SpaceCraft.AggroFeedbackType.Warning) == 0) continue;
+                    for (int i = 0; i < DangerShips.Count; i++)
+                    {
+                        if (!DangerFlags[i] && thing != DangerShips[i] && craft.IsHostile(DangerShips[i])) DangerFlags[i] = true;
+                    }
+                }
+                return true;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking which ships hostile ships are after", e);
+                return false;
+            }
+        }
+
         // ---------------------------------------------------------------- each ship's own homunculus
 
         private static int _dispensingSlot = -1;
@@ -67,7 +172,15 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "CG.Ship.Hull.HomunculusAndBiomassSocket", "DispenseHomunculusNow", PatchKind.Prefix)]
         private static void DispensePrefix(UnityEngine.Component __instance)
         {
-            _dispensingSlot = FleetShips.Active ? FleetShips.Slot(FleetShips.OwnerOf(__instance)) : -1;
+            try
+            {
+                _dispensingSlot = FleetShips.Active ? FleetShips.Slot(FleetShips.OwnerOf(__instance)) : -1;
+            }
+            catch (Exception e)
+            {
+                _dispensingSlot = -1;
+                Log.Failure("Reading which ship dispenses a homunculus", e);
+            }
         }
 
         [GamePatch(Feature, "CG.Ship.Hull.HomunculusAndBiomassSocket", "DispenseHomunculusNow", PatchKind.Finalizer)]
@@ -80,15 +193,22 @@ namespace VoidCrewFleet
         private static void HomunculusPostfix(GameSession __instance, ref ResourceAssets.CarryableRef __result)
         {
             if (_dispensingSlot < 1) return;
-            FleetPlan plan = FleetSession.Current;
-            ShipPlan ship = plan != null ? plan.Ship(_dispensingSlot) : null;
-            if (ship == null) return;
-            // Ships 2-6: their own loadout's homunculus (a copy of ship 1 has ship 1's), else the mission's own override, else
-            // the default one. The session copies ship 1's loadout homunculus into its override, which isn't the mission's:
-            // another ship doesn't take that one.
-            if (!ship.Homunculus.IsNull) __result = new ResourceAssets.CarryableRef(ship.Homunculus);
-            else if (!__instance.HomunculusOverride.IsNull && !IsShipAHomunculus(__instance)) __result = new ResourceAssets.CarryableRef(__instance.HomunculusOverride);
-            else __result = DataTable<DefaultAssetTable>.Instance.DefaultHomunculus;
+            try
+            {
+                FleetPlan plan = FleetSession.Current;
+                ShipPlan ship = plan != null ? plan.Ship(_dispensingSlot) : null;
+                if (ship == null) return;
+                // Ships 2-6: their own loadout's homunculus (a copy of ship 1 has ship 1's), else the mission's own override, else
+                // the default one. The session copies ship 1's loadout homunculus into its override, which isn't the mission's:
+                // another ship doesn't take that one.
+                if (!ship.Homunculus.IsNull) __result = new ResourceAssets.CarryableRef(ship.Homunculus);
+                else if (!__instance.HomunculusOverride.IsNull && !IsShipAHomunculus(__instance)) __result = new ResourceAssets.CarryableRef(__instance.HomunculusOverride);
+                else __result = DataTable<DefaultAssetTable>.Instance.DefaultHomunculus;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Choosing a ship's homunculus", e);
+            }
         }
 
         private static bool IsShipAHomunculus(GameSession session)

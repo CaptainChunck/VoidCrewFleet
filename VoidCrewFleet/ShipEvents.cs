@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using CG.Space;
 using UnityEngine;
@@ -30,10 +31,19 @@ namespace VoidCrewFleet
             Stack.Add(ship);
         }
 
-        /// <summary>Begin with the ship that owns a component (a module, a system, a part of the ship).</summary>
+        /// <summary>Begin with the ship that owns a component (a module, a system, a part of the ship); always pushes one entry.</summary>
         public static void BeginFor(Component component)
         {
-            Stack.Add(FleetShips.Active && component != null ? FleetShips.OwnerOf(component) : null);
+            PlayerControlledShip ship = null;
+            try
+            {
+                if (FleetShips.Active && component != null) ship = FleetShips.OwnerOf(component);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Reading which ship an event comes from", e);
+            }
+            Stack.Add(ship);
         }
 
         public static void End()
