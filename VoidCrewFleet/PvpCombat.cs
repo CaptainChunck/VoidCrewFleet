@@ -28,7 +28,8 @@ namespace VoidCrewFleet
     /// - the ships' guns, missiles and point defence treat the other team's ships as enemies, and NPCs attack both teams; a
     ///   team's own ships can't hurt each other, as in co-op;
     /// - an enemy ship's shields stop shots (the game lets player shots through every player shield), and a shot on an
-    ///   enemy turret or module hits that ship's hull, the way NPC shots on a player ship do; a piercing round stops there;
+    ///   enemy turret or module hits that ship's hull, the way NPC shots on a player ship do; a piercing round stops at the
+    ///   first thing of the enemy ship it hits (its shield, a part or its hull), so it hits that ship once;
     /// - a shot on an enemy shield does the same whoever fires it (the host or another gunner), with the helm's
     ///   target-lock bonus when that ship is locked;
     /// - gunners who are not the host damage the enemy hull with module defects, as the host's own shots do;
@@ -55,10 +56,17 @@ namespace VoidCrewFleet
         private static float _shieldShotDamage;
         private static CompositeWeaponModule _shieldShotWeapon;
 
-        /// <summary>The shot whose latest hit this mod resolved on the enemy ship (its shield, or a part passed to its hull).</summary>
+        /// <summary>The shot whose latest hit was on the enemy ship (its shield, a part passed to its hull, or the hull).</summary>
         private static WeaponProjectile _stoppedShot;
 
-        private static float _nextFullWalk;
+        /// <summary>One ship's parts are walked again this often, in turn, for anything that came aboard since.</summary>
+        private const float RewalkSeconds = 5f;
+
+        /// <summary>The faction each ship's parts were last given (by the ship's instance ID).</summary>
+        private static readonly Dictionary<int, int> WalkedShips = new Dictionary<int, int>();
+
+        private static float _nextRewalk;
+        private static int _rewalkTurn;
         private static readonly HashSet<int> HostilityToldTo = new HashSet<int>();
         private static int _hostilityShips;
 
@@ -131,18 +139,37 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- factions, on every client
 
-        /// <summary>A few times a second: every ship part and every player has their team's faction.</summary>
+        /// <summary>
+        /// A few times a second: every player has their team's faction, and so does every ship part. A ship's parts are all
+        /// walked when the ship is first seen (and again if its faction is wrong); a module installed later gets it as it
+        /// goes in (ModuleInstalledPostfix) and a gun as it starts (WeaponStartPostfix). Every few seconds one ship, in
+        /// turn, is walked again for anything else that came aboard since (items, for one).
+        /// </summary>
         public static void KeepFactions()
         {
-            if (!Active) return;
-            bool full = Time.unscaledTime >= _nextFullWalk;
-            if (full) _nextFullWalk = Time.unscaledTime + 2f;
-            foreach (PlayerControlledShip ship in FleetShips.All)
+            if (!Active)
             {
+                if (WalkedShips.Count > 0) WalkedShips.Clear();
+                return;
+            }
+            IList<PlayerControlledShip> ships = FleetShips.All;
+            int again = -1;
+            if (Time.unscaledTime >= _nextRewalk && ships.Count > 0)
+            {
+                _nextRewalk = Time.unscaledTime + RewalkSeconds;
+                again = (_rewalkTurn++ & int.MaxValue) % ships.Count;
+            }
+            for (int i = 0; i < ships.Count; i++)
+            {
+                PlayerControlledShip ship = ships[i];
                 int slot = FleetShips.Slot(ship);
                 if (slot < 0) continue;
                 int faction = FactionOfSlot(slot);
-                if (full || ship.faction != faction) ApplyToShip(ship, faction);
+                int id = ship.GetInstanceID();
+                int walked;
+                if (i != again && ship.faction == faction && WalkedShips.TryGetValue(id, out walked) && walked == faction) continue;
+                ApplyToShip(ship, faction);
+                WalkedShips[id] = faction;
             }
             ClientGame game = ClientGame.Current;
             if (game == null || game.Players == null) return;
@@ -154,20 +181,48 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>
+        /// Every part of a ship: its own hierarchy, its hull's (which the game keeps apart from the ship) and any module
+        /// outside both; each part once.
+        /// </summary>
         private static void ApplyToShip(PlayerControlledShip ship, int faction)
         {
+            Transform root = ship.transform;
             int changed = Apply(ship.GetComponentsInChildren<OrbitObject>(true), faction);
             ShipHull hull = ship.Hull;
-            if (hull != null) changed += Apply(hull.GetComponentsInChildren<OrbitObject>(true), faction);
+            Transform hullRoot = hull != null ? hull.transform : null;
+            if (hullRoot != null && !hullRoot.IsChildOf(root)) changed += Apply(hull.GetComponentsInChildren<OrbitObject>(true), faction);
             List<CellModule> modules = ship.GetAllModules();
             if (modules != null)
             {
                 foreach (CellModule module in modules)
                 {
-                    if (module != null) changed += Apply(module.GetComponentsInChildren<OrbitObject>(true), faction);
+                    if (module == null) continue;
+                    Transform place = module.transform;
+                    if (place.IsChildOf(root) || (hullRoot != null && place.IsChildOf(hullRoot))) continue;
+                    changed += Apply(module.GetComponentsInChildren<OrbitObject>(true), faction);
                 }
             }
             if (changed > 0) Log.Verbose("PvP: " + changed + " parts of " + FleetShips.Describe(ship) + " are now faction " + faction + ".");
+        }
+
+        /// <summary>A module installed in a ship's socket (one built during the match, for one) takes that ship's team faction.</summary>
+        [GamePatch(Feature, "CG.Ship.Hull.BuildSocket", "SetModule", PatchKind.Postfix, Optional = true)]
+        private static void ModuleInstalledPostfix(BuildSocket __instance, CellModule module)
+        {
+            if (module == null || !Active) return;
+            try
+            {
+                int slot = FleetShips.Slot(FleetShips.OwnerOf(__instance));
+                if (slot < 0) return;
+                int faction = FactionOfSlot(slot);
+                int changed = Apply(module.GetComponentsInChildren<OrbitObject>(true), faction);
+                if (changed > 0) Log.Verbose("PvP: a module of " + FleetShips.Describe(FleetShips.OwnerOf(__instance)) + " is now faction " + faction + " (" + changed + " parts).");
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Giving a new module its team", e);
+            }
         }
 
         /// <summary>Player-side parts take the team's faction; neutral parts stay neutral and characters go by their team.</summary>
@@ -205,7 +260,8 @@ namespace VoidCrewFleet
         /// <summary>
         /// A ship gun's shot hits something of the other ship: its shield absorbs the shot (the game lets player shots pass
         /// every player shield), and a turret, module or socket passes the hit to the ship's hull. A shot on the shield of a
-        /// ship the gun's helm has locked gets the target-lock bonus, as a shot on its hull does.
+        /// ship the gun's helm has locked gets the target-lock bonus, as a shot on its hull does. Whatever of the enemy ship
+        /// it hits, the hull included, a piercing round stops there (CanPenetratePostfix).
         /// </summary>
         [GamePatch(Feature, "Gameplay.CompositeWeapons.WeaponProjectile", "TryHit", PatchKind.Prefix)]
         private static bool TryHitPrefix(WeaponProjectile __instance, RaycastHit hit, ref IHitReceiver hitReceiver, float localWeaponDamageModifier, ref bool __result)
@@ -249,12 +305,25 @@ namespace VoidCrewFleet
                     hitReceiver = target;
                     _stoppedShot = __instance;
                 }
+                else if (IsHullOf(hitReceiver, target))
+                {
+                    // The game's own hit on the hull; a piercing round would go on and hit the hull again through the parts behind.
+                    _stoppedShot = __instance;
+                }
             }
             catch (Exception e)
             {
                 Log.Failure("Resolving a hit on the enemy ship", e);
             }
             return true;
+        }
+
+        /// <summary>The ship itself, or a part of its hull that takes its hits for it (the game's hull pieces).</summary>
+        private static bool IsHullOf(IHitReceiver receiver, PlayerControlledShip ship)
+        {
+            if (ReferenceEquals(receiver, ship)) return true;
+            var damageReceiver = receiver as IDamageReceiver;
+            return damageReceiver != null && ReferenceEquals(damageReceiver.DamageableElement, ship);
         }
 
         /// <summary>
@@ -270,8 +339,9 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// A piercing round stops where this mod resolved its hit on the enemy ship: in its shield, or at the part whose hit
-        /// went to the hull. (The game lets it go on through the hull, so one round hit that hull again with every part behind.)
+        /// A piercing round stops at its first hit on the enemy ship: in its shield, at the part whose hit went to the hull,
+        /// or in the hull. (The game's CanPenetrate lets it go on through a ship's hull and its parts, so one round hit that
+        /// hull again with every part behind.)
         /// </summary>
         [GamePatch(Feature, "Gameplay.CompositeWeapons.PenetratingWeaponProjectile", "CanPenetrate", PatchKind.Postfix)]
         private static void CanPenetratePostfix(PenetratingWeaponProjectile __instance, ref bool __result)

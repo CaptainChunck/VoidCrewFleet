@@ -13,7 +13,8 @@ namespace VoidCrewFleet
     /// The game has no such animation, so the arms are posed after the game's own animation every frame: a two-bone IK from
     /// the shoulder to the wrist, toward points in front of the chest, with the fingers curled into fists (the fist is the
     /// avatar's own "fingers closed" pose, read once). Only the arms move, never the head (the first-person camera hangs
-    /// on it). The local player, who sees no body in first person, sees their own arms while their fists are up.
+    /// on it). The local player, who sees no body in first person, sees their own arms while their fists are up. A
+    /// character whose arms can't be posed (no rig, or posing failed) is left alone for a moment before the next try.
     /// </summary>
     internal static class FistPose
     {
@@ -22,6 +23,9 @@ namespace VoidCrewFleet
         private const float Extend = 0.09f;
         private const float HoldOut = 0.04f;
         private const float Retract = 0.16f;
+
+        /// <summary>How long a character whose rig couldn't be built, or whose pose failed, is left before the next try.</summary>
+        private const float RetrySeconds = 2f;
 
         private static readonly HumanBodyBones[] LeftFingers =
         {
@@ -73,6 +77,10 @@ namespace VoidCrewFleet
         }
 
         private static readonly Dictionary<Player, Rig> Rigs = new Dictionary<Player, Rig>();
+
+        /// <summary>Characters whose rig couldn't be built or whose pose failed, with when to try again (unscaled time).</summary>
+        private static readonly Dictionary<Player, float> RetryAt = new Dictionary<Player, float>();
+
         private static Quaternion[] _fistLeft;
         private static Quaternion[] _fistRight;
         private static bool _fistFailed;
@@ -124,7 +132,7 @@ namespace VoidCrewFleet
                 if (player == null) continue;
                 Rig rig;
                 Rigs.TryGetValue(player, out rig);
-                bool alive = !player.IsDead;
+                bool alive = !PlayerLife.IsDead(player);
                 bool raised = active && alive && PvpPunch.StanceOf(player);
                 bool punching = rig != null && alive && (Punching(rig.Left) || Punching(rig.Right));
                 if (rig == null && !raised && !punching) continue;
@@ -145,7 +153,9 @@ namespace VoidCrewFleet
                 catch (Exception e)
                 {
                     Log.Failure("Posing a fighting stance", e);
+                    ShowArms(rig, false);
                     Rigs.Remove(player);
+                    RetryAt[player] = Time.unscaledTime + RetrySeconds;
                 }
             }
             Prune(game);
@@ -193,7 +203,7 @@ namespace VoidCrewFleet
             {
                 Vector3 direction = arm.PunchAim;
                 Player victim = arm.PunchTarget;
-                if (victim != null && !victim.IsDead)
+                if (victim != null && !PlayerLife.IsDead(victim))
                 {
                     Vector3 head = victim.transform.position + victim.transform.up * 1.5f;
                     if ((head - shoulder).sqrMagnitude < 9f) direction = (head - shoulder).normalized;
@@ -248,19 +258,31 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- the rig
 
+        /// <summary>A character's rig, built the first time; null while it can't be (tried again every RetrySeconds).</summary>
         private static Rig RigOf(Player character)
         {
             if (character == null) return null;
             Rig rig;
             if (Rigs.TryGetValue(character, out rig)) return rig;
+            float retry;
+            if (RetryAt.TryGetValue(character, out retry))
+            {
+                if (Time.unscaledTime < retry) return null;
+                RetryAt.Remove(character);
+            }
             Animator animator = ModelAnimator(character);
-            if (animator == null) return null;
+            if (animator == null)
+            {
+                RetryAt[character] = Time.unscaledTime + RetrySeconds;
+                return null;
+            }
             Transform chest = animator.GetBoneTransform(HumanBodyBones.UpperChest) ?? animator.GetBoneTransform(HumanBodyBones.Chest);
             Arm left = MakeArm(animator, true);
             Arm right = MakeArm(animator, false);
             if (chest == null || left == null || right == null)
             {
                 Log.WarnOnce("fist rig", "A character model has no humanoid arms to raise the fists with (a game update?).");
+                RetryAt[character] = Time.unscaledTime + RetrySeconds;
                 return null;
             }
             CaptureFist(animator);
@@ -389,6 +411,13 @@ namespace VoidCrewFleet
                 if (player == null || !game.Players.Contains(player)) Gone.Add(player);
             }
             foreach (Player player in Gone) Rigs.Remove(player);
+            if (RetryAt.Count == 0) return;
+            Gone.Clear();
+            foreach (Player player in RetryAt.Keys)
+            {
+                if (player == null || !game.Players.Contains(player)) Gone.Add(player);
+            }
+            foreach (Player player in Gone) RetryAt.Remove(player);
         }
 
         private static void Clear()
@@ -398,6 +427,7 @@ namespace VoidCrewFleet
                 if (rig.Character != null) ShowArms(rig, false);
             }
             Rigs.Clear();
+            RetryAt.Clear();
         }
 
         /// <summary>Self-test: the local player's rig, weight and fists, for the log.</summary>

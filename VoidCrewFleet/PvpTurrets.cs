@@ -19,11 +19,12 @@ namespace VoidCrewFleet
     /// PvP: a ship's point defenses and B.R.A.I.N. auto-turrets also shoot enemy players floating in open space near it.
     /// Inside a ship the turrets can't see them (punches deal with boarders there).
     /// - Point defenses pick their targets and play their bursts on every client. When there's no missile to shoot, an
-    ///   enemy player in range, in the turret's arc and in sight becomes the target. The host deals the hit.
+    ///   enemy player in range, in the turret's arc and in sight becomes the target. The host deals the hit. (Which enemy
+    ///   players float near a ship is worked out a few times a second, not at every physics step.)
     /// - Auto-turrets (run by the host): when there's no ship to shoot, an enemy player becomes the turret's target. The
-    ///   turret aims and fires as it does at a ship. The game's bullets pass through people, so each shot the turret fires
-    ///   while on target may hit the player instead, as the game's EVA hunters roll for their hits: likely up close, much
-    ///   less so far away.
+    ///   turret aims and fires as it does at a ship. The game's bullets pass through people, so each time the turret fires
+    ///   while on target (once per fire cycle, however many barrels fire together) it may hit the player instead, as the
+    ///   game's EVA hunters roll for their hits: likely up close, much less so far away.
     /// - The damage goes to the hit player's own game, like a punch.
     /// Auto-turrets against the enemy SHIP: the game's turret logic was made for NPC ships and misbehaved against a player
     /// ship, so in PvP the host runs that step itself:
@@ -42,31 +43,43 @@ namespace VoidCrewFleet
         private const float PlayerRange = 250f;
         private const float PointDefenseHit = 0.25f;
 
-        // An auto-turret's shots at a player (a full-health player has 1 health). Each shot it fires while on target hits with
-        // a chance falling from HitChanceClose (within HitChanceCloseRange) to HitChanceFar (at PlayerRange), as the game's
-        // EVA hunters roll for their hits. A hit takes AutoTurretDamagePerSecond divided by the gun's shots a second, so a
-        // turret whose every shot hit would take that much a second. Up close one turret takes about 0.17 a second (a boarder
-        // lasts ~6 s, ~3 s against two; it was 2.5 s and ~1 s), at 250 m about 0.05.
+        // An auto-turret's shots at a player (a full-health player has 1 health). Each fire cycle while it is on target (a
+        // twin or quad gun fires its barrels together, and they roll once) hits with a chance falling from HitChanceClose
+        // (within HitChanceCloseRange) to HitChanceFar (at PlayerRange), as the game's EVA hunters roll for their hits. A
+        // hit takes AutoTurretDamagePerSecond divided by the gun's fire cycles a second, so a turret that hit with every
+        // cycle would take that much a second. Up close one turret takes about 0.17 a second (a boarder lasts ~6 s, ~3 s
+        // against two; it was 2.5 s and ~1 s), at 250 m about 0.05.
         private const float AutoTurretDamagePerSecond = 0.25f;
         private const float HitChanceClose = 0.7f;
         private const float HitChanceCloseRange = 25f;
         private const float HitChanceFar = 0.2f;
 
-        /// <summary>The gun's shots a second are read within these bounds (so one hit never takes more than 0.25).</summary>
+        /// <summary>The gun's fire cycles a second are read within these bounds (so one hit never takes more than 0.25).</summary>
         private const float MinFireRate = 1f;
         private const float MaxFireRate = 30f;
 
         /// <summary>A shot counts at the player while the turret was on target this recently (its last physics step).</summary>
         private const float OnTargetSeconds = 0.1f;
 
+        /// <summary>How often each ship's list of enemy players floating near it is worked out (point defenses ask at every physics step).</summary>
+        private const float EnemyScanSeconds = 0.25f;
+
         private const float OnTargetDelta = 2.5f;
         private const float SendSeconds = 0.25f;
         private const int SightMask = 134222848; // the auto-turret's own occlusion test: ship hulls and objects
 
-        private static readonly MethodInfo SetActiveTargetMethod = GameMember.Method(typeof(AutoShootingTurretController), "SetActiveTarget");
-        private static readonly MethodInfo CheckMagazineMethod = GameMember.Method(typeof(AutoShootingTurretController), "CheckMagazine");
-        private static readonly MethodInfo IsAThreatMethod = GameMember.Method(typeof(AutoShootingTurretController), "IsAThreat");
-        private static readonly MethodInfo UpdateActiveElementsMethod = GameMember.Method(typeof(AutoShootingTurretController), "UpdateActiveElements");
+        // The auto-turret controller's own private steps, called directly (no reflection call at every physics step).
+        private static readonly Action<AutoShootingTurretController, WeaponTarget> SetActiveTargetCall =
+            Bind<Action<AutoShootingTurretController, WeaponTarget>>(GameMember.Method(typeof(AutoShootingTurretController), "SetActiveTarget"));
+
+        private static readonly Action<AutoShootingTurretController> CheckMagazineCall =
+            Bind<Action<AutoShootingTurretController>>(GameMember.Method(typeof(AutoShootingTurretController), "CheckMagazine"));
+
+        private static readonly Func<AutoShootingTurretController, OrbitObject, bool> IsAThreatCall =
+            Bind<Func<AutoShootingTurretController, OrbitObject, bool>>(GameMember.Method(typeof(AutoShootingTurretController), "IsAThreat"));
+
+        private static readonly Action<AutoShootingTurretController> UpdateActiveElementsCall =
+            Bind<Action<AutoShootingTurretController>>(GameMember.Method(typeof(AutoShootingTurretController), "UpdateActiveElements"));
 
         /// <summary>What the game's bullets hit (static and space-object layers; not the interior and pivot layer 27).</summary>
         private const int ShotMask = (1 << 10) | (1 << 12);
@@ -84,26 +97,64 @@ namespace VoidCrewFleet
 
         private static readonly Dictionary<int, PlayerAim> OnPlayer = new Dictionary<int, PlayerAim>();
 
+        /// <summary>Host: when each gun last rolled for a hit on a player (by its instance ID), for one roll per fire cycle.</summary>
+        private static readonly Dictionary<int, float> LastRoll = new Dictionary<int, float>();
+
         private static readonly Dictionary<int, float> PendingDamage = new Dictionary<int, float>();
         private static readonly Dictionary<int, Vector3> PendingFrom = new Dictionary<int, Vector3>();
         private static float _nextSend;
         private static float _lastWarning = -100f;
 
+        /// <summary>A ship's enemy players in open space, as last worked out.</summary>
+        private sealed class EnemyScan
+        {
+            public float At = float.NegativeInfinity;
+            public readonly List<Player> Players = new List<Player>();
+        }
+
+        private static readonly Dictionary<int, EnemyScan> Scans = new Dictionary<int, EnemyScan>();
+        private static readonly List<Player> NoPlayers = new List<Player>();
+
+        /// <summary>A fast call to a private game method, or null when it is missing or has changed.</summary>
+        private static T Bind<T>(MethodInfo method) where T : class
+        {
+            if (method == null) return null;
+            try
+            {
+                return Delegate.CreateDelegate(typeof(T), method, false) as T;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         // ---------------------------------------------------------------- who can be shot
 
-        /// <summary>Enemy players of this ship who are alive and floating in open space.</summary>
-        private static IEnumerable<Player> EnemiesInSpace(PlayerControlledShip ship)
+        /// <summary>
+        /// Enemy players of this ship who are alive and floating in open space, worked out at most every 0.25 s (so check
+        /// each one is still there and alive before using them).
+        /// </summary>
+        private static List<Player> EnemiesInSpace(PlayerControlledShip ship)
         {
+            if (ship == null) return NoPlayers;
+            EnemyScan scan;
+            int id = ship.GetInstanceID();
+            if (!Scans.TryGetValue(id, out scan)) Scans[id] = scan = new EnemyScan();
+            if (Time.time - scan.At < EnemyScanSeconds) return scan.Players;
+            scan.At = Time.time;
+            scan.Players.Clear();
             ClientGame game = ClientGame.Current;
-            if (ship == null || game == null || game.Players == null) yield break;
+            if (game == null || game.Players == null) return scan.Players;
             foreach (Player player in game.Players)
             {
-                if (player == null || player.IsDead || !player.IsInSpace) continue;
+                if (player == null || PlayerLife.IsDead(player) || !player.IsInSpace) continue;
                 int actor = ActorOf(player);
                 if (actor < 0 || !PvpBoarding.IsEnemyOf(actor, ship)) continue;
                 if (FleetShips.InteriorAt(player.transform.position) != null) continue;
-                yield return player;
+                scan.Players.Add(player);
             }
+            return scan.Players;
         }
 
         private static int ActorOf(Player player)
@@ -137,13 +188,15 @@ namespace VoidCrewFleet
             if (__result != null || pivot == null || !PvpCombat.Active) return;
             try
             {
-                PlayerControlledShip ship = FleetShips.OwnerOf(pivot);
+                List<Player> enemies = EnemiesInSpace(FleetShips.OwnerOf(pivot));
+                if (enemies.Count == 0) return;
                 Vector3 origin = pivot.transform.position;
                 float range = Mathf.Min(trackingRange, PlayerRange);
                 CustomCharacterHealth best = null;
                 float bestDistance = float.MaxValue;
-                foreach (Player player in EnemiesInSpace(ship))
+                foreach (Player player in enemies)
                 {
+                    if (player == null || PlayerLife.IsDead(player)) continue;
                     CustomCharacterHealth health = HealthOf(player);
                     if (health == null || (excludeList != null && excludeList.Contains(health))) continue;
                     Vector3 aim = health.CentralPosition;
@@ -173,7 +226,7 @@ namespace VoidCrewFleet
                 {
                     Player victim = health.GetComponentInParent<Player>();
                     int actor = ActorOf(victim);
-                    if (victim != null && !victim.IsDead && actor >= 0 && PvpBoarding.IsEnemyOf(actor, FleetShips.OwnerOf(source)))
+                    if (victim != null && !PlayerLife.IsDead(victim) && actor >= 0 && PvpBoarding.IsEnemyOf(actor, FleetShips.OwnerOf(source)))
                     {
                         AddDamage(actor, PointDefenseHit, source.transform.position);
                     }
@@ -203,11 +256,13 @@ namespace VoidCrewFleet
             if (___turret == null || ___activePivot == null || ___activeBarrel == null) return;
             try
             {
-                PlayerControlledShip ship = FleetShips.OwnerOf(___turret);
+                List<Player> enemies = EnemiesInSpace(FleetShips.OwnerOf(___turret));
+                if (enemies.Count == 0) return;
                 Vector3 muzzle = Muzzle(___activeBarrel);
                 float range = Mathf.Min(___turret.Range != null ? ___turret.Range.Value : PlayerRange, PlayerRange);
-                foreach (Player player in EnemiesInSpace(ship))
+                foreach (Player player in enemies)
                 {
+                    if (player == null || PlayerLife.IsDead(player)) continue;
                     CustomCharacterHealth health = HealthOf(player);
                     if (health == null) continue;
                     Vector3 aim = health.CentralPosition;
@@ -240,19 +295,19 @@ namespace VoidCrewFleet
             try
             {
                 if (___turret == null || ___turret.photonView == null || !___turret.photonView.AmController || !___turret.IsPowered || !PvpCombat.Active) return true;
-                if (CheckMagazineMethod != null) CheckMagazineMethod.Invoke(__instance, null);
+                if (CheckMagazineCall != null) CheckMagazineCall(__instance);
 
                 var health = ___activeTarget.ShootingElement as CustomCharacterHealth;
                 PlayerControlledShip ship = FleetShips.OwnerOf(___turret);
                 int actor = ActorOf(victim);
                 Vector3 muzzle = Muzzle(___activeBarrel);
                 Vector3 aim = health != null ? health.CentralPosition : victim.transform.position;
-                bool valid = health != null && ___activePivot != null && ___activeBarrel != null && !victim.IsDead && victim.IsInSpace &&
+                bool valid = health != null && ___activePivot != null && ___activeBarrel != null && !PlayerLife.IsDead(victim) && victim.IsInSpace &&
                              actor >= 0 && PvpBoarding.IsEnemyOf(actor, ship) && FleetShips.InteriorAt(victim.transform.position) == null &&
                              Vector3.Distance(aim, muzzle) <= PlayerRange * 1.2f && ___activePivot.IsOrbitObjectInFiringArc(aim) && InSight(muzzle, aim, victim);
                 if (!valid)
                 {
-                    if (SetActiveTargetMethod != null) SetActiveTargetMethod.Invoke(__instance, new object[] { ___noTarget });
+                    if (SetActiveTargetCall != null) SetActiveTargetCall(__instance, ___noTarget);
                     ___turret.SendInput(WeaponActionType.Primary, false);
                     return false;
                 }
@@ -276,7 +331,10 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>Host: a gun fires a shot. From an auto-turret on target at an enemy player, it may hit them: the closer, the likelier.</summary>
+        /// <summary>
+        /// Host: a gun's barrel fires. From an auto-turret on target at an enemy player, the gun's fire cycle may hit them,
+        /// the closer the likelier: one roll per cycle, as a twin or quad gun fires several barrels in the same cycle.
+        /// </summary>
         [GamePatch(Feature, "Gameplay.CompositeWeapons.WeaponBarrelBase", "Shoot", PatchKind.Postfix)]
         private static void BarrelShootPostfix(WeaponBarrelBase __instance, int __result)
         {
@@ -285,13 +343,19 @@ namespace VoidCrewFleet
             {
                 CompositeWeaponModule gun = __instance.WeaponBase;
                 PlayerAim aim;
-                if ((object)gun == null || !OnPlayer.TryGetValue(gun.GetInstanceID(), out aim)) return;
+                if ((object)gun == null) return;
+                int id = gun.GetInstanceID();
+                if (!OnPlayer.TryGetValue(id, out aim)) return;
                 if (Time.time - aim.LastOnTarget > OnTargetSeconds || !PvpCombat.Active || !PhotonNetwork.IsMasterClient) return;
-                float chance = Mathf.Lerp(HitChanceClose, HitChanceFar, Mathf.InverseLerp(HitChanceCloseRange, PlayerRange, aim.Distance));
-                if (UnityEngine.Random.value >= chance) return;
                 float rate = gun.FireRate != null ? gun.FireRate.Value : MinFireRate;
                 if (!(rate >= MinFireRate)) rate = MinFireRate;
                 if (rate > MaxFireRate) rate = MaxFireRate;
+                // The barrels of one cycle fire in the same physics step; the next cycle comes a whole interval later.
+                float last;
+                if (LastRoll.TryGetValue(id, out last) && Time.time - last < 0.5f / rate) return;
+                LastRoll[id] = Time.time;
+                float chance = Mathf.Lerp(HitChanceClose, HitChanceFar, Mathf.InverseLerp(HitChanceCloseRange, PlayerRange, aim.Distance));
+                if (UnityEngine.Random.value >= chance) return;
                 AddDamage(aim.Actor, AutoTurretDamagePerSecond / rate, aim.Muzzle);
             }
             catch (Exception e)
@@ -307,26 +371,26 @@ namespace VoidCrewFleet
             try
             {
                 if (turret == null || turret.photonView == null || !turret.photonView.AmController || !turret.IsPowered) return true;
-                if (CheckMagazineMethod != null) CheckMagazineMethod.Invoke(controller, null);
+                if (CheckMagazineCall != null) CheckMagazineCall(controller);
                 PlayerControlledShip own = FleetShips.OwnerOf(turret);
-                bool threat = IsAThreatMethod != null && (bool)IsAThreatMethod.Invoke(controller, new object[] { ship });
+                bool threat = IsAThreatCall != null && IsAThreatCall(controller, ship);
                 bool locked = locks != null && locks.IsTargetLocked(ship);
                 bool valid = ship.Valid() && !ship.StartedDeath && own != null && ship.Sector == own.Sector && !ship.IsInvulnerable && (threat || locked);
                 if (valid && !ShipVisible(turret, own, ship, pivot, barrel))
                 {
                     // The other pivot may see it.
                     turret.TogglePivot();
-                    if (UpdateActiveElementsMethod != null) UpdateActiveElementsMethod.Invoke(controller, null);
+                    if (UpdateActiveElementsCall != null) UpdateActiveElementsCall(controller);
                     if (!ShipVisible(turret, own, ship, pivot, barrel))
                     {
                         turret.TogglePivot();
-                        if (UpdateActiveElementsMethod != null) UpdateActiveElementsMethod.Invoke(controller, null);
+                        if (UpdateActiveElementsCall != null) UpdateActiveElementsCall(controller);
                         valid = false;
                     }
                 }
                 if (!valid || pivot == null || barrel == null)
                 {
-                    if (SetActiveTargetMethod != null) SetActiveTargetMethod.Invoke(controller, new object[] { noTarget });
+                    if (SetActiveTargetCall != null) SetActiveTargetCall(controller, noTarget);
                     turret.SendInput(WeaponActionType.Primary, false);
                     return false;
                 }
@@ -495,10 +559,18 @@ namespace VoidCrewFleet
             PendingFrom[actor] = from;
         }
 
-        /// <summary>Host, every frame: sends the damage gathered for each player a few times a second.</summary>
+        /// <summary>
+        /// Every frame: outside a match the turrets' targets and scans are forgotten; the host sends the damage gathered for
+        /// each player a few times a second.
+        /// </summary>
         public static void Frame()
         {
-            if (OnPlayer.Count > 0 && !PvpCombat.Active) OnPlayer.Clear();
+            if (!PvpCombat.Active)
+            {
+                if (OnPlayer.Count > 0) OnPlayer.Clear();
+                if (LastRoll.Count > 0) LastRoll.Clear();
+                if (Scans.Count > 0) Scans.Clear();
+            }
             if (PendingDamage.Count == 0 || Time.unscaledTime < _nextSend) return;
             _nextSend = Time.unscaledTime + SendSeconds;
             if (!PvpCombat.Active || !PhotonNetwork.IsMasterClient)
@@ -523,7 +595,7 @@ namespace VoidCrewFleet
             {
                 if (!PvpCombat.Active || !Net.FromHost(sender)) return;
                 LocalPlayer me = LocalPlayer.Instance;
-                if (me == null || me.IsDead || (me.InteractionState.ActiveModes & InteractionMode.InCloneTube) != 0) return;
+                if (me == null || PlayerLife.IsDead(me) || (me.InteractionState.ActiveModes & InteractionMode.InCloneTube) != 0) return;
                 float damage = Mathf.Clamp(Net.Get(data, 0, 0f), 0f, 1f);
                 if (damage <= 0f) return;
                 Vector3 from = Net.Get(data, 1, me.transform.position);

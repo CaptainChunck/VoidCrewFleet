@@ -18,7 +18,7 @@ namespace VoidCrewFleet
     ///   without touching the player's saved setting, and turned back to their choice afterwards.
     /// - The game never makes anyone inaudible (beyond about 28 m a voice turns into full-volume radio), so each client
     ///   turns every remote voice up or down itself: who can be heard is worked out a few times a second, and each voice
-    ///   fades toward that every frame.
+    ///   fades toward that every frame (its volume is only set while it changes).
     /// - A player without a body (waiting to respawn) is heard by their own team only, like a team radio. Before the teams
     ///   are confirmed everyone hears everyone.
     /// - Nobody sees the talking indicator of a player they can't hear.
@@ -34,7 +34,28 @@ namespace VoidCrewFleet
         /// <summary>How often who-hears-whom is worked out (about 7 times a second); the fade runs every frame.</summary>
         private const float AudibilitySeconds = 0.15f;
 
-        private static readonly Dictionary<string, float> Volumes = new Dictionary<string, float>();
+        /// <summary>A voice's playback (the game makes a new one when a speaker's voice restarts) and the volume last set on it.</summary>
+        private struct VoiceVolume
+        {
+            public IntPtr Instance;
+            public float Volume;
+        }
+
+        /// <summary>The local player's side of who hears whom, worked out once per update.</summary>
+        private struct Listener
+        {
+            /// <summary>The local character while it is alive, else null.</summary>
+            public Player Body;
+
+            /// <summary>The ship whose rooms the living character is in, or null in open space.</summary>
+            public PlayerControlledShip Ship;
+
+            public int Team;
+            public CrewState Out;
+            public bool Locked;
+        }
+
+        private static readonly Dictionary<string, VoiceVolume> Volumes = new Dictionary<string, VoiceVolume>();
         private static readonly Dictionary<string, bool> Audibility = new Dictionary<string, bool>();
         private static readonly Dictionary<string, int> ActorOfVoice = new Dictionary<string, int>();
         private static readonly HashSet<string> LoweredInVivox = new HashSet<string>();
@@ -116,10 +137,14 @@ namespace VoidCrewFleet
                 if (!voice.isValid()) continue;
                 bool audible;
                 Audibility.TryGetValue(pair.Key, out audible);
-                float current;
-                if (!Volumes.TryGetValue(pair.Key, out current)) current = 1f;
-                float next = Mathf.MoveTowards(current, audible ? 1f : 0f, step);
-                Volumes[pair.Key] = next;
+                float target = audible ? 1f : 0f;
+                VoiceVolume known;
+                bool seen = Volumes.TryGetValue(pair.Key, out known);
+                // A voice heard for the first time starts where it should be; a restarted one where the old one was.
+                float current = seen ? known.Volume : target;
+                float next = Mathf.MoveTowards(current, target, step);
+                if (seen && known.Instance == voice.handle && next == current) continue;
+                Volumes[pair.Key] = new VoiceVolume { Instance = voice.handle, Volume = next };
                 voice.setVolume(next);
             }
         }
@@ -137,68 +162,84 @@ namespace VoidCrewFleet
         private static void UpdateAudibility(VivoxTapManager manager)
         {
             // Whose voice is whose, from one look at the room. (The game's own lookup sorts the player list on every call, and
-            // warns in the log about a voice whose player has left.)
+            // warns in the log about a voice whose player has left.) A player who lost connection has no voice: one who came
+            // back has a new actor number and the same voice.
             ActorOfVoice.Clear();
-            foreach (Photon.Realtime.Player player in PhotonNetwork.PlayerList)
+            Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+            if (room != null)
             {
-                string cloudId;
-                try
+                foreach (Photon.Realtime.Player player in room.Players.Values)
                 {
-                    cloudId = VoipService.PlayerToCloudID(player);
+                    if (player == null || player.IsInactive) continue;
+                    string cloudId;
+                    try
+                    {
+                        cloudId = VoipService.PlayerToCloudID(player);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+                    if (!string.IsNullOrEmpty(cloudId) && !ActorOfVoice.ContainsKey(cloudId)) ActorOfVoice[cloudId] = player.ActorNumber;
                 }
-                catch
-                {
-                    continue;
-                }
-                if (!string.IsNullOrEmpty(cloudId) && !ActorOfVoice.ContainsKey(cloudId)) ActorOfVoice[cloudId] = player.ActorNumber;
             }
-            Player listener = LocalPlayer.Instance;
-            PlayerControlledShip listenerShip = listener != null && !listener.IsDead ? FleetShips.InteriorAt(listener.transform.position) : null;
-            int myTeam = FleetShips.TeamOfActor(FleetShips.LocalActor);
-            bool locked = PvpTeams.Locked;
-            foreach (string cloudId in manager.FmodEvents.Keys) Audibility[cloudId] = Audible(cloudId, listener, listenerShip, myTeam, locked);
-            GateUntapped(manager, listener, listenerShip, myTeam, locked);
+            Listener me = CurrentListener();
+            foreach (string cloudId in manager.FmodEvents.Keys) Audibility[cloudId] = Audible(cloudId, me);
+            GateUntapped(manager, me);
         }
 
-        private static bool Audible(string cloudId, Player listener, PlayerControlledShip listenerShip, int myTeam, bool locked)
+        private static Listener CurrentListener()
+        {
+            Player body = LocalPlayer.Instance;
+            if (body != null && PlayerLife.IsDead(body)) body = null;
+            return new Listener
+            {
+                Body = body,
+                Ship = body != null ? FleetShips.InteriorAt(body.transform.position) : null,
+                Team = FleetShips.TeamOfActor(FleetShips.LocalActor),
+                Out = Spectator.WatchState(FleetShips.LocalActor),
+                Locked = PvpTeams.Locked
+            };
+        }
+
+        private static bool Audible(string cloudId, Listener me)
         {
             int actor;
             if (!ActorOfVoice.TryGetValue(cloudId, out actor)) return false;
-            if (!locked) return true;
-            return Hears(actor, listener, listenerShip, myTeam);
+            if (!me.Locked) return true;
+            return Hears(actor, me);
         }
 
         /// <summary>
         /// Whether the local player hears another player (voice and text chat), once the teams are confirmed:
         /// - spectators whose ship was destroyed (DEAD) are heard by the other dead spectators only, so nobody who still plays
         ///   hears a call-out from someone watching the enemy;
-        /// - spectators waiting for a place are heard by the dead and by their own team's other waiting players;
+        /// - spectators waiting for a place are heard by the dead and by their own team's other waiting players (one without
+        ///   a team: by the other waiting players without a team);
         /// - a spectator hears their own team's players, like a team radio;
         /// - players still in the fight: the ship they are aboard, or 50 m in open space; a player without a body (waiting to
         ///   respawn) is heard by their own team only.
         /// </summary>
-        private static bool Hears(int actor, Player listener, PlayerControlledShip listenerShip, int myTeam)
+        private static bool Hears(int actor, Listener me)
         {
             int speakerTeam = FleetShips.TeamOfActor(actor);
-            bool teammate = myTeam >= 0 && speakerTeam == myTeam;
+            bool teammate = me.Team >= 0 && speakerTeam == me.Team;
             CrewState speakerOut = Spectator.WatchState(actor);
-            CrewState listenerOut = Spectator.WatchState(FleetShips.LocalActor);
-            if (speakerOut == CrewState.Dead) return listenerOut == CrewState.Dead;
-            if (speakerOut == CrewState.Waiting)
-                return listenerOut == CrewState.Dead || (listenerOut == CrewState.Waiting && (teammate || myTeam < 0 || speakerTeam < 0));
-            if (listenerOut != CrewState.Playing) return teammate;
+            if (speakerOut == CrewState.Dead) return me.Out == CrewState.Dead;
+            if (speakerOut == CrewState.Waiting) return me.Out == CrewState.Dead || (me.Out == CrewState.Waiting && speakerTeam == me.Team);
+            if (me.Out != CrewState.Playing) return teammate;
             Player speaker = FleetShips.CharacterOf(actor);
-            if (speaker == null || speaker.IsDead || listener == null || listener.IsDead) return teammate;
+            if (speaker == null || PlayerLife.IsDead(speaker) || me.Body == null) return teammate;
             PlayerControlledShip speakerShip = FleetShips.InteriorAt(speaker.transform.position);
-            if (speakerShip != null || listenerShip != null) return speakerShip == listenerShip;
-            return Vector3.Distance(speaker.transform.position, listener.transform.position) <= OpenSpaceRange;
+            if (speakerShip != null || me.Ship != null) return speakerShip == me.Ship;
+            return Vector3.Distance(speaker.transform.position, me.Body.transform.position) <= OpenSpaceRange;
         }
 
         /// <summary>
         /// A participant whose voice is not going through the game's taps (no body tap running) is played by Vivox itself:
         /// turn them down there instead.
         /// </summary>
-        private static void GateUntapped(VivoxTapManager manager, Player listener, PlayerControlledShip listenerShip, int myTeam, bool locked)
+        private static void GateUntapped(VivoxTapManager manager, Listener me)
         {
             try
             {
@@ -213,7 +254,7 @@ namespace VoidCrewFleet
                     if (string.IsNullOrEmpty(id) || id == self) continue;
                     GameObject tap;
                     bool tapped = manager.enabled && manager.Taps.TryGetValue(id, out tap) && tap != null && manager.FmodEvents.ContainsKey(id);
-                    bool lower = !tapped && !Audible(id, listener, listenerShip, myTeam, locked);
+                    bool lower = !tapped && !Audible(id, me);
                     if (!tapped) Audibility[id] = !lower;
                     if (lower && LoweredInVivox.Add(id)) participant.SetLocalVolume(VivoxLow);
                     else if (!lower && LoweredInVivox.Remove(id)) participant.SetLocalVolume(0);
@@ -309,7 +350,7 @@ namespace VoidCrewFleet
                 int myTeam = FleetShips.TeamOfActor(FleetShips.LocalActor);
                 int theirTeam = FleetShips.TeamOfActor(sender.ActorNumber);
                 if (speakerOut == CrewState.Dead) return listenerOut == CrewState.Dead;
-                return listenerOut == CrewState.Dead || (listenerOut == CrewState.Waiting && (myTeam == theirTeam || myTeam < 0 || theirTeam < 0));
+                return listenerOut == CrewState.Dead || (listenerOut == CrewState.Waiting && myTeam == theirTeam);
             }
             catch (Exception e)
             {
