@@ -115,8 +115,8 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>A ship type's name as the terminal shows it, without "METEM": "DESTROYER".</summary>
-        public static string TypeName(GUIDUnion type)
+        /// <summary>A ship type's name as the terminal shows it, without "METEM": "DESTROYER"; unknown when no loadout names it.</summary>
+        public static string TypeName(GUIDUnion type, string unknown = "SHIP TYPE")
         {
             if (type.IsNull) return "ANY SHIP";
             try
@@ -130,7 +130,7 @@ namespace VoidCrewFleet
             {
                 // fall through
             }
-            return "SHIP TYPE";
+            return unknown;
         }
 
         /// <summary>Each ship type's default loadout, once settled.</summary>

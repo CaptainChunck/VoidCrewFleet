@@ -27,6 +27,7 @@ namespace VoidCrewFleet
         public static readonly Color GameItemBackground = new Color32(0x14, 0x13, 0x10, 0xFF);
 
         private static readonly Dictionary<string, Sprite> Sprites = new Dictionary<string, Sprite>();
+        private static readonly Dictionary<string, Texture2D> Textures = new Dictionary<string, Texture2D>();
 
         /// <summary>The game's own style sheets its popups use. Without the first four a screen keeps its own look.</summary>
         private static readonly string[] GameSheetNames =
@@ -291,6 +292,35 @@ namespace VoidCrewFleet
                 return candidate;
             }
             return null;
+        }
+
+        /// <summary>One of the game's UI textures by name, while a screen that uses it is loaded; null otherwise.</summary>
+        public static Texture2D GameTexture(string name)
+        {
+            Texture2D texture;
+            if (Textures.TryGetValue(name, out texture) && texture != null) return texture;
+            foreach (Texture2D candidate in Resources.FindObjectsOfTypeAll<Texture2D>())
+            {
+                if (candidate == null || candidate.name != name) continue;
+                Textures[name] = candidate;
+                return candidate;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// The picture one of the game's own elements shows (its resolved background image), else the game's texture of that
+        /// name: how a copy of a game element gets the same art.
+        /// </summary>
+        public static StyleBackground GameArt(VisualElement source, string texture)
+        {
+            if (source != null)
+            {
+                Background shown = source.resolvedStyle.backgroundImage;
+                if (shown.texture != null || shown.sprite != null || shown.vectorImage != null || shown.renderTexture != null) return new StyleBackground(shown);
+            }
+            Texture2D found = GameTexture(texture);
+            return found != null ? new StyleBackground(found) : new StyleBackground(StyleKeyword.None);
         }
 
         /// <summary>The meander bar along the top and bottom of the game's terminal screens (.metem-decorative-bar-repeating).</summary>

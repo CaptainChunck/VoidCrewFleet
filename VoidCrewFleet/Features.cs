@@ -65,6 +65,7 @@ namespace VoidCrewFleet
             FleetRuntime.Slow += ShipDeath.Tick;
             FleetRuntime.Slow += PvpTeams.KeepHubTeamsComplete;
             FleetRuntime.Slow += PvpTeamScreen.Tick;
+            FleetRuntime.Slow += CrewBadge.Tick;
             FleetRuntime.Slow += PvpCombat.KeepFactions;
             FleetRuntime.Slow += PvpCombat.KeepHostility;
             FleetRuntime.Slow += PvpMatch.Tick;
