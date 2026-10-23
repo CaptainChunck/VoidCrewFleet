@@ -270,7 +270,7 @@ namespace VoidCrewFleet
             RoomCollection rooms = room.RoomCollection;
             SpacePlatform platform = rooms != null ? rooms.ConnectedSpacePlatform : null;
             if (platform == null) return null;
-            IList<PlayerControlledShip> ships = FleetShips.All;
+            var ships = FleetShips.All;
             for (int i = 0; i < ships.Count; i++)
             {
                 PlayerControlledShip ship = ships[i];
