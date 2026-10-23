@@ -874,6 +874,7 @@ namespace VoidCrewFleet
             text.AppendLine("  active sector " + (GameSessionManager.ActiveSector != null ? GameSessionManager.ActiveSector.Id.ToString() : "none") +
                             ", room players " + PhotonNetwork.PlayerList.Length + "/" + (PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.MaxPlayers : 0));
             text.AppendLine("  crew row: " + CrewBadge.Describe());
+            text.AppendLine("  chat: " + DescribeChat());
             Log.Info(text.ToString());
         }
 
@@ -890,6 +891,25 @@ namespace VoidCrewFleet
                 counts[part.faction] = count + 1;
             }
             return string.Join(", ", counts.Select(p => "faction " + p.Key + " x" + p.Value).ToArray());
+        }
+
+        private static readonly System.Reflection.FieldInfo ChatPanelField =
+            typeof(Gameplay.Chat.TextChat).GetField("_chatUI", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+
+        /// <summary>For the reports: whether the local text chat exists and shows, the game's UI toggle, and the spectator view.</summary>
+        private static string DescribeChat()
+        {
+            try
+            {
+                Gameplay.Chat.TextChat chat = Gameplay.Chat.TextChat.Instance;
+                var panel = chat != null && ChatPanelField != null ? ChatPanelField.GetValue(chat) as VisualElement : null;
+                string shown = panel == null ? "no panel" : (panel.resolvedStyle.display == DisplayStyle.Flex && panel.panel != null ? "shown" : "hidden");
+                return (chat != null ? "chat " + shown : "no chat") + ", UI toggle " + UI.MainHUD.MainHUDUI.UIToggleState + ", spectating " + Spectator.Active;
+            }
+            catch (Exception e)
+            {
+                return "unknown (" + e.Message + ")";
+            }
         }
 
         private static void Screenshot(string label)
