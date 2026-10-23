@@ -176,9 +176,16 @@ namespace VoidCrewFleet
         private static void QuestTypePostfix(object __instance, ref string __result)
         {
             if (EntryKind == null || __instance == null) return;
-            int kind = Convert.ToInt32(EntryKind.GetValue(__instance));
-            if (kind == FleetPilgrimageType) __result = "PILGRIMAGE · FLEET";
-            else if (kind == FleetBattleType) __result = "PVP · TEAMS";
+            try
+            {
+                int kind = Convert.ToInt32(EntryKind.GetValue(__instance));
+                if (kind == FleetPilgrimageType) __result = "PILGRIMAGE · FLEET";
+                else if (kind == FleetBattleType) __result = "PVP · TEAMS";
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Naming a fleet mission on the galaxy map", e);
+            }
         }
     }
 }
