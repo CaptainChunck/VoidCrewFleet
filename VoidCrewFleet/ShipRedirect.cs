@@ -2,8 +2,10 @@
 using System.Collections.Generic;
 using System.Reflection;
 using System.Reflection.Emit;
+using CG.Client.Quests.SectorTwists;
 using CG.Game;
 using CG.Game.Scenarios;
+using CG.Ship.Scanning;
 using CG.Space;
 using HarmonyLib;
 using UnityEngine;
@@ -21,19 +23,21 @@ namespace VoidCrewFleet
     /// is the game's own value.
     /// The method list was generated from the game's Assembly-CSharp (every component method that reads
     /// ClientGame.PlayerShip), leaving out the systems that get their own dedicated patches: spawning, sector changes,
-    /// the playable area, the local player's own checks, EVA inertia zones, ship death, saves and combat.
+    /// the playable area, the local player's own checks, EVA inertia zones, ship death, saves and combat; and below it, the
+    /// ship parts that keep their ship themselves (the scanner, the signature) and the sector twists that spawn at a ship.
     /// </summary>
     internal static class ShipRedirect
     {
         public const string Feature = FleetShips.Feature;
 
-        private static readonly MethodInfo PlayerShipGetter = AccessTools.PropertyGetter(typeof(ClientGame), "PlayerShip");
-        private static readonly MethodInfo RedirectMethod = AccessTools.Method(typeof(ShipRedirect), nameof(Redirect));
-        private static readonly MethodInfo RedirectNearestMethod = AccessTools.Method(typeof(ShipRedirect), nameof(RedirectNearest));
+        private static readonly MethodInfo PlayerShipGetter = Getter(GameMember.Property(typeof(ClientGame), "PlayerShip"));
+        private static readonly MethodInfo SignatureShipGetter = Getter(GameMember.Property(typeof(SignatureComponent), "PlayerShip"));
+        private static readonly FieldInfo ScannerShipField = GameMember.Field(typeof(ScanComponent), "_playerShip");
+        private static readonly MethodInfo RedirectMethod = new Func<ClientGame, object, PlayerControlledShip>(Redirect).Method;
+        private static readonly MethodInfo RedirectNearestMethod = new Func<ClientGame, object, PlayerControlledShip>(RedirectNearest).Method;
+        private static readonly MethodInfo OwnShipMethod = new Func<object, PlayerControlledShip>(OwnShip).Method;
+        private static readonly MethodInfo ScannerShipMethod = new Func<ClientGame, PlayerControlledShip, PlayerControlledShip>(ScannerShip).Method;
         private static readonly Dictionary<Type, FieldInfo> OuterThisFields = new Dictionary<Type, FieldInfo>();
-
-        private static int _viewFrame = -1;
-        private static PlayerControlledShip _viewShip;
 
         private static readonly List<PlayerControlledShip> Overrides = new List<PlayerControlledShip>();
         private static PlayerControlledShip _override;
@@ -58,36 +62,51 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- the game's own "player ship"
 
-        /// <summary>With two ships, "the player ship" of the local player's screen and logic is their crew's ship.</summary>
+        /// <summary>
+        /// With two ships, "the player ship" of the local player's screen and logic is their crew's ship (FleetShips.ViewShip,
+        /// worked out once a frame: the game reads this getter tens of thousands of times a second).
+        /// </summary>
         [GamePatch(Feature, "CG.Game.ClientGame", "get_PlayerShip", PatchKind.Postfix)]
         private static void PlayerShipPostfix(ref PlayerControlledShip __result)
         {
-            if (_override != null)
+            try
             {
-                __result = _override;
-                return;
+                if (_override != null)
+                {
+                    __result = _override;
+                    return;
+                }
+                if (!FleetShips.Active) return;
+                PlayerControlledShip view = FleetShips.ViewShip;
+                if (view != null) __result = view;
             }
-            if (!FleetShips.Active) return;
-            int frame = Time.frameCount;
-            if (frame != _viewFrame || _viewShip == null)
+            catch (Exception e)
             {
-                _viewFrame = frame;
-                _viewShip = FleetShips.ViewShip;
+                Log.Failure("Choosing the player ship", e);
             }
-            if (_viewShip != null) __result = _viewShip;
+        }
+
+        /// <summary>A property's getter, or null when the property is missing.</summary>
+        private static MethodInfo Getter(PropertyInfo property)
+        {
+            return property != null ? property.GetGetMethod(true) : null;
         }
 
         // ---------------------------------------------------------------- ship parts find their own ship
 
-        /// <summary>Replaces ClientGame.Current.PlayerShip in a ship part's method with the part's own ship.</summary>
+        /// <summary>
+        /// Replaces ClientGame.Current.PlayerShip in a ship part's method with the part's own ship. The game's answer (the
+        /// patched getter) is only read when the part is on no ship.
+        /// </summary>
         public static PlayerControlledShip Redirect(ClientGame game, object context)
         {
-            PlayerControlledShip fallback = game != null ? game.PlayerShip : null;
-            if (context == null || !FleetShips.Active) return fallback;
-            Component component = context as Component ?? OuterComponent(context);
-            if (component == null) return fallback;
-            PlayerControlledShip own = FleetShips.OwnerOf(component);
-            return own != null ? own : fallback;
+            if (context != null && FleetShips.Active)
+            {
+                Component component = context as Component ?? OuterComponent(context);
+                PlayerControlledShip own = component != null ? FleetShips.OwnerOf(component) : null;
+                if (own != null) return own;
+            }
+            return game != null ? game.PlayerShip : null;
         }
 
         /// <summary>
@@ -97,24 +116,46 @@ namespace VoidCrewFleet
         /// </summary>
         public static PlayerControlledShip RedirectNearest(ClientGame game, object context)
         {
-            PlayerControlledShip fallback = game != null ? game.PlayerShip : null;
-            if (context == null || !FleetShips.Active) return fallback;
-            Component component = context as Component ?? OuterComponent(context);
-            if (component == null) return fallback;
-            PlayerControlledShip own = FleetShips.OwnerOf(component);
-            if (own != null) return own;
-            if (_override != null || FleetSession.Mode != FleetMode.Coop) return fallback;
-            PlayerControlledShip nearest;
-            try
+            if (context != null && FleetShips.Active)
             {
-                nearest = NearestShip(component.transform.position);
+                Component component = context as Component ?? OuterComponent(context);
+                if (component != null)
+                {
+                    PlayerControlledShip own = FleetShips.OwnerOf(component);
+                    if (own != null) return own;
+                    if (_override == null && FleetSession.Mode == FleetMode.Coop)
+                    {
+                        PlayerControlledShip nearest;
+                        try
+                        {
+                            nearest = NearestShip(component.transform.position);
+                        }
+                        catch
+                        {
+                            // Being torn down: the game's answer then.
+                            nearest = null;
+                        }
+                        if (nearest != null) return nearest;
+                    }
+                }
             }
-            catch
-            {
-                // Being torn down: the game's answer then.
-                nearest = null;
-            }
-            return nearest != null ? nearest : fallback;
+            return game != null ? game.PlayerShip : null;
+        }
+
+        /// <summary>
+        /// Put in where a ship part reads its ship through a static getter of its own (which has no part to go by): the part's
+        /// own ship, else the game's answer.
+        /// </summary>
+        public static PlayerControlledShip OwnShip(object context)
+        {
+            return Redirect(ClientGame.Current, context);
+        }
+
+        /// <summary>Put in where a ship's scanner reads "the player ship": the ship it keeps in its own field, else the game's answer.</summary>
+        public static PlayerControlledShip ScannerShip(ClientGame game, PlayerControlledShip own)
+        {
+            if (FleetShips.Active && own != null) return own;
+            return game != null ? game.PlayerShip : null;
         }
 
         /// <summary>The living player ship nearest to a point, or null when none is left.</summary>
@@ -122,8 +163,10 @@ namespace VoidCrewFleet
         {
             PlayerControlledShip nearest = null;
             float best = float.MaxValue;
-            foreach (PlayerControlledShip ship in FleetShips.All)
+            List<PlayerControlledShip> ships = FleetShips.All;
+            for (int i = 0; i < ships.Count; i++)
             {
+                PlayerControlledShip ship = ships[i];
                 if (ship == null || ship.StartedDeath || ship.Platform == null) continue;
                 float distance = (ship.Platform.Position - point).sqrMagnitude;
                 if (distance >= best) continue;
@@ -170,7 +213,6 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ApplyPlayerShipModifier", "RunModifierToPlayerShip", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.AsteroidRain", "GetVolumetricNoiseDirection", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.AsteroidRain", "SetRandomSpawnDirection", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.AsteroidRain", "SpawnAsteroid", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.AsteroidRain", "UpdateConstantTwist", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.Interference", "GetModuleTargets", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.Interference", "Start", PatchKind.Transpiler)]
@@ -178,8 +220,6 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ModuleDisabler", "OnDisable", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.NearPlayerSpawner", "FixedUpdate", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.NearPlayerSpawner", "OnDrawGizmos", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.NearPlayerSpawner", "SpawnConfiguredObjects", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.NearPlayerSpawner", "TryGetSpawnPosition", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ScorchingPulse", "RemovePlayerShipModifier", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ScorchingPulse", "RunModifierToPlayerShip", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Client.Ship.Airlock", "Awake", PatchKind.Transpiler)]
@@ -224,9 +264,6 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "CG.Ship.PlayerShipCollider", "get_MyObject", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.PlayerShipCollider", "Start", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.Scanning.EnemyScanComponent", "OnOrbitObjectArrivedAtDestination", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Scanning.ScanComponent", "GetScanFlags", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Scanning.ScanComponent", "ScanObjectInternal", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Scanning.SignatureComponent", "get_PlayerShip", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.Shield.Effects.ShieldEmitterAnimatorEffect", "OnShieldDirectionChanged", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.Status.ShipStatusNotificationController", "InitializeShipStatusEvents", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.TargetLocking.TargetLockComponent", "Awake", PatchKind.Transpiler)]
@@ -320,32 +357,81 @@ namespace VoidCrewFleet
             return ReplacePlayerShip(instructions, original, RedirectNearestMethod);
         }
 
+        /// <summary>
+        /// A ship's scanner keeps its own ship in a field: its checks read that, with no lookup at all. (The passive scan asks
+        /// once per object in the sector and per player, every frame; a pilot's scan request is checked by the host against
+        /// the scanning ship's own helm.)
+        /// </summary>
+        [GamePatch(Feature, "CG.Ship.Scanning.ScanComponent", "GetScanFlags", PatchKind.Transpiler)]
+        [GamePatch(Feature, "CG.Ship.Scanning.ScanComponent", "ScanObjectInternal", PatchKind.Transpiler)]
+        private static IEnumerable<CodeInstruction> ScannerTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
+        {
+            // Without the field (a game update) the scanner finds its ship as any other part does.
+            if (ScannerShipField == null) return ReplacePlayerShip(instructions, original, RedirectMethod);
+            // Stack: [ClientGame] -> [ClientGame, this._playerShip] -> ScannerShip -> [PlayerControlledShip].
+            return ReplaceCalls(instructions, original, PlayerShipGetter, ScannerShipMethod, "the player ship",
+                new CodeInstruction(OpCodes.Ldarg_0), new CodeInstruction(OpCodes.Ldfld, ScannerShipField));
+        }
+
+        /// <summary>
+        /// A ship's signature (how far away enemies notice it) reached its ship through a static getter, which has no part to
+        /// go by: every ship's signature component drove the local player's view ship, and the other ships kept their starting
+        /// signature (on the host, which runs the enemies, moving or going silent did nothing for them). Its two methods read
+        /// their own ship instead.
+        /// </summary>
+        [GamePatch(Feature, "CG.Ship.Scanning.SignatureComponent", "Start", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.Scanning.SignatureComponent", "Update", PatchKind.Transpiler, Optional = true)]
+        private static IEnumerable<CodeInstruction> SignatureTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
+        {
+            // Stack: [] -> [this] -> OwnShip -> [PlayerControlledShip].
+            return ReplaceCalls(instructions, original, SignatureShipGetter, OwnShipMethod, "its ship", new CodeInstruction(OpCodes.Ldarg_0));
+        }
+
         private static IEnumerable<CodeInstruction> ReplacePlayerShip(IEnumerable<CodeInstruction> instructions, MethodBase original, MethodInfo replacement)
+        {
+            // Stack: [ClientGame] -> [ClientGame, this] -> Redirect -> [PlayerControlledShip].
+            return ReplaceCalls(instructions, original, PlayerShipGetter, replacement, "the player ship",
+                new CodeInstruction(original.IsStatic ? OpCodes.Ldnull : OpCodes.Ldarg_0));
+        }
+
+        /// <summary>
+        /// Replaces each call of a getter with the given loads and a call of the replacement. Labels and exception blocks move
+        /// to the first new instruction so branches (the ?. pattern) still land on it.
+        /// </summary>
+        private static IEnumerable<CodeInstruction> ReplaceCalls(IEnumerable<CodeInstruction> instructions, MethodBase original, MethodInfo getter,
+            MethodInfo replacement, string what, params CodeInstruction[] loads)
         {
             int replaced = 0;
             foreach (CodeInstruction instruction in instructions)
             {
-                if ((instruction.opcode == OpCodes.Callvirt || instruction.opcode == OpCodes.Call) && instruction.operand is MethodInfo &&
-                    (MethodInfo)instruction.operand == PlayerShipGetter)
+                if (getter != null && (instruction.opcode == OpCodes.Callvirt || instruction.opcode == OpCodes.Call) && instruction.operand is MethodInfo &&
+                    (MethodInfo)instruction.operand == getter)
                 {
-                    // Stack: [ClientGame] -> [ClientGame, this] -> Redirect -> [PlayerControlledShip]. Labels and exception
-                    // blocks move to the first new instruction so branches (the ?. pattern) still land on it.
-                    var context = new CodeInstruction(original.IsStatic ? OpCodes.Ldnull : OpCodes.Ldarg_0);
-                    context.labels.AddRange(instruction.labels);
-                    context.blocks.AddRange(instruction.blocks);
-                    yield return context;
-                    yield return new CodeInstruction(OpCodes.Call, replacement);
+                    for (int i = 0; i <= loads.Length; i++)
+                    {
+                        CodeInstruction added = i < loads.Length ? new CodeInstruction(loads[i].opcode, loads[i].operand) : new CodeInstruction(OpCodes.Call, replacement);
+                        if (i == 0)
+                        {
+                            added.labels.AddRange(instruction.labels);
+                            added.blocks.AddRange(instruction.blocks);
+                        }
+                        yield return added;
+                    }
                     replaced++;
                     continue;
                 }
                 yield return instruction;
             }
-            if (replaced == 0) Log.Warn("Two ships: " + original.DeclaringType.FullName + "." + original.Name + " no longer reads the player ship; the game may have changed.");
+            if (replaced == 0) Log.Warn("Two ships: " + original.DeclaringType.FullName + "." + original.Name + " no longer reads " + what + "; the game may have changed.");
         }
+
         // ---------------------------------------------------------------- sector twists and hazards act on every ship
 
         private static bool _everyShip;
         private static readonly FieldInfo BlackHolePlatformField = GameMember.Field("Gameplay.SectorGameplay.BlackHole", "_playerShipPlatform");
+
+        /// <summary>The ship each black hole (by its instance ID) is pointed at, so its field is only set when that changes.</summary>
+        private static readonly Dictionary<int, PlayerControlledShip> BlackHoleShips = new Dictionary<int, PlayerControlledShip>();
 
         /// <summary>
         /// A world effect's method that acts on "the player ship" (a sector twist's stat modifiers, a module disabler, an
@@ -448,7 +534,8 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// Host: a black hole pulls and damages the player ship nearest to it, each physics step. The game kept the ship the
-        /// host was on when it spawned (and damaged whichever ship the host was on at the time).
+        /// host was on when it spawned (and damaged whichever ship the host was on at the time). The black hole's own field
+        /// (the ship it pulls) is only set when the nearest ship changes.
         /// </summary>
         [GamePatch(Feature, "Gameplay.SectorGameplay.BlackHole", "FixedUpdate", PatchKind.Prefix)]
         private static void BlackHolePrefix(Component __instance, out bool __state)
@@ -459,7 +546,15 @@ namespace VoidCrewFleet
             {
                 PlayerControlledShip nearest = NearestShip(__instance.transform.position);
                 if (nearest == null) return;
-                BlackHolePlatformField.SetValue(__instance, nearest.Platform);
+                int id = __instance.GetInstanceID();
+                PlayerControlledShip pointed;
+                if (!BlackHoleShips.TryGetValue(id, out pointed) || !ReferenceEquals(pointed, nearest))
+                {
+                    BlackHolePlatformField.SetValue(__instance, nearest.Platform);
+                    // Black holes come one or a few a mission: the list only needs emptying now and then.
+                    if (BlackHoleShips.Count >= 32 && !BlackHoleShips.ContainsKey(id)) BlackHoleShips.Clear();
+                    BlackHoleShips[id] = nearest;
+                }
                 BeginOverride(nearest);
                 __state = true;
             }
@@ -473,6 +568,119 @@ namespace VoidCrewFleet
         private static void BlackHoleFinalizer(bool __state)
         {
             if (__state) EndOverride();
+        }
+
+        // ---------------------------------------------------------------- sector twists that spawn at a ship
+
+        /// <summary>Each twist's turns so far (by its instance ID): its next spawn goes for the next living ship.</summary>
+        private static readonly Dictionary<int, int> TwistTurns = new Dictionary<int, int>();
+
+        private static readonly List<int> TwistSlots = new List<int>();
+
+        private static readonly Func<OrbitObject, bool> Trackable = Bind<Func<OrbitObject, bool>>(GameMember.Method(typeof(SpawnedObjectTracker), "IsTrackable"));
+
+        private static readonly Action<SpawnedObjectTracker, OrbitObject> DespawnTracked =
+            Bind<Action<SpawnedObjectTracker, OrbitObject>>(GameMember.Method(typeof(SpawnedObjectTracker), "Despawn"));
+
+        /// <summary>
+        /// Host: a sector twist that isn't on a ship spawns at "the player ship": asteroid rain's rocks, and the enemies a
+        /// near-player spawner brings. Each spawn goes for the next living ship in turn, so every ship of the fleet gets its
+        /// share; the game sent them all at the ship the host was on. (Fleet Battle doesn't get these twists: the game only
+        /// gives twists to a mission's objective sectors, and the match stays in the Pilgrimage's first sector. Were one there,
+        /// it would take turns between the teams alike.)
+        /// </summary>
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.AsteroidRain", "SpawnAsteroid", PatchKind.Prefix, Optional = true)]
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.NearPlayerSpawner", "SpawnConfiguredObjects", PatchKind.Prefix, Optional = true)]
+        private static void TwistSpawnPrefix(Component __instance)
+        {
+            PlayerControlledShip ship = null;
+            try
+            {
+                if (FleetShips.Active && __instance != null) ship = NextTwistShip(__instance.GetInstanceID());
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Choosing the ship a sector twist spawns at", e);
+            }
+            BeginOverride(ship);
+        }
+
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.AsteroidRain", "SpawnAsteroid", PatchKind.Finalizer, Optional = true)]
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.NearPlayerSpawner", "SpawnConfiguredObjects", PatchKind.Finalizer, Optional = true)]
+        private static void TwistSpawnFinalizer()
+        {
+            EndOverride();
+        }
+
+        /// <summary>The living ship a twist's next spawn goes for (they take turns, lowest number first), or null.</summary>
+        private static PlayerControlledShip NextTwistShip(int twist)
+        {
+            FleetShips.AliveSlots(TwistSlots);
+            if (TwistSlots.Count == 0) return null;
+            int turn;
+            // Twists come a few a sector: the list only needs emptying now and then.
+            if (!TwistTurns.TryGetValue(twist, out turn) && TwistTurns.Count >= 64) TwistTurns.Clear();
+            TwistTurns[twist] = turn + 1;
+            return FleetShips.BySlot(TwistSlots[(turn & int.MaxValue) % TwistSlots.Count]);
+        }
+
+        /// <summary>
+        /// Host, each physics step: a near-player spawner sends what it spawned away (to the off-world sector) once it is out
+        /// of range of the player ship. With several ships that is out of range of every ship, so the enemies that came for
+        /// one ship stay while the host is on another (the game measured from the host's ship only). The game's own checks
+        /// and its own send-off do the rest.
+        /// </summary>
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.SpawnedObjectTracker", "UpdateTrackedObjects", PatchKind.Prefix, Optional = true)]
+        private static bool TrackedObjectsPrefix(SpawnedObjectTracker __instance, OrbitObject referenceObject, Queue<OrbitObject> ___trackedObjects,
+            float ___maximumDespawnRange)
+        {
+            if (!FleetShips.Active || !(referenceObject is PlayerControlledShip) || ___trackedObjects == null || Trackable == null || DespawnTracked == null)
+                return true;
+            float range = ___maximumDespawnRange * ___maximumDespawnRange;
+            int count = ___trackedObjects.Count;
+            for (int i = 0; i < count; i++)
+            {
+                OrbitObject tracked = ___trackedObjects.Dequeue();
+                try
+                {
+                    // Gone, or sent away already: no longer tracked (as the game does).
+                    if (!Trackable(tracked)) continue;
+                    if (___maximumDespawnRange > 0f && !NearAnyShip(tracked.WorldPosition, range)) DespawnTracked(__instance, tracked);
+                    else ___trackedObjects.Enqueue(tracked);
+                }
+                catch (Exception e)
+                {
+                    ___trackedObjects.Enqueue(tracked);
+                    Log.Failure("Checking what a near-player spawner spawned", e);
+                }
+            }
+            return false;
+        }
+
+        /// <summary>Whether a point is within range (squared) of any player ship.</summary>
+        private static bool NearAnyShip(Vector3 point, float rangeSquared)
+        {
+            List<PlayerControlledShip> ships = FleetShips.All;
+            for (int i = 0; i < ships.Count; i++)
+            {
+                PlayerControlledShip ship = ships[i];
+                if (ship != null && (ship.WorldPosition - point).sqrMagnitude <= rangeSquared) return true;
+            }
+            return false;
+        }
+
+        /// <summary>A fast call to a private game method, or null when it is missing or has changed.</summary>
+        private static T Bind<T>(MethodInfo method) where T : class
+        {
+            if (method == null) return null;
+            try
+            {
+                return Delegate.CreateDelegate(typeof(T), method, false) as T;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         // ---------------------------------------------------------------- the mission's scenario rules
