@@ -14,12 +14,13 @@ using LoadoutTerminal = UI.ShipLoadoutTerminal.ShipLoadoutTerminal;
 namespace VoidCrewFleet
 {
     /// <summary>
-    /// The hub's ship loadout terminal, made for a fleet. A FLEET section in the terminal's top-right corner sets how many
-    /// ships the game's own missions use (or, in Fleet Battle, opens the lobby screen), lists every ship, and chooses which
-    /// ship the terminal is setting up: SHIP 1 is the game's own selection (so the Ship Customizer's CUSTOM loadout works
-    /// there as before), ships 2-6 are this plugin's. While another ship is chosen, SELECT picks that ship's loadout and the
-    /// list and SELECTED marker show its choice. Anyone in the room can use it (in Fleet Battle, only a ship's own team);
-    /// the host keeps the choices, and refuses a loadout of another type than the one the host forced for that ship.
+    /// The hub's ship loadout terminal, made for a fleet. A FLEET section in the terminal's top-right corner shows how many
+    /// ships the game's own missions use (the host's SHIPS button sets it; in Fleet Battle TEAMS & RULES opens the lobby
+    /// screen), lists every ship, and chooses which ship the terminal is setting up: SHIP 1 is the game's own selection (so
+    /// the Ship Customizer's CUSTOM loadout works there as before), ships 2-6 are this plugin's. Using the terminal starts on
+    /// the player's own ship. While another ship is chosen, SELECT picks that ship's loadout and the list and SELECTED marker
+    /// show its choice. Anyone in the room can set up a ship (in Fleet Battle, only a ship's own team); the host keeps the
+    /// choices, and refuses a loadout of another type than the one the host forced for that ship.
     /// </summary>
     internal static class HubTerminalUi
     {
@@ -68,17 +69,35 @@ namespace VoidCrewFleet
                 }
                 EnsureBar();
                 Refresh();
-                // A newly opened terminal shows the ship the player crews (their pick on the lobby screen), when it isn't ship 1.
-                if (opened && _root != null && Available)
-                {
-                    int own = FleetShips.CrewSlot(FleetShips.LocalActor);
-                    if (own > 0 && own < HubFleet.PlannedShips) _root.schedule.Execute(() => EditShip(own)).ExecuteLater(50);
-                }
+                if (opened) ShowOwnShip();
             }
             catch (Exception e)
             {
                 Log.Failure("Adding the FLEET section to the loadout terminal", e);
             }
+        }
+
+        /// <summary>Each time a player starts using the terminal, it shows the ship they crew.</summary>
+        [GamePatch(Feature, "UI.ShipLoadoutTerminal.ShipLoadoutTerminal", "OnEnterUI", PatchKind.Postfix, Optional = true)]
+        private static void EnterPostfix(LoadoutTerminal __instance)
+        {
+            try
+            {
+                if (__instance == _terminal) ShowOwnShip();
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Showing your own ship at the loadout terminal", e);
+            }
+        }
+
+        /// <summary>The terminal switches to the ship the player crews (their pick on the lobby screen), when it shows another.</summary>
+        private static void ShowOwnShip()
+        {
+            if (_root == null || !Available) return;
+            int own = FleetShips.CrewSlot(FleetShips.LocalActor);
+            if (own < 0 || own == _editingSlot || own >= HubFleet.PlannedShips) return;
+            _root.schedule.Execute(() => EditShip(own)).ExecuteLater(50);
         }
 
         /// <summary>
@@ -419,10 +438,13 @@ namespace VoidCrewFleet
                 }
                 int ships = HubFleet.PlannedShips;
                 bool teams = FleetApi.IsTeamMatch;
+                bool host = PhotonNetwork.IsMasterClient;
+                bool savedRun = HubFleet.SavedRunChosen;
                 if (_editingSlot >= ships) EditShip(0);
 
                 _countButton.text = teams ? "TEAMS & RULES" : "SHIPS: " + ships;
-                _countButton.SetEnabled(teams || HubFleet.Variant != HubVariant.FleetBattle);
+                // Everyone may open TEAMS & RULES; only the host sets the ship count, and a saved run has one ship.
+                _countButton.SetEnabled(teams || (host && !savedRun));
                 _crewsButton.style.display = !teams && ships > 1 ? DisplayStyle.Flex : DisplayStyle.None;
 
                 List<int> order = RowOrder(ships, teams);
@@ -459,9 +481,14 @@ namespace VoidCrewFleet
                         ? label + ": pick its loadout, then SELECT."
                         : (mine < 0 ? "Pick a ship on the lobby screen (TEAMS & RULES) to set up your team's ships." : label + ": only " + team + " players can change it.");
                 }
+                else if (savedRun)
+                {
+                    _hint.text = "Saved runs have one ship.";
+                }
                 else if (ships < 2)
                 {
-                    _hint.text = "One ship, up to " + FleetSlots.MaxCrewPerShip + " players. SHIPS adds a second or third ship.";
+                    _hint.text = "One ship, up to " + FleetSlots.MaxCrewPerShip + " players. " +
+                                 (host ? "SHIPS adds a second or third ship." : "The host can add a second or third ship.");
                 }
                 else
                 {
@@ -521,7 +548,7 @@ namespace VoidCrewFleet
             _tint.style.display = DisplayStyle.Flex;
         }
 
-        /// <summary>SHIPS: one more ship (back to one after three). In Fleet Battle: TEAMS & RULES.</summary>
+        /// <summary>SHIPS (host only): one more ship (back to one after three). In Fleet Battle: TEAMS & RULES.</summary>
         private static void ToggleShips()
         {
             if (FleetApi.IsTeamMatch)
@@ -533,6 +560,7 @@ namespace VoidCrewFleet
                 else PvpTeams.Reset();
                 return;
             }
+            if (!PhotonNetwork.IsMasterClient || HubFleet.SavedRunChosen) return;
             int ships = HubFleet.PlannedMode == FleetMode.OneShip ? 1 : HubFleet.PlannedShips;
             int next = ships >= FleetSlots.MaxCoopShips ? 1 : ships + 1;
             if (next < 2 && HubFleet.Variant == HubVariant.FleetPilgrimage) next = 2;

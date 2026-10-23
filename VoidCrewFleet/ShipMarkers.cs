@@ -23,7 +23,7 @@ namespace VoidCrewFleet
     /// - "homunculus removed / connected" warnings show only to the players of that ship;
     /// - the blinking power-recovery hint follows one ship's power, breakers and homunculus, and points at that ship's
     ///   parts (the game keeps one hint and lets the ship that registered last take it over). In co-op each ship gets
-    ///   its own hint.
+    ///   its own hint. A lost ship's hint goes with it.
     /// </summary>
     internal static class ShipMarkers
     {
@@ -32,10 +32,24 @@ namespace VoidCrewFleet
         private static readonly MethodInfo RemoveDefectMarker = AccessTools.Method(typeof(DefectMarkerProvider), "RemoveMarker");
         private static readonly MethodInfo RemoveBreachMarker = AccessTools.Method(typeof(HullMarkerProvider), "RemoveMarker");
         private static readonly MethodInfo UrgencyInit = GameMember.Method(typeof(UrgencyMarkerProvider), "Init");
+        private static readonly FieldInfo UrgencyMarkerField = GameMember.Field(typeof(UrgencyMarkerProvider), "_markerData");
 
         private static readonly Dictionary<PlayerControlledShip, UrgencyMarkerProvider> UrgencyByShip = new Dictionary<PlayerControlledShip, UrgencyMarkerProvider>();
         private static readonly Dictionary<int, PlayerControlledShip> TargetHome = new Dictionary<int, PlayerControlledShip>();
         private static UrgencyMarkerProvider _urgencyTemplate;
+
+        /// <summary>A power-recovery hint and the ship it is tied to.</summary>
+        private sealed class Hint
+        {
+            public UrgencyMarkerProvider Provider;
+            public PlayerControlledShip Ship;
+        }
+
+        /// <summary>
+        /// Every tied hint by instance ID. Unlike FleetShips' assignment it still names the ship once that ship is destroyed,
+        /// so a lost ship's hint is told apart from a hint tied to no ship.
+        /// </summary>
+        private static readonly Dictionary<int, Hint> Hints = new Dictionary<int, Hint>();
 
         /// <summary>True when an actor is on the other PvP team (a player not on a team yet is nobody's enemy).</summary>
         private static bool IsOtherTeam(int actor)
@@ -228,9 +242,10 @@ namespace VoidCrewFleet
                     ship = FleetShips.LocalShip;
                     if (ship == null) ship = FleetShips.ViewShip;
                     if (ship == null) return;
-                    FleetShips.AssignOwner(__instance, ship);
+                    Tie(__instance, ship);
                     _urgencyTemplate = __instance;
                 }
+                if (IsLost(ship)) return;
                 UrgencyByShip[ship] = __instance;
                 if (____markerTargets == null) return;
                 ____markerTargets.Clear();
@@ -253,9 +268,13 @@ namespace VoidCrewFleet
             EnsureUrgencyPerShip();
         }
 
+        // A hint tied to a lost ship reacts to nothing (FleetShips.AssignedOwner no longer names a destroyed ship, which
+        // made such a hint take every ship's targets and events).
+
         [GamePatch(Feature, "UI.ObjectMarker.UrgencyMarkerProvider", "OnHintMarkerTargetRegistered", PatchKind.Prefix)]
         private static bool UrgencyTargetPrefix(UrgencyMarkerProvider __instance, Transform target)
         {
+            if (TiedToLostShip(__instance)) return false;
             if (!FleetShips.Active || target == null) return true;
             PlayerControlledShip home = HomeShip(target);
             PlayerControlledShip mine = FleetShips.AssignedOwner(__instance);
@@ -266,6 +285,7 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "UI.ObjectMarker.UrgencyMarkerProvider", "OnCarryableEjected", PatchKind.Prefix)]
         private static bool UrgencySocketPrefix(UrgencyMarkerProvider __instance, ICarryablesSocket socket)
         {
+            if (TiedToLostShip(__instance)) return false;
             if (!FleetShips.Active) return true;
             PlayerControlledShip ship = FleetShips.OwnerOf(socket as Component);
             PlayerControlledShip mine = FleetShips.AssignedOwner(__instance);
@@ -274,11 +294,12 @@ namespace VoidCrewFleet
 
         /// <summary>Carrying another ship's homunculus doesn't light this ship's "bring it to the core" hint.</summary>
         [GamePatch(Feature, "UI.ObjectMarker.UrgencyMarkerProvider", "OnLocalPayloadChanged", PatchKind.Prefix)]
-        private static void UrgencyPayloadPrefix(UrgencyMarkerProvider __instance, ref CarryableObject carryable)
+        private static bool UrgencyPayloadPrefix(UrgencyMarkerProvider __instance, ref CarryableObject carryable)
         {
             try
             {
-                if (carryable == null || !FleetShips.Active || !__instance.HomunculusRef.IsInstanceOf(carryable)) return;
+                if (TiedToLostShip(__instance)) return false;
+                if (carryable == null || !FleetShips.Active || !__instance.HomunculusRef.IsInstanceOf(carryable)) return true;
                 UrgencyMarkerTarget target = carryable.GetComponentInChildren<UrgencyMarkerTarget>(true);
                 PlayerControlledShip home = target != null ? HomeShip(target.transform) : FleetShips.OwnerOf(carryable);
                 PlayerControlledShip mine = FleetShips.AssignedOwner(__instance);
@@ -288,6 +309,19 @@ namespace VoidCrewFleet
             {
                 Log.Failure("Checking a carried homunculus", e);
             }
+            return true;
+        }
+
+        /// <summary>
+        /// A hint tied to a lost ship shows nothing: every reason the game checks (its ship's power and breakers, which can
+        /// still change while the ship dies, the homunculus, a socket) ends here.
+        /// </summary>
+        [GamePatch(Feature, "UI.ObjectMarker.UrgencyMarkerProvider", "CheckConditions", PatchKind.Prefix, Optional = true)]
+        private static bool UrgencyConditionsPrefix(UrgencyMarkerProvider __instance)
+        {
+            if (!TiedToLostShip(__instance)) return true;
+            HideMarker(__instance);
+            return false;
         }
 
         /// <summary>The ship a hint target belongs to, remembered the first time it is seen (a homunculus can be carried away).</summary>
@@ -307,15 +341,117 @@ namespace VoidCrewFleet
             return ship;
         }
 
+        /// <summary>Ties a hint to a ship: FleetShips' assignment (the game's code in it reads that ship) and Hints.</summary>
+        private static void Tie(UrgencyMarkerProvider provider, PlayerControlledShip ship)
+        {
+            FleetShips.AssignOwner(provider, ship);
+            Hints[provider.GetInstanceID()] = new Hint { Provider = provider, Ship = ship };
+        }
+
+        /// <summary>A ship that is dying or gone.</summary>
+        private static bool IsLost(PlayerControlledShip ship)
+        {
+            return ship == null || ship.StartedDeath;
+        }
+
+        /// <summary>Whether a hint is tied to a lost ship (a hint tied to no ship, in a one-ship mission, is not).</summary>
+        private static bool TiedToLostShip(UrgencyMarkerProvider provider)
+        {
+            Hint hint;
+            return (object)provider != null && Hints.TryGetValue(provider.GetInstanceID(), out hint) && IsLost(hint.Ship);
+        }
+
+        private static void HideMarker(UrgencyMarkerProvider provider)
+        {
+            var marker = GameMember.Read<ObjectMarkerData>(UrgencyMarkerField, provider, null);
+            if (marker != null && marker.Enabled != null) marker.Enabled.SetValue(false);
+        }
+
+        /// <summary>
+        /// A hint goes: its marker is hidden, switching it off lets go of its ship's power and breakers (the game's own
+        /// OnDisable, which still reads the ship it is tied to), then it is untied and destroyed.
+        /// </summary>
+        private static void Retire(UrgencyMarkerProvider provider)
+        {
+            HideMarker(provider);
+            if (provider.enabled) provider.enabled = false;
+            FleetShips.AssignOwner(provider, null);
+            UnityEngine.Object.Destroy(provider);
+        }
+
+        /// <summary>A ship is lost: its power-recovery hint goes with it (every ship's in co-op, the player's own in PvP).</summary>
+        public static void OnShipLost(PlayerControlledShip ship)
+        {
+            if (ship == null) return;
+            try
+            {
+                bool templateLost = false;
+                foreach (Hint hint in new List<Hint>(Hints.Values))
+                {
+                    if (hint.Ship != ship || hint.Provider == null) continue;
+                    if (hint.Provider == _urgencyTemplate) templateLost = true;
+                    Retire(hint.Provider);
+                    Log.Verbose("The power-recovery hint of " + FleetShips.Describe(ship) + " goes with it.");
+                }
+                UrgencyByShip.Remove(ship);
+                // Copies of a hint are made from a live one.
+                if (templateLost) _urgencyTemplate = AnyLiveHint();
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Removing a lost ship's power-recovery hint", e);
+            }
+        }
+
+        private static UrgencyMarkerProvider AnyLiveHint()
+        {
+            foreach (KeyValuePair<PlayerControlledShip, UrgencyMarkerProvider> entry in UrgencyByShip)
+            {
+                if (entry.Value != null && !IsLost(entry.Key)) return entry.Value;
+            }
+            return null;
+        }
+
+        /// <summary>The hints of lost ships go (all but the one copies are made from, which stays but shows nothing).</summary>
         private static void PruneUrgency()
         {
-            foreach (PlayerControlledShip ship in new List<PlayerControlledShip>(UrgencyByShip.Keys))
+            List<KeyValuePair<PlayerControlledShip, UrgencyMarkerProvider>> gone = null;
+            foreach (KeyValuePair<PlayerControlledShip, UrgencyMarkerProvider> entry in UrgencyByShip)
             {
-                UrgencyMarkerProvider provider = UrgencyByShip[ship];
-                if (ship != null && provider != null) continue;
-                UrgencyByShip.Remove(ship);
-                if (provider != null && provider != _urgencyTemplate) UnityEngine.Object.Destroy(provider);
+                if (entry.Value != null && !IsLost(entry.Key)) continue;
+                if (gone == null) gone = new List<KeyValuePair<PlayerControlledShip, UrgencyMarkerProvider>>();
+                gone.Add(entry);
             }
+            if (gone == null) return;
+            foreach (KeyValuePair<PlayerControlledShip, UrgencyMarkerProvider> entry in gone)
+            {
+                UrgencyByShip.Remove(entry.Key);
+                if (entry.Value != null && entry.Value != _urgencyTemplate) Retire(entry.Value);
+            }
+        }
+
+        /// <summary>Forgets the ties of hints that are destroyed.</summary>
+        private static void PruneHints()
+        {
+            List<int> gone = null;
+            foreach (KeyValuePair<int, Hint> entry in Hints)
+            {
+                if (entry.Value.Provider != null) continue;
+                if (gone == null) gone = new List<int>();
+                gone.Add(entry.Key);
+            }
+            if (gone == null) return;
+            foreach (int id in gone) Hints.Remove(id);
+        }
+
+        private static int LivingShipCount()
+        {
+            int count = 0;
+            foreach (PlayerControlledShip ship in FleetShips.All)
+            {
+                if (!IsLost(ship)) count++;
+            }
+            return count;
         }
 
         /// <summary>Co-op: every ship without a hint gets one (a copy of the HUD's own), tied to that ship.</summary>
@@ -329,7 +465,7 @@ namespace VoidCrewFleet
                 foreach (PlayerControlledShip ship in FleetShips.All)
                 {
                     UrgencyMarkerProvider existing;
-                    if (ship == null || (UrgencyByShip.TryGetValue(ship, out existing) && existing != null)) continue;
+                    if (IsLost(ship) || (UrgencyByShip.TryGetValue(ship, out existing) && existing != null)) continue;
                     UrgencyMarkerProvider copy = template.gameObject.AddComponent<UrgencyMarkerProvider>();
                     copy.MarkerOnShipCoreInfo = template.MarkerOnShipCoreInfo;
                     copy.MarkerOnHomunculusInfo = template.MarkerOnHomunculusInfo;
@@ -340,7 +476,7 @@ namespace VoidCrewFleet
                     copy.DisableBreakerMarkerDelayPreShutDown = template.DisableBreakerMarkerDelayPreShutDown;
                     copy.DisableBreakerMarkerDelayPostShutdown = template.DisableBreakerMarkerDelayPostShutdown;
                     copy.ForceActivateSystemTime = template.ForceActivateSystemTime;
-                    FleetShips.AssignOwner(copy, ship);
+                    Tie(copy, ship);
                     UrgencyByShip[ship] = copy;
                     UrgencyInit.Invoke(copy, null);
                     Log.Info("Co-op: " + FleetShips.Describe(ship) + " has its own power-recovery hint.");
@@ -356,13 +492,10 @@ namespace VoidCrewFleet
         public static void Tick()
         {
             KeepHudOnViewShip();
-            if (_urgencyTemplate == null) return;
-            if (!FleetShips.Active)
-            {
-                PruneUrgency();
-                return;
-            }
-            if (!FleetSession.IsPvP && UrgencyByShip.Count < FleetShips.All.Count) EnsureUrgencyPerShip();
+            PruneHints();
+            PruneUrgency();
+            if (_urgencyTemplate == null || !FleetShips.Active || FleetSession.IsPvP) return;
+            if (UrgencyByShip.Count < LivingShipCount()) EnsureUrgencyPerShip();
         }
     }
 }

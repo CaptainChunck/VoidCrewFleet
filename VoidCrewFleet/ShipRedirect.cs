@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Reflection.Emit;
 using CG.Game;
+using CG.Game.Scenarios;
 using CG.Space;
 using HarmonyLib;
 using UnityEngine;
@@ -13,7 +14,11 @@ namespace VoidCrewFleet
     /// With two player ships, every ship part must find its own ship. The game finds "the" ship through the single
     /// ClientGame.PlayerShip, set by whichever ship woke last. This replaces those lookups, in the game's components that
     /// make them, with "the player ship this component is on, if any, otherwise the game's answer"; and the game's answer
-    /// itself becomes the ship of the local player's crew. With one ship nothing changes: both are the game's own value.
+    /// itself becomes the ship of the local player's crew. In co-op, things in space that pick a ship to go after (enemies
+    /// aiming, scouts looking, scanners, drones, summoned escorts) get the living player ship nearest to them instead, and
+    /// the mission's scenario rules (where they place what they spawn, which ship they damage) the one nearest to what set
+    /// them off: otherwise they would all go after whatever ship the host is on. With one ship nothing changes: every answer
+    /// is the game's own value.
     /// The method list was generated from the game's Assembly-CSharp (every component method that reads
     /// ClientGame.PlayerShip), leaving out the systems that get their own dedicated patches: spawning, sector changes,
     /// the playable area, the local player's own checks, EVA inertia zones, ship death, saves and combat.
@@ -24,6 +29,7 @@ namespace VoidCrewFleet
 
         private static readonly MethodInfo PlayerShipGetter = AccessTools.PropertyGetter(typeof(ClientGame), "PlayerShip");
         private static readonly MethodInfo RedirectMethod = AccessTools.Method(typeof(ShipRedirect), nameof(Redirect));
+        private static readonly MethodInfo RedirectNearestMethod = AccessTools.Method(typeof(ShipRedirect), nameof(RedirectNearest));
         private static readonly Dictionary<Type, FieldInfo> OuterThisFields = new Dictionary<Type, FieldInfo>();
 
         private static int _viewFrame = -1;
@@ -84,6 +90,49 @@ namespace VoidCrewFleet
             return own != null ? own : fallback;
         }
 
+        /// <summary>
+        /// Replaces ClientGame.Current.PlayerShip in the method of something in space that picks a ship to go after: the player
+        /// ship it is on, if any; else in co-op the living player ship nearest to it (unless a method has set the ship itself,
+        /// BeginOverride); else the game's answer (in PvP, the local player's own ship, as for any other part).
+        /// </summary>
+        public static PlayerControlledShip RedirectNearest(ClientGame game, object context)
+        {
+            PlayerControlledShip fallback = game != null ? game.PlayerShip : null;
+            if (context == null || !FleetShips.Active) return fallback;
+            Component component = context as Component ?? OuterComponent(context);
+            if (component == null) return fallback;
+            PlayerControlledShip own = FleetShips.OwnerOf(component);
+            if (own != null) return own;
+            if (_override != null || FleetSession.Mode != FleetMode.Coop) return fallback;
+            PlayerControlledShip nearest;
+            try
+            {
+                nearest = NearestShip(component.transform.position);
+            }
+            catch
+            {
+                // Being torn down: the game's answer then.
+                nearest = null;
+            }
+            return nearest != null ? nearest : fallback;
+        }
+
+        /// <summary>The living player ship nearest to a point, or null when none is left.</summary>
+        public static PlayerControlledShip NearestShip(Vector3 point)
+        {
+            PlayerControlledShip nearest = null;
+            float best = float.MaxValue;
+            foreach (PlayerControlledShip ship in FleetShips.All)
+            {
+                if (ship == null || ship.StartedDeath || ship.Platform == null) continue;
+                float distance = (ship.Platform.Position - point).sqrMagnitude;
+                if (distance >= best) continue;
+                best = distance;
+                nearest = ship;
+            }
+            return nearest;
+        }
+
         /// <summary>For coroutine and lambda bodies: the component that created them.</summary>
         internal static Component OuterComponent(object context)
         {
@@ -108,7 +157,6 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "AreasOfEffectPlayershipMaterialApplier", "Start", PatchKind.Transpiler)]
         [GamePatch(Feature, "AudioAlarmTrigger", "OnDangerProximity", PatchKind.Transpiler)]
         [GamePatch(Feature, "CameraShakeEffectTrigger", "TriggerCameraShake", PatchKind.Transpiler, Arguments = new string[] { "System.Single" })]
-        [GamePatch(Feature, "CarryableSummonConsumptionEffect", "SummonUnits", PatchKind.Transpiler)]
         [GamePatch(Feature, "CentralComputerPoweredEvents", "OnDestroy", PatchKind.Transpiler)]
         [GamePatch(Feature, "CentralComputerPoweredEvents", "Start", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Client.Audio.ShipAmbienceController", "OnDestroy", PatchKind.Transpiler)]
@@ -146,14 +194,10 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "CG.Game.OrbitEffect.NearSunOrbitEffect", "CheckAndTriggerTemperatureWarnings", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Game.OrbitEffect.NearSunOrbitEffect", "Update", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Game.Scenarios.WavesSpawnManager", "Update", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.AimForShipSpaceCraftController", "Start", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.ImpulseJumping.NpcImpulseJumper", "JumpToPlayerSectorPosition", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.ImpulseJumping.NpcImpulseJumper", "TEST_SetCommand_PingPongToPlayerSector", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.ProximityMineController", "NetworkNotifyTargetSet", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.ReinforcementCalling.NpcReinforcementCaller", "OnEnable", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.ScanningEnemyController", "get_playerShip", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.Scout.ScoutController", "get_PlayerShip", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.SwarmController", "DroneShouldBreakAttack", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Objects.AbstractEnvironmentalObject", "get_Ship", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Objects.CarryableObject", "get_Ship", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Objects.CarryableObject", "UpdateSector", PatchKind.Transpiler)]
@@ -262,6 +306,22 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "PlayerShipDeathSequence", "DisableShipShields", PatchKind.Transpiler)]
         private static IEnumerable<CodeInstruction> RedirectTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
         {
+            return ReplacePlayerShip(instructions, original, RedirectMethod);
+        }
+
+        /// <summary>Things in space that pick a player ship to go after: in co-op the living one nearest to them (RedirectNearest).</summary>
+        [GamePatch(Feature, "CarryableSummonConsumptionEffect", "SummonUnits", PatchKind.Transpiler)]
+        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.AimForShipSpaceCraftController", "Start", PatchKind.Transpiler)]
+        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.ScanningEnemyController", "get_playerShip", PatchKind.Transpiler)]
+        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.Scout.ScoutController", "get_PlayerShip", PatchKind.Transpiler)]
+        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.SwarmController", "DroneShouldBreakAttack", PatchKind.Transpiler)]
+        private static IEnumerable<CodeInstruction> NearestTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
+        {
+            return ReplacePlayerShip(instructions, original, RedirectNearestMethod);
+        }
+
+        private static IEnumerable<CodeInstruction> ReplacePlayerShip(IEnumerable<CodeInstruction> instructions, MethodBase original, MethodInfo replacement)
+        {
             int replaced = 0;
             foreach (CodeInstruction instruction in instructions)
             {
@@ -274,7 +334,7 @@ namespace VoidCrewFleet
                     context.labels.AddRange(instruction.labels);
                     context.blocks.AddRange(instruction.blocks);
                     yield return context;
-                    yield return new CodeInstruction(OpCodes.Call, RedirectMethod);
+                    yield return new CodeInstruction(OpCodes.Call, replacement);
                     replaced++;
                     continue;
                 }
@@ -397,17 +457,7 @@ namespace VoidCrewFleet
             if (!FleetShips.Active || !Photon.Pun.PhotonNetwork.IsMasterClient || BlackHolePlatformField == null) return;
             try
             {
-                PlayerControlledShip nearest = null;
-                float best = float.MaxValue;
-                Vector3 here = __instance.transform.position;
-                foreach (PlayerControlledShip ship in FleetShips.All)
-                {
-                    if (ship == null || ship.StartedDeath || ship.Platform == null) continue;
-                    float distance = (ship.Platform.Position - here).sqrMagnitude;
-                    if (distance >= best) continue;
-                    best = distance;
-                    nearest = ship;
-                }
+                PlayerControlledShip nearest = NearestShip(__instance.transform.position);
                 if (nearest == null) return;
                 BlackHolePlatformField.SetValue(__instance, nearest.Platform);
                 BeginOverride(nearest);
@@ -423,6 +473,72 @@ namespace VoidCrewFleet
         private static void BlackHoleFinalizer(bool __state)
         {
             if (__state) EndOverride();
+        }
+
+        // ---------------------------------------------------------------- the mission's scenario rules
+
+        /// <summary>
+        /// Co-op: the ship a scenario rule means by "the player ship". The living player ship nearest to what set the rule off
+        /// (that ship itself when it was a player ship); for a rule nothing in space set off, the lead ship of the fleet's void
+        /// jumps (the living ship with the lowest number until a jump says otherwise). Null outside co-op with several ships.
+        /// </summary>
+        private static PlayerControlledShip ScenarioShip(Classifier.ClassifierContext context)
+        {
+            if (!FleetShips.Active || FleetSession.Mode != FleetMode.Coop) return null;
+            object trigger, position;
+            if (context != null && context.TryGetValue(Classifier.ClassifierContextParameter.TriggeringOrbitObject, out trigger) && trigger != null &&
+                context.TryGetValue(Classifier.ClassifierContextParameter.TriggeringOrbitObjectObjectPosition, out position) && position is Vector3)
+            {
+                PlayerControlledShip nearest = NearestShip((Vector3)position);
+                if (nearest != null) return nearest;
+            }
+            return FleetShips.BySlot(VoidJumpLink.LeaderSlot);
+        }
+
+        /// <summary>
+        /// A scenario rule that places what it spawns or sends relative to "the player ship", damages it, or sets NPCs on it:
+        /// while it runs, that is the ship ScenarioShip picks, not whichever ship the host is on.
+        /// </summary>
+        [GamePatch(Feature, "CG.Game.Scenarios.Actions.DamageShip", "Invoke", PatchKind.Prefix, Optional = true)]
+        [GamePatch(Feature, "CG.Game.Scenarios.Actions.NpcCommandMove", "Invoke", PatchKind.Prefix, Optional = true)]
+        [GamePatch(Feature, "CG.Game.Scenarios.Actions.PositioningModeExtensions", "GetPosition", PatchKind.Prefix, Optional = true)]
+        private static void ScenarioPrefix(Classifier.ClassifierContext context)
+        {
+            PlayerControlledShip ship = null;
+            try
+            {
+                ship = ScenarioShip(context);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Choosing the ship a scenario rule acts on", e);
+            }
+            BeginOverride(ship);
+        }
+
+        /// <summary>Something a scenario rule spawns "pointing at the player ship" points at the living ship nearest to it (co-op).</summary>
+        [GamePatch(Feature, "CG.Game.Scenarios.Actions.OrientationModeExtensions", "GetRotation", PatchKind.Prefix, Optional = true)]
+        private static void PointAtPrefix(Vector3 spawnPosition)
+        {
+            PlayerControlledShip ship = null;
+            try
+            {
+                if (FleetShips.Active && FleetSession.Mode == FleetMode.Coop) ship = NearestShip(spawnPosition);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Choosing the ship a spawned object points at", e);
+            }
+            BeginOverride(ship);
+        }
+
+        [GamePatch(Feature, "CG.Game.Scenarios.Actions.DamageShip", "Invoke", PatchKind.Finalizer, Optional = true)]
+        [GamePatch(Feature, "CG.Game.Scenarios.Actions.NpcCommandMove", "Invoke", PatchKind.Finalizer, Optional = true)]
+        [GamePatch(Feature, "CG.Game.Scenarios.Actions.PositioningModeExtensions", "GetPosition", PatchKind.Finalizer, Optional = true)]
+        [GamePatch(Feature, "CG.Game.Scenarios.Actions.OrientationModeExtensions", "GetRotation", PatchKind.Finalizer, Optional = true)]
+        private static void ScenarioFinalizer()
+        {
+            EndOverride();
         }
     }
 }

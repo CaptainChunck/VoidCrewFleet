@@ -12,7 +12,7 @@ namespace VoidCrewFleet
         /// <summary>Host to everyone: show a notice. Data: text.</summary>
         Notice = 1,
 
-        /// <summary>Client to host, in the hub: how many ships the game's own missions use (1-3). Data: int.</summary>
+        /// <summary>Host only, in the hub: how many ships the game's own missions use (1-3). Data: int.</summary>
         HubShipCount = 2,
 
         /// <summary>Client to host, in the hub: a ship 2-6's loadout. Data: slot, GUID hex.</summary>
@@ -45,7 +45,7 @@ namespace VoidCrewFleet
         /// <summary>Host to the victim's client: an enemy ship's turret hit you. Data: damage, turret position.</summary>
         TurretHit = 21,
 
-        /// <summary>Client to host: an enemy completed an enhancement panel. Data: panel view id.</summary>
+        /// <summary>Client to host: an enemy completed an enhancement panel. Data: the panel's view id, its index under that view.</summary>
         Sabotage = 30,
 
         /// <summary>Client to host: plug the held hacking terminal into an enemy airlock's outside panel. Data: terminal view, ship view, airlock index.</summary>
@@ -55,7 +55,16 @@ namespace VoidCrewFleet
         HackTaken = 41,
 
         /// <summary>Client to host: the ship's own crew pulls a terminal out of its airlock panel. Data: ship view, airlock index.</summary>
-        HackPull = 42
+        HackPull = 42,
+
+        /// <summary>
+        /// A ship's void drive owner (its pilot, when that isn't the host) to the host: that ship's lever started the void jump,
+        /// so it leads. Data: slot.
+        /// </summary>
+        JumpLead = 50,
+
+        /// <summary>A ship's void drive owner (its pilot) to the player who pulled its lever: the jump didn't start. Data: text.</summary>
+        JumpRefused = 51
     }
 
     /// <summary>

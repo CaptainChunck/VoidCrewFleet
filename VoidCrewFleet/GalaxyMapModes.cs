@@ -13,8 +13,8 @@ namespace VoidCrewFleet
 {
     /// <summary>
     /// Two more missions on the hub's galaxy map, next to the game's own:
-    /// - FLEET PILGRIMAGE: the standard Pilgrimage for two ships, with more enemies and more objectives per sector;
-    /// - FLEET BATTLE: PvP, one ship per team.
+    /// - FLEET PILGRIMAGE: the standard Pilgrimage for two or three ships, with more enemies and more objectives per sector;
+    /// - FLEET BATTLE: PvP, two teams of one to three ships each.
     /// Both are the game's standard Pilgrimage underneath (so unlocks, rewards screens and the astral map work as usual);
     /// the room's fleet choice (HubFleet) says how it is played. The game builds this list in code from a fixed set of
     /// entries, so these two are added the same way, through its own private AddGamemodeEntry.
@@ -135,7 +135,10 @@ namespace VoidCrewFleet
             HubFleet.RequestVariant(variant);
         }
 
-        /// <summary>When the room's mission is a fleet mission, its entry (not the plain Pilgrimage) shows as the chosen one.</summary>
+        /// <summary>
+        /// When the room's mission is a fleet mission, its entry (not the plain Pilgrimage) shows as the chosen one; never over
+        /// the saved run, whose choice ends a fleet mission choice (HubFleet) a moment after the game has marked it.
+        /// </summary>
         [GamePatch(Feature, "GalaxyMapUIController", "CheckSelectedGamemode", PatchKind.Postfix)]
         private static void CheckSelectedPostfix(GalaxyMapUIController __instance, bool switchToActivated)
         {
@@ -143,6 +146,7 @@ namespace VoidCrewFleet
             {
                 HubQuestManager hub = HubQuestManager.Instance;
                 if (hub == null || hub.SelectedQuest == null || hub.SelectedQuest.AssetGuid != DataTable<QuestTable>.Instance.EndlessQuest.AssetGuid) return;
+                if (HubFleet.SavedRunChosen) return;
                 object target = HubFleet.Variant == HubVariant.FleetPilgrimage ? _fleetEntry : (HubFleet.Variant == HubVariant.FleetBattle ? _battleEntry : null);
                 if (target == null || ActivatedField == null) return;
                 ActivatedField.SetValue(__instance, target);

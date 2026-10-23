@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Reflection.Emit;
 using CG.Game;
 using CG.Space;
+using Gameplay.Utilities;
 using HarmonyLib;
 using Photon.Pun;
 using ResourceAssets;
@@ -21,9 +22,11 @@ namespace VoidCrewFleet
     ///   numbers), so every client knows every ship's count, late joiners included;
     /// - fabricators, recyclers, fabricator upgrades, bioports and clone tubes check and spend their own ship's count, and
     ///   learn blueprints for their own ship;
-    /// - the game's own count (HUD, ship voice lines, ship status, clone tube screen) is the count of the ship the local
-    ///   player belongs to right now (FleetShips.ViewShip), switched silently when that changes; fabricator terminals
-    ///   always show their own ship's count;
+    /// - the game's own count (HUD, ship voice lines, ship status) is the count of the ship the local player belongs to
+    ///   right now (FleetShips.ViewShip), switched silently when that changes; fabricator terminals always show their own
+    ///   ship's count, and the clone tube screen the count of the ship whose tube the local player is in (CloneTubeScreen);
+    /// - items' "per N alloys" and "more / fewer than N alloys (biomass)" rules count their own ship's resources
+    ///   (ShipStatRules says which ship a rule is for), and re-check when that ship's count changes;
     /// - every ship starts with the game's own starting amounts, except that a ship 2-6 with a loadout of its own starts with
     ///   its own alloys (its CUSTOM loadout's, or the game's default); the end-of-mission tally counts the player's own ship.
     /// With one ship nothing is tagged or redirected.
@@ -62,6 +65,18 @@ namespace VoidCrewFleet
         private static readonly MethodInfo BiomassForMethod = AccessTools.Method(typeof(ShipResources), "BiomassFor");
         private static readonly MethodInfo ModifyAlloyForMethod = AccessTools.Method(typeof(ShipResources), "ModifyAlloyFor");
         private static readonly MethodInfo ModifyBiomassForMethod = AccessTools.Method(typeof(ShipResources), "ModifyBiomassFor");
+        private static readonly MethodInfo RuleCheck = GameMember.Method(typeof(ModDynamicCondition), "CheckIfActive");
+        private static readonly MethodInfo RuleAmountChanged = GameMember.Method(typeof(ModValueResourceCount), "OnResourceChanged");
+
+        /// <summary>An item rule that counts a ship's alloys or biomass.</summary>
+        private sealed class ResourceRule
+        {
+            public WeakReference Rule;
+            public PlayerControlledShip Ship;
+            public bool Biomass;
+        }
+
+        private static readonly List<ResourceRule> Rules = new List<ResourceRule>();
 
         public static bool Active
         {
@@ -328,9 +343,14 @@ namespace VoidCrewFleet
         private static bool NotifyAlloyPrefix(GameSessionSuppliesManager __instance, int newAlloyAmount, ref int[] itemGuidArray)
         {
             int slot;
-            if (!Untag(ref itemGuidArray, out slot)) return true;
+            if (!Untag(ref itemGuidArray, out slot))
+            {
+                KeepSurvivorCount(true, newAlloyAmount);
+                return true;
+            }
             Alloy[slot] = newAlloyAmount;
             HasAlloy[slot] = true;
+            RefreshRules(slot, false);
             if (slot == Shown()) return true;
             // The other ship's count: only its own fabricator terminals re-read their count.
             try
@@ -348,10 +368,43 @@ namespace VoidCrewFleet
         private static bool NotifyBiomassPrefix(int newBiomassAmount, ref int[] itemGuidArray)
         {
             int slot;
-            if (!Untag(ref itemGuidArray, out slot)) return true;
+            if (!Untag(ref itemGuidArray, out slot))
+            {
+                KeepSurvivorCount(false, newBiomassAmount);
+                return true;
+            }
             Biomass[slot] = Mathf.Max(0, newBiomassAmount);
             HasBiomass[slot] = true;
+            RefreshRules(slot, true);
             return slot == Shown();
+        }
+
+        /// <summary>
+        /// A count without a ship while this client still counts per ship: the host lost the other ship first and counts
+        /// with one ship already, so it is the remaining ship's count. It is kept for that ship too, so switching back to
+        /// the game's own count can't bring an older one back.
+        /// </summary>
+        private static void KeepSurvivorCount(bool alloy, int value)
+        {
+            if (!_wasActive) return;
+            int slot = _survivor;
+            if (slot < 0)
+            {
+                List<int> alive = FleetShips.AliveSlots();
+                slot = alive.Count == 1 ? alive[0] : -1;
+            }
+            if (!Valid(slot)) return;
+            if (alloy)
+            {
+                Alloy[slot] = value;
+                HasAlloy[slot] = true;
+            }
+            else
+            {
+                Biomass[slot] = Mathf.Max(0, value);
+                HasBiomass[slot] = true;
+            }
+            RefreshRules(slot, !alloy);
         }
 
         // ---------------------------------------------------------------- the game's count follows this screen's ship
@@ -396,7 +449,9 @@ namespace VoidCrewFleet
             }
             if (_survivor >= 0)
             {
-                Show(manager, _survivor);
+                // Already shown (OnShipLost pinned it): the game's count is that ship's latest, the host's counts without
+                // a ship included, so it stays as it is.
+                if (_shown != _survivor) Show(manager, _survivor);
                 if (manager.photonView.IsMine)
                 {
                     // Now with one ship these go through the game's own code, untagged.
@@ -504,6 +559,8 @@ namespace VoidCrewFleet
         }
 
         // ---------------------------------------------------------------- start values and the end-of-mission tally
+        // The tally only changes the numbers on the results screen: a mission with several ships gives no rewards or XP
+        // (ProgressionGuard blocks them).
 
         /// <summary>Host: each ship's starting value (what its modules and items would recycle for), for the tally.</summary>
         [GamePatch(Feature, "GameSessionSuppliesManager", "Start", PatchKind.Postfix)]
@@ -586,21 +643,96 @@ namespace VoidCrewFleet
             ShipRedirect.EndOverride();
         }
 
-        /// <summary>Host code that gives a ship resources (e.g. a PvP objective).</summary>
-        public static void Give(PlayerControlledShip ship, int alloys, int biomass)
+        // ---------------------------------------------------------------- items' rules that count a ship's resources
+
+        /// <summary>The count of a resource of a rule's own ship; false when there is none (one ship, or not known yet).</summary>
+        private static bool OwnAmount(object rule, CG.Ship.Object.ResourceType type, out int amount)
         {
-            GameSessionSuppliesManager manager = GameSessionSuppliesManager.Instance;
-            if (manager == null || !manager.photonView.IsMine) return;
-            if (!Active)
+            amount = 0;
+            bool biomass = type == CG.Ship.Object.ResourceType.Biomass;
+            if (!biomass && type != CG.Ship.Object.ResourceType.Alloys) return false;
+            if (!Active) return false;
+            int slot = FleetShips.Slot(ShipStatRules.RuleShip(rule));
+            if (!Valid(slot) || !(biomass ? HasBiomass[slot] : HasAlloy[slot])) return false;
+            amount = biomass ? Biomass[slot] : Alloy[slot];
+            return true;
+        }
+
+        private static void Register(object rule, CG.Ship.Object.ResourceType type)
+        {
+            bool biomass = type == CG.Ship.Object.ResourceType.Biomass;
+            if (!biomass && type != CG.Ship.Object.ResourceType.Alloys) return;
+            PlayerControlledShip ship = ShipStatRules.RuleShip(rule);
+            if (ship != null) Rules.Add(new ResourceRule { Rule = new WeakReference(rule), Ship = ship, Biomass = biomass });
+        }
+
+        /// <summary>
+        /// A ship's count changed: its items' rules for that resource check again. The game's own event only reports the
+        /// count of the ship shown here.
+        /// </summary>
+        private static void RefreshRules(int slot, bool biomass)
+        {
+            if (Rules.Count == 0) return;
+            int amount = biomass ? Biomass[slot] : Alloy[slot];
+            for (int i = Rules.Count - 1; i >= 0; i--)
             {
-                if (alloys != 0) manager.ModifyAlloyCount(alloys, ResourceChangeAlloy.QUEST, GUIDUnion.Empty());
-                if (biomass != 0) manager.ModifyBiomassCount(biomass, ResourceChangeBiomass.QUEST, GUIDUnion.Empty());
-                return;
+                ResourceRule entry = Rules[i];
+                object rule = entry.Rule.Target;
+                if (rule == null || entry.Ship == null)
+                {
+                    // The item is gone, or its ship.
+                    Rules.RemoveAt(i);
+                    continue;
+                }
+                if (entry.Biomass != biomass || FleetShips.Slot(entry.Ship) != slot) continue;
+                try
+                {
+                    if (rule is ModDynamicCondition)
+                    {
+                        if (RuleCheck != null) RuleCheck.Invoke(rule, null);
+                    }
+                    else if (RuleAmountChanged != null)
+                    {
+                        RuleAmountChanged.Invoke(rule, new object[] { amount });
+                    }
+                }
+                catch (Exception e)
+                {
+                    Log.Failure("Updating an item rule that counts " + (biomass ? "biomass" : "alloys"), e);
+                }
             }
-            int slot = FleetShips.Slot(ship);
-            if (!Valid(slot)) return;
-            if (alloys != 0) Send(manager, slot, true, Alloy[slot] + alloys, true, (byte)ResourceChangeAlloy.QUEST, GUIDUnion.Empty());
-            if (biomass != 0) Send(manager, slot, false, Biomass[slot] + biomass, true, (byte)ResourceChangeBiomass.QUEST, GUIDUnion.Empty());
+        }
+
+        /// <summary>"More / fewer than N alloys (biomass)": its own ship's count.</summary>
+        [GamePatch(Feature, "Gameplay.Utilities.ResourceCountModRule", "ShouldApply", PatchKind.Prefix, Optional = true)]
+        private static bool CountRulePrefix(ResourceCountModRule __instance, bool ___isLess, ref bool __result)
+        {
+            int amount;
+            if (!OwnAmount(__instance, __instance.ResourceType, out amount)) return true;
+            __result = ___isLess ? amount < __instance.Value : amount > __instance.Value;
+            return false;
+        }
+
+        [GamePatch(Feature, "Gameplay.Utilities.ResourceCountModRule", "OnInitialize", PatchKind.Postfix, Optional = true)]
+        private static void CountRuleInitPostfix(ResourceCountModRule __instance)
+        {
+            Register(__instance, __instance.ResourceType);
+        }
+
+        /// <summary>"Per N alloys (biomass)": starts from, and follows, its own ship's count.</summary>
+        [GamePatch(Feature, "Gameplay.Utilities.ModValueResourceCount", "OnInitialize", PatchKind.Postfix, Optional = true)]
+        private static void PerRuleInitPostfix(ModValueResourceCount __instance, ref int ____currentAmount)
+        {
+            Register(__instance, __instance.ResourceType);
+            int amount;
+            if (OwnAmount(__instance, __instance.ResourceType, out amount)) ____currentAmount = amount;
+        }
+
+        [GamePatch(Feature, "Gameplay.Utilities.ModValueResourceCount", "OnResourceChanged", PatchKind.Prefix, Optional = true)]
+        private static void PerRuleChangedPrefix(ModValueResourceCount __instance, ref int newAmount)
+        {
+            int amount;
+            if (OwnAmount(__instance, __instance.ResourceType, out amount)) newAmount = amount;
         }
     }
 }

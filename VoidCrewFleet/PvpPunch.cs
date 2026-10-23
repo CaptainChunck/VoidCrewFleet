@@ -20,8 +20,10 @@ namespace VoidCrewFleet
     /// left first. A punch hits the enemy player in front of you within reach and in plain sight: it hurts them (five
     /// punches from full health knock one out) and pushes them back. Everyone around sees the stance (a player property)
     /// and every punch (a message to the players nearby; FistPose poses the arms). The punched player's own client applies
-    /// the damage after checking the puncher is an enemy and close by, the way the game applies all damage to a character,
-    /// so the hit shows on their screen like any other. Nobody can be punched inside a clone tube.
+    /// the damage, the way the game applies all damage to a character, so the hit shows on their screen like any other.
+    /// It first checks the puncher, so a modified game can't punch from afar or faster: an enemy whose character is alive,
+    /// not seated or in a clone tube, close by where this client sees them, and punching no faster than the real rate (a
+    /// burst of two allowed for network jitter). Nobody can be punched inside a clone tube.
     /// </summary>
     internal static class PvpPunch
     {
@@ -33,10 +35,16 @@ namespace VoidCrewFleet
         private const float HintSeconds = 0.1f;
         private const float StanceSendSeconds = 0.2f;
 
+        /// <summary>The punches a victim takes from one player at once (more come only one per cooldown), for network jitter.</summary>
+        private const float PunchBurst = 2f;
+
         /// <summary>Players this close see a punch (the victim always does).</summary>
         private const float WatchDistance = 30f;
 
         private const int SightMask = (1 << 10) | (1 << 12) | (1 << 27);
+
+        /// <summary>The heights on a body (from the feet) a punch can be aimed at.</summary>
+        private static readonly float[] TargetHeights = { 0.6f, 1.1f, 1.6f };
 
         internal const InteractionMode Busy = InteractionMode.Menu | InteractionMode.TerminalScreen | InteractionMode.Dead | InteractionMode.ControllingShip |
                                               InteractionMode.ControllingTurret | InteractionMode.Seated | InteractionMode.Cryptic | InteractionMode.InCloneTube |
@@ -47,7 +55,16 @@ namespace VoidCrewFleet
         private const InteractionMode WeightlessModes = InteractionMode.InSpace | InteractionMode.SwimZeroGrav | InteractionMode.FlyingJetpack;
 
         private static readonly FieldInfo ChatOpenField = GameMember.Field(typeof(TextChat), "_chatOpened");
-        private static readonly Dictionary<int, float> LastHitFrom = new Dictionary<int, float>();
+        private static readonly FieldInfo CloneTubesField = GameMember.Field(typeof(SpawnSystem), "clonetubes");
+
+        /// <summary>The victim's count of each puncher's punches in hand (it grows back by one per cooldown, up to the burst).</summary>
+        private struct PunchBudget
+        {
+            public float Punches;
+            public float At;
+        }
+
+        private static readonly Dictionary<int, PunchBudget> Budgets = new Dictionary<int, PunchBudget>();
         private static float _nextPunch;
         private static float _nextHint;
         private static bool _stanceUp;
@@ -104,8 +121,11 @@ namespace VoidCrewFleet
                     SetStance(false);
                     SendStance();
                     ShowHint(null);
+                    SetPadActions(false);
+                    if (Budgets.Count > 0) Budgets.Clear();
                     return;
                 }
+                SetPadActions(true);
                 bool fight = CanFight();
                 SetStance(fight && StanceHeld());
                 SendStance();
@@ -126,10 +146,9 @@ namespace VoidCrewFleet
         internal static bool CanPunch()
         {
             LocalPlayer me = LocalPlayer.Instance;
-            if (me == null || me.IsDead) return false;
+            if (me == null || PlayerLife.IsDead(me)) return false;
             if ((me.InteractionState.ActiveModes & Busy) != 0 || MenuScreenController.IsOpen()) return false;
-            if (ChatOpenField != null && TextChat.Instance != null && ChatOpenField.GetValue(TextChat.Instance) is bool && (bool)ChatOpenField.GetValue(TextChat.Instance))
-                return false;
+            if (TextChat.Instance != null && GameMember.Read(ChatOpenField, TextChat.Instance, false)) return false;
             return Camera.main != null;
         }
 
@@ -181,14 +200,29 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>The gamepad's triggers, which the game leaves free on foot (B and X are the game's second fire and fire).</summary>
-        private static void EnsurePadActions()
+        /// <summary>
+        /// The gamepad's triggers, which the game leaves free on foot (B and X are the game's second fire and fire): on only
+        /// during a match.
+        /// </summary>
+        private static void SetPadActions(bool on)
         {
-            if (_padStance != null) return;
-            _padStance = new InputAction("Fleet fist stance", InputActionType.Button, "<Gamepad>/leftTrigger");
-            _padPunch = new InputAction("Fleet fist punch", InputActionType.Button, "<Gamepad>/rightTrigger");
-            _padStance.Enable();
-            _padPunch.Enable();
+            if (_padStance == null)
+            {
+                if (!on) return;
+                _padStance = new InputAction("Fleet fist stance", InputActionType.Button, "<Gamepad>/leftTrigger");
+                _padPunch = new InputAction("Fleet fist punch", InputActionType.Button, "<Gamepad>/rightTrigger");
+            }
+            if (on == _padStance.enabled) return;
+            if (on)
+            {
+                _padStance.Enable();
+                _padPunch.Enable();
+            }
+            else
+            {
+                _padStance.Disable();
+                _padPunch.Disable();
+            }
         }
 
         private static bool FromMouse(InputAction action)
@@ -209,8 +243,7 @@ namespace VoidCrewFleet
             if (_testHold) return true;
             InputAction fire2 = Fire2();
             if (fire2 != null && fire2.IsPressed() && FromMouse(fire2)) return true;
-            EnsurePadActions();
-            return _padStance.IsPressed() && !Weightless();
+            return _padStance != null && _padStance.IsPressed() && !Weightless();
         }
 
         /// <summary>A punch is asked for this frame: the left mouse button, or the gamepad's right trigger.</summary>
@@ -218,8 +251,7 @@ namespace VoidCrewFleet
         {
             InputAction fire = Fire();
             if (fire != null && fire.WasPressedThisFrame() && FromMouse(fire)) return true;
-            EnsurePadActions();
-            return _padPunch.WasPressedThisFrame() && !Weightless();
+            return _padPunch != null && _padPunch.WasPressedThisFrame() && !Weightless();
         }
 
         // ---------------------------------------------------------------- the stance
@@ -294,12 +326,12 @@ namespace VoidCrewFleet
             float bestScore = float.MaxValue;
             foreach (Player player in game.Players)
             {
-                if (player == null || (object)player == me || player.IsDead || !IsEnemyActor(ActorOf(player))) continue;
+                if (player == null || (object)player == me || PlayerLife.IsDead(player) || !IsEnemyActor(ActorOf(player))) continue;
                 Vector3 feet = player.transform.position;
                 Vector3 up = player.transform.up;
                 float score = float.MaxValue;
                 Vector3 aimPoint = feet;
-                foreach (float height in new[] { 0.6f, 1.1f, 1.6f })
+                foreach (float height in TargetHeights)
                 {
                     Vector3 point = feet + up * height;
                     Vector3 toPoint = point - eye;
@@ -369,29 +401,78 @@ namespace VoidCrewFleet
                 int arm = Net.Get(data, 0, (byte)0) == 1 ? 1 : 0;
                 int victim = Net.Get(data, 1, -1);
                 Player attacker = FleetShips.CharacterOf(sender);
+                bool attackerAlive = attacker != null && !PlayerLife.IsDead(attacker);
                 LocalPlayer me = LocalPlayer.Instance;
                 Player target = victim < 0 ? null : (me != null && victim == FleetShips.LocalActor ? me : FleetShips.CharacterOf(victim));
-                if (attacker != null) FistPose.Punch(attacker, arm, target, attacker.transform.forward);
+                if (attackerAlive) FistPose.Punch(attacker, arm, target, attacker.transform.forward);
                 if (victim != FleetShips.LocalActor || me == null) return;
                 if (!IsEnemyActor(sender))
                 {
                     Log.Warn("PvP: ignored a punch from player " + sender + ", who is not on the other team.");
                     return;
                 }
-                if (me.IsDead || (me.InteractionState.ActiveModes & InteractionMode.InCloneTube) != 0) return;
-                float last;
-                if (LastHitFrom.TryGetValue(sender, out last) && Time.unscaledTime - last < CooldownSeconds * 0.5f) return;
-                Vector3 from = attacker != null ? attacker.transform.position : Net.Get(data, 3, me.transform.position);
+                if (PlayerLife.IsDead(me) || (me.InteractionState.ActiveModes & InteractionMode.InCloneTube) != 0) return;
+                // The puncher as this client sees them (never the position in the message): alive, free to punch and close by.
+                if (!attackerAlive)
+                {
+                    Log.Warn("PvP: ignored a punch from player " + sender + ", who has no living character here.");
+                    return;
+                }
+                if (SeatedOrInTube(attacker))
+                {
+                    Log.Warn("PvP: ignored a punch from " + NameOf(attacker) + ", who is seated or in a clone tube.");
+                    return;
+                }
+                Vector3 from = attacker.transform.position;
                 float distance = Vector3.Distance(from, me.transform.position);
                 if (distance > Reach + 3f)
                 {
                     Log.Warn("PvP: ignored a punch from " + distance.ToString("0.0") + " m away.");
                     return;
                 }
-                LastHitFrom[sender] = Time.unscaledTime;
+                if (!TakeFromBudget(sender))
+                {
+                    Log.Verbose("PvP: ignored a punch from " + NameOf(attacker) + ", faster than anyone can punch.");
+                    return;
+                }
                 TakePunch(me, from, Mathf.Clamp(Net.Get(data, 2, Damage), 0f, Damage));
                 Log.Info("PvP: you were punched by " + NameOf(attacker) + ".");
             });
+        }
+
+        /// <summary>
+        /// Whether one more punch from this player fits the real punch rate: one per cooldown, plus a burst of two so punches
+        /// that arrive bunched up by the network still land. Counts the punch when it does.
+        /// </summary>
+        private static bool TakeFromBudget(int sender)
+        {
+            float now = Time.unscaledTime;
+            PunchBudget budget;
+            float punches = Budgets.TryGetValue(sender, out budget) ? Mathf.Min(PunchBurst, budget.Punches + (now - budget.At) / CooldownSeconds) : PunchBurst;
+            bool fits = punches >= 1f;
+            Budgets[sender] = new PunchBudget { Punches = fits ? punches - 1f : punches, At = now };
+            return fits;
+        }
+
+        /// <summary>Whether a character is seated (a seat, the helm or a turret) or in a clone tube, as every client sees it.</summary>
+        private static bool SeatedOrInTube(Player character)
+        {
+            try
+            {
+                SittingInChair seat = character.Locomotion != null ? character.Locomotion.GetAbility<SittingInChair>() : null;
+                if (seat != null && seat.IsActive) return true;
+                var tubes = SpawnSystem.Instance != null ? GameMember.Read<List<CloneTube>>(CloneTubesField, SpawnSystem.Instance, null) : null;
+                if (tubes == null) return false;
+                foreach (CloneTube tube in tubes)
+                {
+                    if (tube != null && tube.GetOccupant() == character) return true;
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking whether a puncher is seated", e);
+            }
+            return false;
         }
 
         /// <summary>The local player takes a punch from a point: damage as a physical hit, a push and a jolt.</summary>

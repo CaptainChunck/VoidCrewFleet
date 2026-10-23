@@ -16,7 +16,8 @@ namespace VoidCrewFleet
     /// How a PvP match ends: a team that has lost all its ships loses the match, and the other team wins. While a team still
     /// has ships, losing one only sends its crew to watch (ShipDeath). The host ends the game a few seconds after the last
     /// ship starts to explode, and each player's end screen says Victory or Defeat for their own team (the game sends one
-    /// result for everyone). A team that has lost all its players forfeits after 30 seconds.
+    /// result for everyone; a player who was never on a team gets Defeat). A team that has lost all its players forfeits
+    /// after 30 seconds.
     /// </summary>
     internal static class PvpMatch
     {
@@ -30,6 +31,7 @@ namespace VoidCrewFleet
         private static int _loserTeam = -1;
         private static bool _ending;
         private static readonly bool[] TeamHadPlayers = new bool[2];
+        private static readonly int[] Presence = new int[2];
         private static int _emptyTeam = -1;
         private static float _emptySince;
 
@@ -133,11 +135,11 @@ namespace VoidCrewFleet
             // Every client keeps this, not only the host: when the host leaves, the player who takes over still knows that a
             // team now empty had players, and declares its forfeit. Spectators count: a team watching its last ship's crew
             // play is still in the match, and a seat held for a player who lost connection counts too.
+            CountPresence();
             int empty = -1;
             for (int team = 0; team < 2; team++)
             {
-                int count = TeamPresence(team);
-                if (count > 0) TeamHadPlayers[team] = true;
+                if (Presence[team] > 0) TeamHadPlayers[team] = true;
                 else if (TeamHadPlayers[team]) empty = team;
             }
 
@@ -170,22 +172,33 @@ namespace VoidCrewFleet
             EndSoon(empty, 3f);
         }
 
-        /// <summary>Players of a team in the room (spectators included), plus seats held for players who lost connection.</summary>
-        private static int TeamPresence(int team)
+        /// <summary>
+        /// Each team's players in the room (spectators included), plus seats held for players who lost connection, into
+        /// Presence (0 BLUE, 1 RED).
+        /// </summary>
+        private static void CountPresence()
         {
-            var players = new HashSet<int>(ShipSpawn.PlayerActors());
-            int count = 0;
-            foreach (CrewEntry entry in FleetShips.Crews().Values)
+            Presence[0] = Presence[1] = 0;
+            Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+            if (room != null)
             {
-                if (entry.Team == team && players.Contains(entry.Actor)) count++;
+                foreach (int actor in room.Players.Keys)
+                {
+                    CrewEntry entry;
+                    if (FleetShips.TryGetEntry(actor, out entry) && (entry.Team == 0 || entry.Team == 1)) Presence[entry.Team]++;
+                }
             }
-            return count + PvpRoster.HeldSeats(team);
+            List<RosterSeat> seats = PvpRoster.Seats();
+            if (seats == null) return;
+            Presence[0] += RosterRules.Held(seats, 0);
+            Presence[1] += RosterRules.Held(seats, 1);
         }
 
+        /// <summary>The local player's result: Defeat for the losing team, and for a player who was never on a team.</summary>
         private static QuestResult LocalResult(int loser)
         {
             int mine = FleetShips.TeamOfActor(FleetShips.LocalActor);
-            return mine == loser ? QuestResult.Defeat : QuestResult.Victory;
+            return mine < 0 || mine == loser ? QuestResult.Defeat : QuestResult.Victory;
         }
 
         /// <summary>The host's own end screen shows its own team's result.</summary>

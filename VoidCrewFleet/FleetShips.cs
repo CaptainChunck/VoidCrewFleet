@@ -80,7 +80,12 @@ namespace VoidCrewFleet
             OwnerCache.Clear();
             NotOnShip.Clear();
             Prune();
-            if (Registered.Count == 0) KnownSlots.Clear();
+            if (Registered.Count == 0)
+            {
+                // No ship left (between missions): the next mission's ships and screens start afresh.
+                KnownSlots.Clear();
+                Assigned.Clear();
+            }
             // One ship left: the game's own "player ship" becomes that ship (it may still point at the lost one).
             if (!hadTwo || Registered.Count != 1) return;
             try
@@ -149,7 +154,7 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>Host: forget the ships and crews (back in the hub, or a one-ship mission).</summary>
+        /// <summary>Host: forget the ships, crews and the void jump's lead ship (back in the hub, or a one-ship mission).</summary>
         public static void ClearRoom()
         {
             _hostCrew = null;
@@ -159,7 +164,25 @@ namespace VoidCrewFleet
             // Empty here at once (the room's copy changes after a round trip).
             _hostCrew = new int[0];
             _hostCrewRoom = PhotonNetwork.CurrentRoom.Name;
-            PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyShips, null }, { KeyCrew, null }, { "VCF_ResStart", null } });
+            PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable
+            {
+                { KeyShips, null }, { KeyCrew, null }, { "VCF_ResStart", null }, { VoidJumpLink.KeyLead, null }
+            });
+        }
+
+        /// <summary>
+        /// Whether a ship this mission started with is lost (gone, or dying), from the ship list the host published: so a host
+        /// who joined or took over after the loss knows it too. A ship that never spawned doesn't count.
+        /// </summary>
+        public static bool PublishedShipLost()
+        {
+            int[] published = PublishedShips();
+            if (published == null || published.Length < 2) return false;
+            for (int slot = 0; slot < published.Length; slot++)
+            {
+                if (published[slot] != 0 && !IsAlive(slot)) return true;
+            }
+            return false;
         }
 
         /// <summary>A ship's slot: 0 for ship 1 up to 5 for ship 6; -1 when the ship is unknown.</summary>
@@ -325,17 +348,6 @@ namespace VoidCrewFleet
             return TryGetEntry(actor, out entry) && entry.IsSpectator;
         }
 
-        /// <summary>The playing players' ships: actor number to slot (spectators left out).</summary>
-        public static Dictionary<int, int> CrewMap()
-        {
-            var map = new Dictionary<int, int>();
-            foreach (CrewEntry entry in Crews().Values)
-            {
-                if (entry.State == CrewState.Playing && entry.Slot >= 0) map[entry.Actor] = entry.Slot;
-            }
-            return map;
-        }
-
         /// <summary>Host: everyone's team, ship and state.</summary>
         public static void PublishCrew(Dictionary<int, CrewEntry> crews)
         {
@@ -361,12 +373,6 @@ namespace VoidCrewFleet
             PublishCrew(new Dictionary<int, CrewEntry>());
         }
 
-        /// <summary>A playing entry on a ship (its team from the slot).</summary>
-        public static CrewEntry Playing(int actor, int slot)
-        {
-            return new CrewEntry { Actor = actor, Team = TeamOfSlot(slot), Slot = slot, State = CrewState.Playing };
-        }
-
         /// <summary>How many players crew a ship (spectators not counted).</summary>
         public static int CrewCount(int slot)
         {
@@ -376,6 +382,18 @@ namespace VoidCrewFleet
                 if (entry.State == CrewState.Playing && entry.Slot == slot) count++;
             }
             return count;
+        }
+
+        /// <summary>Whether a player who crews a ship (not a spectator) is in the room right now.</summary>
+        public static bool HasCrewInRoom(int slot)
+        {
+            Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+            if (room == null) return false;
+            foreach (CrewEntry entry in Crews().Values)
+            {
+                if (entry.State == CrewState.Playing && entry.Slot == slot && room.GetPlayer(entry.Actor) != null) return true;
+            }
+            return false;
         }
 
         // ---------------------------------------------------------------- whose ship

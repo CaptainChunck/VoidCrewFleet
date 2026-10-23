@@ -158,8 +158,9 @@ namespace VoidCrewFleet
             ReadOptions();
             ShipRules.Rules rules = ShipRules.Shown;
             bool edit = ShipRules.CanEdit;
+            bool choosing = PvpTeams.HubChoosing;
             if (_selected == null && _categories.Count > 0) _selected = _categories[0];
-            string signature = rules.ToJson() + "|" + edit + "|" + _selected + "|" + _options.Count;
+            string signature = rules.ToJson() + "|" + edit + "|" + choosing + "|" + _selected + "|" + _options.Count;
             if (signature == _signature) return;
             _signature = signature;
             try
@@ -176,7 +177,7 @@ namespace VoidCrewFleet
                 _clearButton.style.display = edit ? DisplayStyle.Flex : DisplayStyle.None;
                 _note.text = edit
                     ? "Rules apply to CUSTOM loadouts (Ship Customizer). The game's own loadouts are unchanged."
-                    : (PvpTeams.HubChoosing ? "Only the host can change the rules." : "The rules are fixed once the teams are confirmed.");
+                    : (choosing ? "Only the host can change the rules." : "The rules are fixed once the teams are confirmed.");
 
                 _categoryList.Clear();
                 if (_categories.Count == 0) _categoryList.Add(Note("Waiting for Ship Customizer's list of options..."));

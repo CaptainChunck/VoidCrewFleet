@@ -19,11 +19,22 @@ namespace VoidCrewFleet
     /// - the mission only counts the ships as lost when no ship is left (co-op), and PvP decides the winner itself;
     /// - everyone given that ship in the lobby (co-op and PvP) can't be re-cloned for the rest of the mission: they play on
     ///   while their character lives (aboard another ship), then watch the remaining ships (Spectator);
-    /// - the host may carry on with the ships that are left, or take everyone back to the hub (FleetReturn).
+    /// - the host may carry on with the ships that are left, or take everyone back to the hub (FleetReturn);
+    /// - every client notes when the ship started dying, so a player who becomes host during its death still removes the
+    ///   wreck (Tick).
     /// </summary>
     internal static class ShipDeath
     {
         public const string Feature = FleetShips.Feature;
+
+        /// <summary>
+        /// A lost ship's wreck still there this long after its death sequence should have ended (when the host that saw the death
+        /// begin destroys the ship, about 9 seconds in) is removed by the host.
+        /// </summary>
+        private const float WreckGraceSeconds = 3f;
+
+        /// <summary>When each lost ship's wreck is due to be gone (Time.unscaledTime on this client).</summary>
+        private static readonly Dictionary<PlayerControlledShip, float> WreckDue = new Dictionary<PlayerControlledShip, float>();
 
         /// <summary>The ship whose death is being announced right now (during the game's event).</summary>
         public static PlayerControlledShip Dying { get; private set; }
@@ -42,6 +53,7 @@ namespace VoidCrewFleet
             Dying = __instance;
             if (FleetShips.All.Count < 2) return;
             Log.Info(FleetShips.Describe(__instance) + " is destroyed.");
+            if (__instance != null && !WreckDue.ContainsKey(__instance)) WreckDue[__instance] = Time.unscaledTime + SequenceSeconds() + WreckGraceSeconds;
             try
             {
                 Action<PlayerControlledShip> lost = ShipLost;
@@ -249,6 +261,59 @@ namespace VoidCrewFleet
             catch (Exception e)
             {
                 Log.Failure("Destroying a lost ship", e);
+            }
+        }
+
+        /// <summary>How long a ship's death sequence takes, from its start to the ship's destruction (the game's timings).</summary>
+        private static float SequenceSeconds()
+        {
+            try
+            {
+                PlayerShipDeathSequence sequence = UnityEngine.Object.FindObjectOfType<PlayerShipDeathSequence>();
+                if (sequence != null)
+                    return sequence.startExplodeDelay + sequence.startStageTwoDelay + sequence.startStageThreeDelay + sequence.disableRenderersDelay +
+                           sequence.actualDeathDelay;
+            }
+            catch
+            {
+                // the game's usual timings then
+            }
+            return 9f;
+        }
+
+        /// <summary>
+        /// A few times a second: the host destroys a lost ship's wreck still there after its death sequence should have ended.
+        /// The host that saw the death begin destroys the ship at the end of the sequence; a player who becomes host in the
+        /// meantime had nothing planned, and the wreck would otherwise follow the fleet through every later sector. Every
+        /// client notes the time, so a new host removes the wreck at its first tick once that time has passed.
+        /// </summary>
+        public static void Tick()
+        {
+            if (WreckDue.Count == 0) return;
+            List<PlayerControlledShip> due = null;
+            foreach (KeyValuePair<PlayerControlledShip, float> pair in WreckDue)
+            {
+                if (pair.Key == null || (PhotonNetwork.IsMasterClient && Time.unscaledTime > pair.Value))
+                {
+                    if (due == null) due = new List<PlayerControlledShip>();
+                    due.Add(pair.Key);
+                }
+            }
+            if (due == null) return;
+            foreach (PlayerControlledShip ship in due)
+            {
+                WreckDue.Remove(ship);
+                // Gone already (destroyed as planned): nothing to do.
+                if (ship == null) continue;
+                try
+                {
+                    Log.Info("The wreck of " + FleetShips.Describe(ship) + " was still there; the host removes it.");
+                    ship.SequenceDestroyShip();
+                }
+                catch (Exception e)
+                {
+                    Log.Failure("Removing a lost ship's wreck", e);
+                }
             }
         }
 

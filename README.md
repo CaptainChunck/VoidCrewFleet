@@ -12,8 +12,9 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
 ### Up to three ships, 24 players
 - Rooms hold up to 24 players (the game's own limit is 6), 8 per ship, each ship with its own clone tubes.
 - The hub's **ship loadout terminal** gets a **FLEET** panel:
-  - **SHIPS: 1 / 2 / 3** sets how many ships the game's own missions use (one in a new room; your last choice is
-    remembered). With more than 8 players a mission adds ships by itself.
+  - **SHIPS: 1 / 2 / 3** (the host's) sets how many ships the game's own missions use (one in a new room; your last
+    choice is remembered). With more than 8 players a mission adds ships by itself and evens out the crews. A saved run
+    always has one ship.
   - A row for every ship: click one to set it up at the terminal, with its own ship and loadout.
 - **The lobby screen** opens for everyone when the host sets two or three ships: **players pick the ship they fly** for
   the whole mission. Crews stay even, and the host can move players and auto-balance. The host then confirms the crews
@@ -21,12 +22,16 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
   the crews are confirmed it lets the host reopen picking. A player who joins after that goes to the smallest crew.
 - On the lobby screen the host can **force each ship's type** (Destroyer, Frigate or Striker) or leave it free. A ship
   with no loadout chosen copies ship 1 (AS SHIP 1) when its type allows it, or else gets its type's standard loadout.
+- From the moment you have a ship in the lobby until the mission ends, **your ship** shows as one more row of the
+  ship panel in the top left corner, in the HUD's own style: SHIP 2 with its type, or LOST once it is destroyed.
 - The ships start side by side, fly freely, and **void-jump together**:
   - the escape vector set on any ship's astral map counts for every ship;
   - each crew charges its own ship's void drive;
-  - once **every ship's drive is charged**, pulling any ship's void lever jumps the whole fleet. While a drive isn't
-    charged, the lever says which ship's and nothing starts;
+  - once **every crewed ship's drive is charged**, pulling any ship's void lever jumps the whole fleet, whoever flies
+    it. While a drive isn't charged, the lever says which ship's and nothing starts. A ship nobody crews is carried
+    along;
   - the ships arrive side by side.
+- In co-op, enemies and the sector's events go for the nearest ship, and every ship is kept inside the play area.
 - **Each ship is its own ship.** It has its own:
   - fabricator alloys and biomass;
   - ship voice lines, alarms and sound effects;
@@ -65,7 +70,8 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
      - Players **pick a ship**, and with it their team: BLUE has ships 1, 3 and 5, RED has 2, 4 and 6.
      - Teams and crews stay even (an odd count allows one extra), and every ship needs a crew. The host can move
        players, auto-balance and confirms.
-  2. Everyone on a team wears a **BLUE TEAM / RED TEAM** badge above their head.
+  2. Everyone on a team wears a **BLUE TEAM / RED TEAM** badge above their head, and sees their own team and ship
+     as a row of the ship panel in the top left corner (BLUE TEAM  BLUE 1, DESTROYER).
   3. At the loadout terminal the FLEET panel lists every ship in team colours. Only a ship's own team can change its
      loadout, Ship Customizer's CUSTOM included. A ship nobody set up starts with its type's standard loadout.
   4. The host starts the match by **sitting in a ready-room seat**, and everyone spawns aboard their ship.
@@ -101,9 +107,12 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
 - **Destroy every enemy ship to win.** A team with no players left forfeits.
 - **Spectators:** while your team has ships left, losing yours doesn't end your match: you watch the rest of it (see
   Losing a ship). Spectators talk among themselves: nobody still fighting hears them, by voice or text chat.
+- **Joining a match under way:** while there is room, you play at once: you join the team with fewer active players,
+  on its ship with the smallest crew (8 at most), so the teams stay at most one apart. Players reconnecting within their
+  3 minutes count as active; the crews of lost ships don't. Players already waiting for a place go first.
 - **Lost connection:** your place is held for **3 minutes**. Come back in time and you return to your team and ship.
-  After that your place goes to a player waiting for one (your own team's first), then to anyone joining. If you come
-  back to a full team, you wait for the next free place, watching your team's ships.
+  Come back later and you play again on your team when it isn't ahead, else you wait for its next free place, watching
+  your team's ships.
 - **Boarding:**
   - Enemy players can come aboard through an airlock its crew left open, or one their team hacked (below).
   - Aboard the enemy ship you can always use its **System Enhancement panels** and its systems' **power switches**
@@ -144,7 +153,7 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
 | Lobby | MaxPlayers | 24 | Room size for rooms you host (4–24). |
 | Lobby | Ships | 1 | How many ships rooms you host start with (1–3; follows the FLEET panel's SHIPS). |
 | Two ships | ShipSpacing | 160 | Distance between ships side by side at the start and after a jump (m). |
-| Fleet Pilgrimage | EnemyMultiplier | 1.6 | How many more enemies the Fleet Pilgrimage sends with two ships (host); a third ship adds as much again. |
+| Fleet Pilgrimage | EnemyMultiplier | 1.6 | How many more enemies the Fleet Pilgrimage sends with two ships (host); a third ship adds as much again. A change applies from the next mission. |
 | PvP | StartDistance | 3600 | How far apart the two teams start (m). |
 | PvP | HullMultiplier | 4 | How many times the game's hull hit points the ships have in Fleet Battle (host). |
 | PvP | ShipsPerTeam | 1 | Your last ships per team; set it on the lobby screen. |
@@ -158,7 +167,8 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
 ## Progression
 Fleet missions, PvP and rooms of more than 6 players **give no XP, rewards or achievements**, as Void Crew's modding
 rules ask for mods that change the game:
-- Daily and weekly quests aren't used up there; they stay open for a normal mission.
+- Daily and weekly quests aren't used up there; they stay open for a normal mission. Codex entries from data
+  shards aren't unlocked there either.
 - A mission that starts like that stays so even if players leave.
 - Fleet runs aren't saved, because the game's save holds only one ship.
 
@@ -171,6 +181,7 @@ rules ask for mods that change the game:
   - With Ship Customizer 0.7.0 or newer, CUSTOM loadouts follow Fleet Battle's ship rules (Fleet 0.3.0 or newer).
   - With Ship Customizer 0.9.0 or newer, every ship 2-6 can have a CUSTOM loadout of its own (Fleet 0.4.0 or newer).
     With an older Customizer, ships 3-6 use game loadouts.
+  - A Ship Customizer turned off in its own settings counts as not installed.
 - **Void Crew VR UI Fix** (optional): the mod's screens use the game's own UI system, so they show in VR.
 - Neither is required.
 

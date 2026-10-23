@@ -24,7 +24,8 @@ namespace VoidCrewFleet
     /// 3. Then the whole hacking team can use every door of that ship for five minutes (not the cockpit's), including the
     ///    airlock's door buttons and pressurise lever (not its safety override). Both teams see a countdown.
     /// Enemies never get into the cockpit: its doors stay shut to them, and one who walks in anyway is pushed back out.
-    /// The host decides everything and keeps the hacks in a room property, so everyone (late joiners too) sees them.
+    /// The host decides everything and keeps the hacks in a room property, so everyone (late joiners too) sees them. Their
+    /// end times are the server's clock in milliseconds, an int that wraps around, so they are compared by difference.
     /// </summary>
     internal static class PvpHack
     {
@@ -38,7 +39,12 @@ namespace VoidCrewFleet
         private const float AimAngle = 16f;
         public const float HackSeconds = 60f;
         public const float AccessSeconds = 300f;
+        private const int HackMs = (int)(HackSeconds * 1000f);
+        private const int AccessMs = (int)(AccessSeconds * 1000f);
         private const int SightMask = (1 << 10) | (1 << 12) | (1 << 27);
+
+        /// <summary>How long the hacker's game has to put a plugged-in terminal away before the host removes it itself.</summary>
+        private const float RemoveSeconds = 3f;
 
         /// <summary>Further than this from the enemy ship's rooms, none of its airlock panels can be in reach.</summary>
         private const float NearShip = 30f;
@@ -67,8 +73,10 @@ namespace VoidCrewFleet
             public int Ship;
             public int Index;
             public State State;
-            public double Until;
-            public int Actor;
+
+            /// <summary>When the hack or the door access ends (server milliseconds).</summary>
+            public int Until;
+
             public int Team;
             public Vector3 Position;
             public Quaternion Rotation;
@@ -82,27 +90,32 @@ namespace VoidCrewFleet
             {
                 return new object[]
                 {
-                    Ship, Index, (byte)State, Until, Actor, Team,
+                    Ship, Index, (byte)State, Until, Team,
                     new[] { Position.x, Position.y, Position.z, Rotation.x, Rotation.y, Rotation.z, Rotation.w }
                 };
             }
 
+            /// <summary>
+            /// An entry from the room property. Version 0.4.0 wrote seven values: the end as PhotonNetwork.Time (seconds of the
+            /// same clock) and the hacker's actor number before the team; those still read.
+            /// </summary>
             public static Entry FromData(object entry)
             {
                 var data = entry as object[];
-                if (data == null || data.Length < 7) return null;
-                var pose = data[6] as float[];
-                if (!(data[0] is int) || !(data[1] is int) || !(data[2] is byte) || !(data[3] is double) || !(data[4] is int) || !(data[5] is int) ||
-                    pose == null || pose.Length < 7)
+                if (data == null || data.Length < 6) return null;
+                bool old = data.Length >= 7 && data[3] is double;
+                int team = old ? 5 : 4;
+                var pose = data[team + 1] as float[];
+                if (!(data[0] is int) || !(data[1] is int) || !(data[2] is byte) || !(old || data[3] is int) || !(data[team] is int) || pose == null || pose.Length < 7)
                     return null;
                 return new Entry
                 {
                     Ship = (int)data[0],
                     Index = (int)data[1],
                     State = (State)(byte)data[2],
-                    Until = (double)data[3],
-                    Actor = (int)data[4],
-                    Team = (int)data[5],
+                    // The low 32 bits of the milliseconds: the server's clock, wrapped as it wraps.
+                    Until = old ? unchecked((int)(long)Math.Round((double)data[3] * 1000.0)) : (int)data[3],
+                    Team = (int)data[team],
                     Position = new Vector3(pose[0], pose[1], pose[2]),
                     Rotation = new Quaternion(pose[3], pose[4], pose[5], pose[6])
                 };
@@ -112,7 +125,22 @@ namespace VoidCrewFleet
         private sealed class Shown
         {
             public GameObject Model;
+
+            /// <summary>The model's materials that glow (copies, destroyed with it).</summary>
             public Material[] Materials;
+
+            /// <summary>Every material of the model, to destroy with it.</summary>
+            public Material[] AllMaterials;
+
+            /// <summary>Whether the glow is on now; null until first set.</summary>
+            public bool? Lit;
+        }
+
+        /// <summary>A terminal plugged into a panel, which its holder's game puts away and destroys; the host checks it did.</summary>
+        private sealed class Plugged
+        {
+            public CarryableObject Terminal;
+            public float CheckAt;
         }
 
         /// <summary>A ship's airlocks, in the order every client finds them (an airlock's index names it in messages).</summary>
@@ -142,6 +170,14 @@ namespace VoidCrewFleet
         private static readonly Dictionary<int, ShipAirlocks> AirlocksByShip = new Dictionary<int, ShipAirlocks>();
         private static readonly Dictionary<int, Outside> OutsideByAirlock = new Dictionary<int, Outside>();
         private static readonly Dictionary<int, Room> CockpitRooms = new Dictionary<int, Room>();
+
+        /// <summary>Host: every terminal plugged in this match (by object), so none is plugged in twice.</summary>
+        private static readonly HashSet<int> UsedTerminals = new HashSet<int>();
+
+        /// <summary>Host: plugged-in terminals to check on (see Plugged).</summary>
+        private static readonly List<Plugged> PluggedTerminals = new List<Plugged>();
+
+        private static readonly int EmissiveColorId = Shader.PropertyToID("_EmissiveColor");
 
         /// <summary>Stands for "not read yet": never the value of a room property.</summary>
         private static readonly object NotRead = new object();
@@ -176,6 +212,12 @@ namespace VoidCrewFleet
         private static float _inCockpitSince = -1f;
         private static Color? _glow;
 
+        // The action hint as last built: its step, the Fire key's name (looked up when a step begins) and the percentage.
+        private static Step _hintStep;
+        private static string _hintKey;
+        private static int _hintPercent = -1;
+        private static string _hintText;
+
         private static UIDocument _timerDocument;
         private static Label _timerLabel;
 
@@ -184,13 +226,22 @@ namespace VoidCrewFleet
             return ((long)ship << 8) | (uint)(index & 0xff);
         }
 
+        /// <summary>The server's clock in milliseconds (the same on every client; it wraps around).</summary>
+        private static int Now
+        {
+            get { return PhotonNetwork.ServerTimestamp; }
+        }
+
+        /// <summary>Milliseconds left until a server time, right across the clock's wrap (negative once it has passed).</summary>
+        private static int MsUntil(int time)
+        {
+            return unchecked(time - Now);
+        }
+
         public static bool Active
         {
             get { return PvpCombat.Active && HackTerminal.Registered && PvpTeams.Locked; }
         }
-
-        /// <summary>A hacking terminal action is under the local player's aim (Fire belongs to it, not to punching).</summary>
-        public static bool Busy { get; private set; }
 
         // ---------------------------------------------------------------- ships, airlocks, panels
 
@@ -451,10 +502,9 @@ namespace VoidCrewFleet
         {
             if (team < 0 || ship == null || Entries.Count == 0) return false;
             int view = FleetShips.ViewId(ship);
-            double now = PhotonNetwork.Time;
             foreach (Entry entry in Entries.Values)
             {
-                if (entry.State == State.Access && entry.Ship == view && entry.Team == team && now < entry.Until) return true;
+                if (entry.State == State.Access && entry.Ship == view && entry.Team == team && MsUntil(entry.Until) > 0) return true;
             }
             return false;
         }
@@ -520,6 +570,8 @@ namespace VoidCrewFleet
             AirlocksByShip.Clear();
             OutsideByAirlock.Clear();
             CockpitRooms.Clear();
+            UsedTerminals.Clear();
+            PluggedTerminals.Clear();
             _roomData = NotRead;
             _glow = null;
             _nextTimers = 0f;
@@ -537,8 +589,7 @@ namespace VoidCrewFleet
                 if (Models.Count > 0) ClearModels();
                 ShowTimers(null);
                 _nextTimers = 0f;
-                ActionHint.Set("hack", ActionHint.HackPriority, null);
-                Busy = false;
+                SetHint(Step.None, null);
                 return;
             }
             try
@@ -591,13 +642,17 @@ namespace VoidCrewFleet
                     shown.Model.transform.localRotation = entry.Rotation;
                     var materials = new List<Material>();
                     foreach (Renderer renderer in shown.Model.GetComponentsInChildren<Renderer>()) materials.AddRange(renderer.materials);
-                    shown.Materials = materials.ToArray();
+                    shown.AllMaterials = materials.ToArray();
+                    shown.Materials = materials.FindAll(m => m != null && m.HasProperty(EmissiveColorId)).ToArray();
                     Models[entry.Key] = shown;
                     if (FleetShips.Slot(ship) == FleetShips.CrewSlot(FleetShips.LocalActor)) BigWarning("THE ENEMY IS HACKING OUR AIRLOCK! PULL THEIR TERMINAL OUT OF THE OUTSIDE PANEL");
                     else if (!PvpBoarding.IsEnemyShip(ship)) BigWarning("THE ENEMY IS HACKING " + FleetShips.Describe(ship) + "'S AIRLOCK!");
                 }
-                // A working pulse while it hacks.
-                SetGlow(shown, Mathf.Repeat(Time.time, 1f) < 0.5f);
+                // A working pulse while it hacks (the materials change only when it turns on or off).
+                bool lit = Mathf.Repeat(Time.time, 1f) < 0.5f;
+                if (shown.Lit == lit) continue;
+                shown.Lit = lit;
+                SetGlow(shown, lit);
             }
         }
 
@@ -616,15 +671,15 @@ namespace VoidCrewFleet
             Color color = lit ? Glow : Color.black;
             foreach (Material material in shown.Materials)
             {
-                if (material != null && material.HasProperty("_EmissiveColor")) material.SetColor("_EmissiveColor", color);
+                if (material != null) material.SetColor(EmissiveColorId, color);
             }
         }
 
         private static void DestroyModel(Shown shown)
         {
-            if (shown.Materials != null)
+            if (shown.AllMaterials != null)
             {
-                foreach (Material material in shown.Materials)
+                foreach (Material material in shown.AllMaterials)
                 {
                     if (material != null) UnityEngine.Object.Destroy(material);
                 }
@@ -663,12 +718,12 @@ namespace VoidCrewFleet
         {
             int mine = FleetShips.TeamOfActor(FleetShips.LocalActor);
             if (mine < 0 || Entries.Count == 0) return null;
-            double now = PhotonNetwork.Time;
             var lines = new List<string>();
             foreach (Entry entry in Entries.Values)
             {
-                double left = entry.Until - now;
-                if (left <= 0) continue;
+                int msLeft = MsUntil(entry.Until);
+                if (msLeft <= 0) continue;
+                double left = msLeft / 1000.0;
                 PlayerControlledShip ship = ShipOfView(entry.Ship);
                 int shipSlot = FleetShips.Slot(ship);
                 if (shipSlot < 0) continue;
@@ -722,14 +777,13 @@ namespace VoidCrewFleet
             long target = 0;
             string taken = null;
             Step step = PvpPunch.CanPunch() ? FindStep(out target, out taken) : Step.None;
-            Busy = step != Step.None;
             // With the fists up, Fire punches.
             bool pressed = fire != null && fire.IsPressed() && !PvpPunch.LocalStanceUp;
             if (!pressed) _needRelease = false;
             if (step == Step.None)
             {
                 _holding = Step.None;
-                ActionHint.Set("hack", ActionHint.HackPriority, taken);
+                SetHint(Step.None, taken);
                 return;
             }
             if (!pressed || _needRelease || step != _holding || target != _holdTarget)
@@ -740,9 +794,15 @@ namespace VoidCrewFleet
             }
             float needed = step == Step.Plug ? PlugHold : PullHold;
             float progress = _holding == step ? Mathf.Clamp01((Time.unscaledTime - _holdStart) / needed) : 0f;
-            ActionHint.Set("hack", ActionHint.HackPriority, "HOLD " + PvpPunch.FireName(fire) + "  " +
-                (step == Step.Plug ? "PLUG IN THE HACKING TERMINAL" : "PULL OUT THE ENEMY TERMINAL") +
-                (progress > 0f ? "  " + Mathf.RoundToInt(progress * 100f) + "%" : ""));
+            if (step != _hintStep) _hintKey = PvpPunch.FireName(fire);
+            int percent = progress > 0f ? Mathf.RoundToInt(progress * 100f) : 0;
+            if (step != _hintStep || percent != _hintPercent)
+            {
+                _hintPercent = percent;
+                _hintText = "HOLD " + _hintKey + "  " + (step == Step.Plug ? "PLUG IN THE HACKING TERMINAL" : "PULL OUT THE ENEMY TERMINAL") +
+                            (percent > 0 ? "  " + percent + "%" : "");
+            }
+            SetHint(step, _hintText);
             if (progress < 1f || Time.unscaledTime < _nextRequest) return;
             _needRelease = true;
             _holding = Step.None;
@@ -755,6 +815,14 @@ namespace VoidCrewFleet
                 if (held != null && held.photonView != null) Net.ToHost(Msg.HackPlug, held.photonView.ViewID, ship, index);
             }
             else Net.ToHost(Msg.HackPull, ship, index);
+        }
+
+        /// <summary>The hacking line of the action hint, for a step (None: the text given, or none).</summary>
+        private static void SetHint(Step step, string text)
+        {
+            _hintStep = step;
+            if (step == Step.None) _hintPercent = -1;
+            ActionHint.Set("hack", ActionHint.HackPriority, text);
         }
 
         /// <summary>
@@ -843,7 +911,7 @@ namespace VoidCrewFleet
         /// <summary>The hint at an enemy airlock that is being hacked or is hacked already (nothing to do there, so no key).</summary>
         private static string TakenText(Entry entry)
         {
-            int seconds = Mathf.Max(0, Mathf.CeilToInt((float)(entry.Until - PhotonNetwork.Time)));
+            int seconds = Mathf.Max(0, Mathf.CeilToInt(MsUntil(entry.Until) / 1000f));
             if (_takenText == null || entry.Key != _takenKey || seconds != _takenSeconds)
             {
                 _takenKey = entry.Key;
@@ -1035,7 +1103,8 @@ namespace VoidCrewFleet
                 if (airlock == null || ship == null || panel == null) refusal = "That airlock can't be hacked.";
                 else if (!PvpBoarding.IsEnemyOf(sender, ship)) refusal = "That's your own ship's airlock.";
                 else if (Entries.ContainsKey(KeyOf(shipView, index))) refusal = "That airlock is being hacked already, or is hacked.";
-                else if (!HackTerminal.Is(item) || itemObject.OwnerActorNr != sender) refusal = "You need to be holding a hacking terminal.";
+                else if (!HackTerminal.Is(item) || itemObject.OwnerActorNr != sender || !CarriedBy(sender, item)) refusal = "You need to be holding a hacking terminal.";
+                else if (UsedTerminals.Contains(item.GetInstanceID())) refusal = "That hacking terminal has been used already.";
                 else if (!Near(sender, panel, HostReach)) refusal = "Get closer to the airlock's outside panel.";
                 if (refusal != null)
                 {
@@ -1050,13 +1119,16 @@ namespace VoidCrewFleet
                     Ship = shipView,
                     Index = index,
                     State = State.Hacking,
-                    Until = PhotonNetwork.Time + HackSeconds,
-                    Actor = sender,
+                    Until = unchecked(Now + HackMs),
                     Team = FleetShips.TeamOfActor(sender),
                     Position = ship.transform.InverseTransformPoint(point),
                     Rotation = Quaternion.Inverse(ship.transform.rotation) * rotation
                 };
                 WriteRoom();
+                // The hacker's game puts the terminal down and destroys it, as the game does with a used item; the host
+                // makes sure it is gone (and never takes it again).
+                UsedTerminals.Add(item.GetInstanceID());
+                PluggedTerminals.Add(new Plugged { Terminal = item, CheckAt = Time.unscaledTime + RemoveSeconds });
                 Net.ToActor(sender, Msg.HackTaken, itemView);
                 Log.Info("PvP: " + NameOf(sender) + " started hacking an airlock of " + FleetShips.Describe(ship) + ".");
                 Notice.ShowAll(NameOf(sender) + " (" + PvpTeams.TeamName(FleetShips.TeamOfActor(sender)) + ") is hacking " + FleetShips.Describe(ship) +
@@ -1077,7 +1149,7 @@ namespace VoidCrewFleet
                 ReadRoom();
                 long key = KeyOf(Net.Get(data, 0, -1), Net.Get(data, 1, -1));
                 Entry entry;
-                if (!Entries.TryGetValue(key, out entry) || entry.State != State.Hacking || PhotonNetwork.Time > entry.Until - 0.25) return;
+                if (!Entries.TryGetValue(key, out entry) || entry.State != State.Hacking || MsUntil(entry.Until) < 250) return;
                 Airlock airlock = AirlockAt(entry.Ship, entry.Index);
                 PlayerControlledShip ship = ShipOfView(entry.Ship);
                 Vector3 outward = Vector3.forward;
@@ -1091,11 +1163,39 @@ namespace VoidCrewFleet
             });
         }
 
+        /// <summary>Whether a player's living character is within reach of something (where the host sees it).</summary>
         private static bool Near(int actor, Component target, float reach)
         {
             if (target == null) return false;
             Player player = FleetShips.CharacterOf(actor);
-            return player != null && Vector3.Distance(player.transform.position, BoundsOf(target).center) <= reach;
+            return player != null && !PlayerLife.IsDead(player) && Vector3.Distance(player.transform.position, BoundsOf(target).center) <= reach;
+        }
+
+        /// <summary>
+        /// Whether a player's living character carries this item, as the host sees it: every character's carried item is
+        /// synced to everyone (the game's Carrier), and only an item its carrier owns is taken as carried.
+        /// </summary>
+        private static bool CarriedBy(int actor, CarryableObject item)
+        {
+            Player player = FleetShips.CharacterOf(actor);
+            return player != null && !PlayerLife.IsDead(player) && player.Carrier != null && player.Carrier.Payload == item;
+        }
+
+        /// <summary>
+        /// Host: a plugged-in terminal still there a few seconds after its holder's game was told to destroy it is destroyed
+        /// with the game's own call (which has its owner's game remove it for everyone).
+        /// </summary>
+        private static void RemovePluggedTerminals()
+        {
+            for (int i = PluggedTerminals.Count - 1; i >= 0; i--)
+            {
+                Plugged plugged = PluggedTerminals[i];
+                if (plugged.Terminal != null && Time.unscaledTime < plugged.CheckAt) continue;
+                PluggedTerminals.RemoveAt(i);
+                if (plugged.Terminal == null) continue;
+                HackTerminal.Destroy(plugged.Terminal);
+                Log.Info("PvP: a plugged-in hacking terminal was still there after " + RemoveSeconds + " s; the host removed it.");
+            }
         }
 
         private static string NameOf(int actor)
@@ -1110,10 +1210,10 @@ namespace VoidCrewFleet
             if (!PhotonNetwork.IsMasterClient || !Active) return;
             try
             {
+                RemovePluggedTerminals();
                 ReadRoom();
                 if (Entries.Count == 0) return;
                 bool changed = false;
-                double now = PhotonNetwork.Time;
                 foreach (Entry entry in new List<Entry>(Entries.Values))
                 {
                     PlayerControlledShip ship = ShipOfView(entry.Ship);
@@ -1123,11 +1223,11 @@ namespace VoidCrewFleet
                         changed = true;
                         continue;
                     }
-                    if (now < entry.Until) continue;
+                    if (MsUntil(entry.Until) > 0) continue;
                     if (entry.State == State.Hacking)
                     {
                         entry.State = State.Access;
-                        entry.Until = now + AccessSeconds;
+                        entry.Until = unchecked(Now + AccessMs);
                         Log.Info("PvP: " + PvpTeams.TeamName(entry.Team) + " hacked an airlock of " + FleetShips.Describe(ship) + ".");
                         Notice.ShowAll(PvpTeams.TeamName(entry.Team) + " hacked " + FleetShips.Describe(ship) + "'s airlock: " +
                                        PvpTeams.TeamName(entry.Team) + " can open its doors for five minutes!");
@@ -1159,7 +1259,7 @@ namespace VoidCrewFleet
             int view = FleetShips.ViewId(ship);
             Entries[KeyOf(view, 0)] = new Entry
             {
-                Ship = view, Index = 0, State = State.Access, Until = PhotonNetwork.Time + seconds, Actor = PhotonNetwork.LocalPlayer.ActorNumber, Team = team,
+                Ship = view, Index = 0, State = State.Access, Until = unchecked(Now + (int)(seconds * 1000f)), Team = team,
                 Position = Vector3.zero, Rotation = Quaternion.identity
             };
             WriteRoom();
