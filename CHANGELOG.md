@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.4.1
+Fixes from a full code review of 0.4.0. Everyone in a room needs 0.4.1: the network protocol changed.
+
+**Losing ships, respawns and spectators**
+- A player whose ship was lost is never re-cloned, also once only one ship is left, after reconnecting or from the
+  spawn queue.
+- Other players' deaths are seen correctly everywhere: dead spectators near their body are no longer heard, their chat
+  stays among spectators, turrets stop shooting floating corpses and punches can't target them.
+- A spectator's HUD stays hidden after the escape menu closes, and the view starts with the ships' outsides shown.
+- FORCE RESPAWN is off once your ship is lost.
+- A lost ship's wreck is always removed, also when the host changes during its explosion.
+- RETURN TO HUB also shows for a host who joined after the loss.
+- The clone tube screen keeps working when ship 1 is lost, and shows the biomass of the ship whose tube you're in.
+- A lost ship's power-recovery hint and voice events are cleaned up.
+
+**Co-op fleets**
+- Ships following a void jump get the game's "entered the void" event: their galaxy map, sockets and collisions update.
+- Void jumps work when another player than the host flies a ship, and a ship nobody crews no longer blocks a jump.
+- Enemies, scouts and the sector's events go for the nearest ship instead of the host's, and every ship is kept in the
+  play area. "Ship arrived" sector events fire once per jump, not once per ship.
+- Relic and weapon bonuses that depend on the ship (alloys, power, breakers, speed) read their own ship.
+
+**Lobby**
+- Only the host can change the ship count. Saved runs (one ship) don't open the crew screen or hold the start.
+- Back in the hub, the host no longer places everyone "as already confirmed" for a moment.
+- A hidden lobby screen comes back when the host switches between co-op and Fleet Battle.
+- The loadout terminal opens on your own ship each time you use it.
+- The Fleet Pilgrimage's two-ship minimum is no longer saved as your default ship count.
+- A player who becomes host in the hub tells their Ship Customizer which ships use CUSTOM.
+- When a mission adds ships for a big room, the crews are evened out and no ship takes more than 8.
+
+**Fleet Battle**
+- After a host change, ships aren't moved mid-match and supply drops keep their schedule.
+- Free places go to waiting players fairly: their own team first, then one at a time to the team with more free
+  places. A newcomer can't take a place ahead of players already waiting. A waiting player without a team sees and
+  hears no team's ships, talks only with other waiting players without a team, and gets Defeat on the end screen.
+- Twin and quad auto-turrets hit players as hard as intended, and a piercing round hits an enemy ship once.
+- Punches, enemy power switches, panel sabotage and the hacking terminal are checked properly by the host (or the
+  ship's pilot): a modified game can't punch from afar or too fast, switch enemy power from anywhere, or sabotage or hack
+  while dead or off the ship. Each hacking terminal works once.
+
+**Rooms and other mods**
+- A Fleet player who becomes host of a normal room no longer makes it require Fleet.
+- A new host keeps the room's size.
+- A Ship Customizer turned off in its own settings counts as not installed.
+- Codex entries from data shards aren't unlocked where progression is paused, and every player agrees on the pause.
+- Fleet's reconnect ID is a hash of the Steam ID (not the ID itself), published in Fleet rooms only.
+
+**Performance**
+- The plugin's periodic work is spread over frames instead of running all at once 4 times a second (smoother in VR).
+- Less work per frame in proximity voice, turrets, factions, the spectator view, the hacking terminal, ship sounds and
+  the lobby screen.
+
 ## 0.4.0
 Fleets of up to three ships, and Fleet Battle with up to three ships per team. Everyone in a room needs 0.4.0: the
 network protocol changed.
