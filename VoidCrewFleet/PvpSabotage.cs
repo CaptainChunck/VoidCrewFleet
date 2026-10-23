@@ -19,8 +19,9 @@ namespace VoidCrewFleet
     /// also stops providing power, which can overload the ship's breakers.
     /// - The enemy player's client sends the request instead of the game's own state change (and a failed minigame
     ///   costs the enemy ship nothing).
-    /// - The host checks the player is on the other team and next to the panel, then keeps the list of sabotaged
-    ///   panels with their end times in a room property, so every client (and late joiners) applies the same thing.
+    /// - The host checks the player is on the other team, alive, aboard that ship and next to the panel, then keeps the
+    ///   list of sabotaged panels with their end times in a room property, so every client (and late joiners) applies
+    ///   the same thing.
     /// - Every client refuses to switch the equipment on; whoever owns it keeps it off and switches it back on after.
     /// </summary>
     internal static class PvpSabotage
@@ -166,9 +167,10 @@ namespace VoidCrewFleet
                 PlayerControlledShip ship = FleetShips.OwnerOf(panel);
                 if (!PvpBoarding.IsEnemyOf(sender, ship) || panel.State == EnhancementState.Disabled) return;
                 Player saboteur = FleetShips.CharacterOf(sender);
-                if (saboteur == null || Vector3.Distance(saboteur.transform.position, panel.InteractableTransform.position) > MaxReach)
+                if (saboteur == null || PlayerLife.IsDead(saboteur) || FleetShips.AboardShip(saboteur) != ship ||
+                    Vector3.Distance(saboteur.transform.position, panel.InteractableTransform.position) > MaxReach)
                 {
-                    Log.Warn("PvP: ignored a sabotage request from player " + sender + ", who is not at that panel.");
+                    Log.Warn("PvP: ignored a sabotage request from player " + sender + ", who is not alive at that panel aboard " + FleetShips.Describe(ship) + ".");
                     return;
                 }
                 List<int> entries = ReadRoom();

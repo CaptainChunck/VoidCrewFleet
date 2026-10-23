@@ -14,6 +14,7 @@ using CG.Ship.Modules;
 using CG.Ship.Object;
 using CG.Space;
 using Gameplay.Enhancements;
+using Gameplay.Power;
 using Gameplay.SpacePlatforms;
 using Photon.Pun;
 using UnityEngine;
@@ -34,6 +35,10 @@ namespace VoidCrewFleet
     ///   refuses to start a seat, terminal or minigame of the enemy ship (the game's one "activate abilities" event).
     ///   This also covers a host on the enemy team, whose actions never go through the network.
     /// - The host also refuses door and airlock requests from enemy players without access.
+    /// - Whoever owns a ship part (the host, or a pilot) refuses the network requests of players outside the ship's team
+    ///   to switch its power (the whole ship's, a system's or a power line's), to change a panel's state, or any other of
+    ///   its synced switches. The exception is what a boarder may use (a system's power switch, a panel's own switch),
+    ///   asked by a boarder who is alive, aboard that ship and next to it.
     /// </summary>
     internal static class PvpBoarding
     {
@@ -42,13 +47,27 @@ namespace VoidCrewFleet
         private const float WarningSeconds = 20f;
         private const float WarningGapSeconds = 3f;
 
+        /// <summary>How close to a power switch a boarder must be, as the part's owner sees them, for their request to count.</summary>
+        private const float SwitchReach = 8f;
+
+        /// <summary>A switch found under no module yet (one still being put together) is looked at again after this long.</summary>
+        private const float NoModuleSeconds = 2f;
+
+        // What each thing is, worked out once per thing and forgotten when a match starts or the hub loads.
         private static readonly Dictionary<int, bool> EnhancementParts = new Dictionary<int, bool>();
         private static readonly Dictionary<int, bool> PowerSwitches = new Dictionary<int, bool>();
+        private static readonly Dictionary<int, float> NoModuleUntil = new Dictionary<int, float>();
         private static readonly HashSet<int> MainPowerSwitches = new HashSet<int>();
-        private static readonly Dictionary<int, AbstractDoor> DoorControls = new Dictionary<int, AbstractDoor>();
-        private static readonly HashSet<int> PressurizeLevers = new HashSet<int>();
-        private static readonly HashSet<int> SafetySwitches = new HashSet<int>();
         private static readonly Dictionary<int, bool> Stations = new Dictionary<int, bool>();
+
+        // Parts the game's own panels, doors and airlocks register as they start; those of ships that are gone are dropped
+        // when a match starts or the hub loads.
+        private static readonly Dictionary<int, Component> PanelParts = new Dictionary<int, Component>();
+        private static readonly Dictionary<int, AbstractDoor> DoorControls = new Dictionary<int, AbstractDoor>();
+        private static readonly Dictionary<int, Component> PressurizeLevers = new Dictionary<int, Component>();
+        private static readonly Dictionary<int, Component> SafetySwitches = new Dictionary<int, Component>();
+        private static readonly List<int> GoneIds = new List<int>();
+
         private static readonly Dictionary<string, float> WarningShown = new Dictionary<string, float>();
         private static float _lastWarning = -100f;
         private static GrapplingHookProjectile _hookToRestore;
@@ -100,6 +119,7 @@ namespace VoidCrewFleet
         {
             if (component == null) return false;
             int id = component.GetInstanceID();
+            if (PanelParts.ContainsKey(id)) return true;
             bool part;
             if (EnhancementParts.TryGetValue(id, out part)) return part;
             part = component.GetComponentInParent<Enhancement>() != null;
@@ -109,7 +129,8 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// A module's own power switch (any system's on/off switch). Not the central computer's: that one switches the
-        /// whole ship's power, so a single click by a boarder would shut everything down.
+        /// whole ship's power, so a single click by a boarder would shut everything down. A switch under no module is
+        /// looked at again a little later (a module can be seen while it is still being put together).
         /// </summary>
         public static bool IsModulePowerSwitch(Component component)
         {
@@ -118,17 +139,33 @@ namespace VoidCrewFleet
             int id = clicker.GetInstanceID();
             bool power;
             if (PowerSwitches.TryGetValue(id, out power)) return power;
-            power = false;
-            foreach (IShipModuleMediator mediator in clicker.GetComponentsInParent<IShipModuleMediator>(true))
+            float until;
+            if (NoModuleUntil.TryGetValue(id, out until) && Time.unscaledTime < until) return false;
+            IShipModuleMediator[] mediators = clicker.GetComponentsInParent<IShipModuleMediator>(true);
+            if (mediators.Length == 0)
             {
-                var property = mediator.GetType().GetProperty("PowerSwitch");
-                if (property == null || !ReferenceEquals(property.GetValue(mediator, null), clicker)) continue;
+                if (NoModuleUntil.Count > 4096) NoModuleUntil.Clear();
+                NoModuleUntil[id] = Time.unscaledTime + NoModuleSeconds;
+                return false;
+            }
+            power = false;
+            foreach (IShipModuleMediator mediator in mediators)
+            {
+                if (!ReferenceEquals(PowerSwitchOf(mediator), clicker)) continue;
                 if (mediator is CentralShipComputerMediator || mediator.Module is CentralShipComputerModule) MainPowerSwitches.Add(id);
                 else power = true;
                 break;
             }
+            NoModuleUntil.Remove(id);
             PowerSwitches[id] = power;
             return power;
+        }
+
+        /// <summary>A module mediator's power switch (each module type's mediator has one, possibly unset), or null.</summary>
+        private static Component PowerSwitchOf(IShipModuleMediator mediator)
+        {
+            var property = mediator != null ? mediator.GetType().GetProperty("PowerSwitch") : null;
+            return property != null ? property.GetValue(mediator, null) as Component : null;
         }
 
         /// <summary>A door's own clicker, an airlock panel's door button, or an airlock's pressurise lever (not into a cockpit).</summary>
@@ -137,7 +174,7 @@ namespace VoidCrewFleet
             int id = component.GetInstanceID();
             AbstractDoor door;
             if (DoorControls.TryGetValue(id, out door)) return door != null && !PvpHack.IsCockpitDoor(door);
-            return PressurizeLevers.Contains(id);
+            return PressurizeLevers.ContainsKey(id);
         }
 
         private static bool Blocked(Component interactable)
@@ -178,8 +215,37 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "CG.Client.Ship.AirlockButtonPanel", "Initialize", PatchKind.Postfix)]
         private static void AirlockPanelPostfix(ClickerInteractable ___pressurizationSwitch, SwitchClicker ___safetySwitch)
         {
-            if (___pressurizationSwitch != null) PressurizeLevers.Add(___pressurizationSwitch.GetInstanceID());
-            if (___safetySwitch != null) SafetySwitches.Add(___safetySwitch.GetInstanceID());
+            if (___pressurizationSwitch != null) PressurizeLevers[___pressurizationSwitch.GetInstanceID()] = ___pressurizationSwitch;
+            if (___safetySwitch != null) SafetySwitches[___safetySwitch.GetInstanceID()] = ___safetySwitch;
+        }
+
+        /// <summary>
+        /// A match starts or the hub loads (every client): what each thing was is worked out again, and the parts registered
+        /// by ships that no longer exist are dropped. (This session's ships may already have registered theirs.)
+        /// </summary>
+        [GamePatch(Feature, "CG.GameLoopStateMachine.GameStates.GSIngame", "OnEnter", PatchKind.Postfix, Optional = true)]
+        private static void SessionStartPostfix()
+        {
+            EnhancementParts.Clear();
+            PowerSwitches.Clear();
+            NoModuleUntil.Clear();
+            MainPowerSwitches.Clear();
+            Stations.Clear();
+            WarningShown.Clear();
+            DropGone(PanelParts);
+            DropGone(DoorControls);
+            DropGone(PressurizeLevers);
+            DropGone(SafetySwitches);
+        }
+
+        private static void DropGone<T>(Dictionary<int, T> parts) where T : UnityEngine.Object
+        {
+            GoneIds.Clear();
+            foreach (KeyValuePair<int, T> entry in parts)
+            {
+                if ((UnityEngine.Object)entry.Value == null) GoneIds.Add(entry.Key);
+            }
+            foreach (int id in GoneIds) parts.Remove(id);
         }
 
         /// <summary>
@@ -210,7 +276,7 @@ namespace VoidCrewFleet
             int id = blocked.GetInstanceID();
             AbstractDoor door;
             if (DoorControls.TryGetValue(id, out door) && door != null && PvpHack.IsCockpitDoor(door)) return "ENEMY COCKPIT: its doors never open for enemies.";
-            if (SafetySwitches.Contains(id)) return "ENEMY SHIP: the airlock safety override is for its own crew only.";
+            if (SafetySwitches.ContainsKey(id)) return "ENEMY SHIP: the airlock safety override is for its own crew only.";
             if (MainPowerSwitches.Contains(id)) return "ENEMY SHIP: the central computer's power switch is for its own crew only.";
             bool access = PvpHack.LocalHasAccess(ShipOf(blocked));
             if (!access && IsDoorControl(blocked)) return "ENEMY SHIP: hack one of its airlocks to use its doors.";
@@ -237,14 +303,14 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "Gameplay.Enhancements.EnhancementCrypticActivator", "Awake", PatchKind.Postfix)]
         private static void CrypticActivatorPostfix(CrypticCore ___cryptic, ClickerInteractable ___crypticClicker)
         {
-            if (___cryptic != null) EnhancementParts[___cryptic.GetInstanceID()] = true;
-            if (___crypticClicker != null) EnhancementParts[___crypticClicker.GetInstanceID()] = true;
+            if (___cryptic != null) PanelParts[___cryptic.GetInstanceID()] = ___cryptic;
+            if (___crypticClicker != null) PanelParts[___crypticClicker.GetInstanceID()] = ___crypticClicker;
         }
 
         [GamePatch(Feature, "Gameplay.Enhancements.EnhancementSwitchActivator", "Awake", PatchKind.Postfix)]
         private static void SwitchActivatorPostfix(SwitchClicker ___switchClicker)
         {
-            if (___switchClicker != null) EnhancementParts[___switchClicker.GetInstanceID()] = true;
+            if (___switchClicker != null) PanelParts[___switchClicker.GetInstanceID()] = ___switchClicker;
         }
 
         // ---------------------------------------------------------------- the local player's interactions
@@ -452,6 +518,122 @@ namespace VoidCrewFleet
                 Log.Failure("Checking an airlock request", e);
                 return true;
             }
+        }
+
+        // ---------------------------------------------------------------- the owner refuses outsiders' power and panel requests
+
+        // These RPCs go to whoever owns the part (the host, or a pilot) and carry no sender: RpcSender says who sent them.
+        // Every player's game also asks the owner for changes it works out itself (a system switching off when the power
+        // goes): refusing those from outsiders costs nothing, as the owner works out the same.
+
+        /// <summary>The central computer's power switch, the whole ship's power: never for anyone outside the ship's team.</summary>
+        [GamePatch(Feature, "Gameplay.Power.PowerSystem", "RequestPowerChange", PatchKind.Prefix, Optional = true)]
+        private static bool ShipPowerRequestPrefix(PowerSystem __instance)
+        {
+            return AllowRequest(__instance, __instance.photonView, "the ship's power", null);
+        }
+
+        /// <summary>A system's power: from outside the ship's team, only a boarder at that system's power switch.</summary>
+        [GamePatch(Feature, "Gameplay.Power.PowerDrain", "RequestSetPowerState", PatchKind.Prefix, Optional = true)]
+        private static bool SystemPowerRequestPrefix(PowerDrain __instance)
+        {
+            return AllowRequest(__instance, __instance.photonView, "a system's power", __instance);
+        }
+
+        /// <summary>A power line's switch: never for anyone outside the ship's team.</summary>
+        [GamePatch(Feature, "Gameplay.Power.PowerPropagator", "RequestSetPowerState", PatchKind.Prefix, Optional = true)]
+        private static bool PowerLineRequestPrefix(PowerPropagator __instance)
+        {
+            return AllowRequest(__instance, __instance.photonView, "a power line", null);
+        }
+
+        /// <summary>A System Enhancement panel's state: never from outside the ship's team (an enemy's completed panel is a sabotage request, PvpSabotage).</summary>
+        [GamePatch(Feature, "Gameplay.Enhancements.Enhancement", "StateChangePun", PatchKind.Prefix, Optional = true)]
+        private static bool PanelStateRequestPrefix(Enhancement __instance)
+        {
+            return AllowRequest(__instance, __instance.photonView, "a panel", null);
+        }
+
+        /// <summary>
+        /// Any other synced switch or setting of the ship (breakers, helm and weapon settings, and so on): from outside the
+        /// ship's team, only a boarder at a system's power switch or at a panel. An item's settings go with whoever has it.
+        /// </summary>
+        [GamePatch(Feature, "ChangeResponsivePun", "RequestBool", PatchKind.Prefix, Optional = true)]
+        [GamePatch(Feature, "ChangeResponsivePun", "RequestByte", PatchKind.Prefix, Optional = true)]
+        [GamePatch(Feature, "ChangeResponsivePun", "RequestInt", PatchKind.Prefix, Optional = true)]
+        private static bool SyncedValueRequestPrefix(ChangeResponsivePun __instance, int index, ChangeResponsivePun.ChangeResponsiveWrapper[] ___ChangeResponsives)
+        {
+            ChangeResponsivePun.ChangeResponsiveWrapper wrapper = ___ChangeResponsives != null && index >= 0 && index < ___ChangeResponsives.Length ? ___ChangeResponsives[index] : null;
+            MonoBehaviour holder = wrapper != null && wrapper.changeResponsive != null ? wrapper.changeResponsive.Component : null;
+            return AllowRequest(__instance, __instance.photonView, "a switch", holder);
+        }
+
+        /// <summary>
+        /// Whether to carry out an RPC that asks for a change to a ship part. Players outside the ship's team (an enemy, or a
+        /// player without a team) are refused, unless the change is to something a boarder may use (holder: the power drain
+        /// or the synced switch's component, else null), and they are alive, aboard that ship and next to it, as their own
+        /// game requires before it asks. The room's host is never refused: its own game logic asks a pilot who owns the
+        /// part for changes. An item or a character goes with whoever has it, wherever it is.
+        /// </summary>
+        private static bool AllowRequest(Component part, PhotonView view, string what, Component holder)
+        {
+            int actor;
+            if (!PvpCombat.Active || part == null || !RpcSender.Of(view, out actor)) return true;
+            try
+            {
+                if (actor == FleetShips.LocalActor || Net.FromHost(actor)) return true;
+                PlayerControlledShip ship = FleetShips.OwnerOf(part);
+                int slot = FleetShips.Slot(ship);
+                if (slot < 0 || FleetShips.TeamOfActor(actor) == FleetShips.TeamOfSlot(slot)) return true;
+                if (Carried(part) || (holder != null && Carried(holder))) return true;
+                Component usable = UsableBy(holder);
+                if (usable != null && AtPart(actor, ship, usable)) return true;
+                Log.InfoOnce("pvp refused " + what + " " + actor, "PvP: refused a change to " + what + " of " + FleetShips.Describe(ship) + " asked by player " + actor +
+                                                                 ", who is not on its team (further ones are only logged in verbose mode).");
+                Log.Verbose("PvP: refused a change to " + what + " of " + FleetShips.Describe(ship) + " asked by player " + actor + ".");
+                return false;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking a request from another team", e);
+                return true;
+            }
+        }
+
+        private static bool Carried(Component component)
+        {
+            return component.GetComponentInParent<CarryableObject>() != null || component.GetComponentInParent<Player>() != null;
+        }
+
+        /// <summary>Where a boarder uses this (a system's power switch, a panel), or null when a boarder may not use it.</summary>
+        private static Component UsableBy(Component holder)
+        {
+            if (holder == null) return null;
+            var drain = holder as PowerDrain;
+            if (drain != null) return ModulePowerSwitchOf(drain);
+            if (!IsEnhancementPart(holder)) return null;
+            Enhancement panel = holder.GetComponentInParent<Enhancement>();
+            return panel != null ? panel.InteractableTransform : holder;
+        }
+
+        /// <summary>A player's character is alive, aboard this ship and next to this part, as the local game sees it.</summary>
+        private static bool AtPart(int actor, PlayerControlledShip ship, Component part)
+        {
+            Player character = FleetShips.CharacterOf(actor);
+            if (character == null || PlayerLife.IsDead(character) || FleetShips.AboardShip(character) != ship) return false;
+            return (character.transform.position - part.transform.position).sqrMagnitude <= SwitchReach * SwitchReach;
+        }
+
+        /// <summary>The power switch of the system this power drain powers (not the central computer's); null for any other drain.</summary>
+        private static Component ModulePowerSwitchOf(PowerDrain drain)
+        {
+            foreach (IShipModuleMediator mediator in drain.GetComponents<IShipModuleMediator>())
+            {
+                if (mediator is CentralShipComputerMediator || mediator.Module is CentralShipComputerModule) continue;
+                Component powerSwitch = PowerSwitchOf(mediator);
+                if (powerSwitch != null) return powerSwitch;
+            }
+            return null;
         }
     }
 }

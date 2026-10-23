@@ -19,13 +19,19 @@ namespace VoidCrewFleet
     /// asset, as the game does), the host starts the ships on opposite sides of it with rocks between them, and spawns
     /// mirrored pairs of the game's own neutral salvage (containers to shoot open, a wreck and an asteroid base to search,
     /// a VoidFish) so both teams have the same resources nearby. Every few minutes an alloy supply drop arrives at a spot
-    /// the same distance from both ships. No enemy NPCs are added, and jumps stay blocked.
+    /// the same distance from both ships: the next drop's time is a room property in server time, so a new host keeps to
+    /// the schedule. No enemy NPCs are added, and jumps stay blocked.
     /// </summary>
     internal static class PvpArena
     {
         public const string Feature = "PvP arena";
         private const string KeySpawned = "VCF_ArenaPoi";
-        private const float SupplyDropSeconds = 300f;
+
+        /// <summary>The next supply drop's server time, and the match (session ID) it belongs to; always written together.</summary>
+        private const string KeyNextDrop = "VCF_ArenaDrop";
+
+        private const string KeyDropMatch = "VCF_ArenaDropFor";
+        private const int SupplyDropMilliseconds = 300000;
 
         private static readonly GUIDUnion SuppliesContainer = new GUIDUnion("1faa2a89e1fbe204aa6795d1d39284e4");
         private static readonly GUIDUnion GenericContainer = new GUIDUnion("71d99eb5d27424a42bb5fc15a1510834");
@@ -111,8 +117,19 @@ namespace VoidCrewFleet
         }
 
         private static Preset _current;
-        private static float _nextDrop;
+
+        /// <summary>The host's start-of-match check that the ships are clear of the rocks (unscaled time; -1 for none).</summary>
         private static float _checkAt = -1f;
+
+        /// <summary>
+        /// The host's own latest next-drop time: a room property only changes on the host once the server sends it back,
+        /// so for as long as it hosts this match in this room, the host goes by what it last wrote.
+        /// </summary>
+        private static int _hostNextDrop;
+
+        private static bool _hostHasNextDrop;
+        private static string _hostDropRoom;
+        private static string _hostDropSession;
 
         // ---------------------------------------------------------------- the sector (every client)
 
@@ -182,11 +199,14 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- salvage, supply drops, clear starts (host)
 
+        /// <summary>
+        /// The host starting a match: the ships' clear-of-rocks check in 8 seconds, the salvage, and the first supply drop
+        /// in 5 minutes. (Only that host checks the ships: a player who becomes host later never moves them mid-match.)
+        /// </summary>
         [GamePatch(Feature, "CG.GameLoopStateMachine.GameStates.GSIngame", "OnEnter", PatchKind.Postfix)]
         private static void InGamePostfix()
         {
-            _checkAt = Time.unscaledTime + 8f;
-            _nextDrop = Time.unscaledTime + SupplyDropSeconds;
+            _checkAt = PhotonNetwork.IsMasterClient ? Time.unscaledTime + 8f : -1f;
             try
             {
                 Preset preset = _current;
@@ -202,6 +222,7 @@ namespace VoidCrewFleet
                     spawned += Spawn(sector, poi.Prefab, Mirror(preset, poi.Position), Quaternion.Euler(0f, preset.Yaw + 180f, 0f));
                 }
                 PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeySpawned, session.GameSessionID } });
+                SetNextDrop(unchecked(PhotonNetwork.ServerTimestamp + SupplyDropMilliseconds), session.GameSessionID);
                 Log.Info("PvP arena: placed " + spawned + " salvage spots, mirrored for both teams.");
             }
             catch (Exception e)
@@ -224,11 +245,19 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>Host, a few times a second: a ship that starts inside rock is moved clear; supply drops arrive.</summary>
+        /// <summary>
+        /// Host, a few times a second: a ship that starts inside rock is moved clear (only by the host that started the
+        /// match); supply drops arrive on the room's schedule, which a new host carries on.
+        /// </summary>
         public static void Tick()
         {
+            if (!PhotonNetwork.IsMasterClient)
+            {
+                _checkAt = -1f;
+                return;
+            }
             Preset preset = _current;
-            if (preset == null || !PhotonNetwork.IsMasterClient || !PvpCombat.Active) return;
+            if (preset == null || !PvpCombat.Active) return;
             try
             {
                 if (_checkAt > 0f && Time.unscaledTime >= _checkAt)
@@ -236,18 +265,62 @@ namespace VoidCrewFleet
                     _checkAt = -1f;
                     foreach (PlayerControlledShip ship in FleetShips.All) KeepClear(preset, ship);
                 }
-                if (PvpTeams.Locked && Time.unscaledTime >= _nextDrop)
+                if (!PvpTeams.Locked) return;
+                GameSession session = GameSessionManager.ActiveSession;
+                if (session == null) return;
+                int next;
+                if (!NextDrop(session.GameSessionID, out next))
                 {
-                    _nextDrop = Time.unscaledTime + SupplyDropSeconds;
-                    SpawnUtils.SpawnCarePackage(AlloyCluster, 2, preset.DropSpot);
-                    Notice.ShowAll("A supply drop of alloys is arriving between the teams. Shoot it open and grab the alloys!");
-                    Log.Info("PvP arena: a supply drop is arriving at " + preset.DropSpot + ".");
+                    // No schedule for this match yet (it is only starting, or its first host left before the room had it):
+                    // the first drop is a full interval away, never at once.
+                    SetNextDrop(unchecked(PhotonNetwork.ServerTimestamp + SupplyDropMilliseconds), session.GameSessionID);
+                    return;
                 }
+                if (unchecked(PhotonNetwork.ServerTimestamp - next) < 0) return;
+                SetNextDrop(unchecked(PhotonNetwork.ServerTimestamp + SupplyDropMilliseconds), session.GameSessionID);
+                SpawnUtils.SpawnCarePackage(AlloyCluster, 2, preset.DropSpot);
+                Notice.ShowAll("A supply drop of alloys is arriving between the teams. Shoot it open and grab the alloys!");
+                Log.Info("PvP arena: a supply drop is arriving at " + preset.DropSpot + ".");
             }
             catch (Exception e)
             {
                 Log.Failure("Running the PvP arena", e);
             }
+        }
+
+        /// <summary>
+        /// The next supply drop's server time for this match: the host's own latest, else the room's (only when it is this
+        /// match's). False when this match has none.
+        /// </summary>
+        private static bool NextDrop(string sessionId, out int next)
+        {
+            next = 0;
+            Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+            if (room == null) return false;
+            if (_hostHasNextDrop && PhotonNetwork.IsMasterClient && room.Name == _hostDropRoom && _hostDropSession == sessionId)
+            {
+                next = _hostNextDrop;
+                return true;
+            }
+            _hostHasNextDrop = false;
+            object match;
+            object value;
+            if (!room.CustomProperties.TryGetValue(KeyDropMatch, out match) || (match as string) != sessionId) return false;
+            if (!room.CustomProperties.TryGetValue(KeyNextDrop, out value) || !(value is int)) return false;
+            next = (int)value;
+            return true;
+        }
+
+        /// <summary>Host: the next supply drop's server time, for everyone (a host after this one carries on from it).</summary>
+        private static void SetNextDrop(int next, string sessionId)
+        {
+            Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+            if (room == null) return;
+            room.SetCustomProperties(new Hashtable { { KeyNextDrop, next }, { KeyDropMatch, sessionId } });
+            _hostNextDrop = next;
+            _hostHasNextDrop = true;
+            _hostDropRoom = room.Name;
+            _hostDropSession = sessionId;
         }
 
         private static void KeepClear(Preset preset, PlayerControlledShip ship)
