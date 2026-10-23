@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Photon.Pun;
+using Photon.Realtime;
 using ResourceAssets;
 using UnityEngine;
 
@@ -14,10 +15,11 @@ namespace VoidCrewFleet
     /// <summary>
     /// Void Crew's modding rules for mods that change the session:
     /// - every room this player hosts is marked [mod_session] before it is listed (ModdingUtils.RegisterSessionMod);
-    /// - the plugin is required in those rooms: the host's session lists it, and the game sends anyone without it back
-    ///   to the menu with its "missing mods" message (an unmodded player could not survive a 7+ player session anyway);
+    /// - the plugin is required in Fleet rooms: the host's session lists it, and the game sends anyone without it back to
+    ///   the menu with its "missing mods" message (an unmodded player could not survive a 7+ player session anyway). A Fleet
+    ///   room is one this player created, or one whose sessions or fleet choices show its earlier host ran the plugin;
     /// - a player who has the plugin can still join vanilla rooms: on clients the plugin only counts as required when the
-    ///   host's session asks for it.
+    ///   host's session asks for it, and a vanilla room stays one when such a player becomes its host.
     /// The plugin is registered twice: as an external mod (for the main menu's mod list) and as a runtime asset, because
     /// the game only fetches readable names from the host for missing runtime assets.
     /// </summary>
@@ -33,9 +35,15 @@ namespace VoidCrewFleet
         /// </summary>
         public static readonly GUIDUnion MarkerId = new GUIDUnion("f1ee7c0de5f1ee7c0de5f1ee7c0de5" + (0x80 + FleetPlan.Protocol).ToString("x2"));
 
+        /// <summary>The room property a Fleet host publishes in the hub (HubFleet); only a Fleet room ever has it.</summary>
+        private const string FleetChoicesKey = "VCF_On";
+
         private const SessionModificationEffect Effect = SessionModificationEffect.ChangesQuestGeneration | SessionModificationEffect.ProgressionAltering;
 
         private static bool _dynamic;
+
+        /// <summary>The name of the room known to be a Fleet room (created here, or seen with the plugin's marks), or null.</summary>
+        private static string _fleetRoom;
 
         /// <summary>Called once at start-up, after the patches. Without the patches the plugin is simply always required.</summary>
         public static void Register()
@@ -63,14 +71,67 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// Whether the plugin counts as required right now: always for sessions this player hosts, and on clients only
-        /// when the host's session lists it.
+        /// Whether the room is a Fleet room, where the plugin is required: this player created it, the loaded session lists
+        /// the plugin, or a host published its fleet choices (VCF_On) in it. Once seen, a room stays a Fleet room, so a player
+        /// who takes it over keeps it one. A vanilla room this player only took over as host is not one: its players without
+        /// the plugin can stay. False outside a room.
+        /// </summary>
+        public static bool IsFleetRoom
+        {
+            get
+            {
+                try
+                {
+                    Room room = PhotonNetwork.InRoom ? PhotonNetwork.CurrentRoom : null;
+                    if (room == null) return false;
+                    if (room.Name != _fleetRoom && (SessionListsFleet() || HasFleetChoices(room))) _fleetRoom = room.Name;
+                    return room.Name == _fleetRoom;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        /// <summary>Whether the loaded session asks for the plugin (its host required it).</summary>
+        private static bool SessionListsFleet()
+        {
+            GameSession session = GameSessionManager.ActiveSession;
+            return session != null && session.ExternalMods != null && session.ExternalMods.ContainsKey(ModId);
+        }
+
+        private static bool HasFleetChoices(Room room)
+        {
+            object value;
+            return room.CustomProperties != null && room.CustomProperties.TryGetValue(FleetChoicesKey, out value) && value is int;
+        }
+
+        /// <summary>Every room this player creates is a Fleet room (it is created through the game's PhotonService).</summary>
+        [GamePatch(Feature, "PhotonService", "OnCreatedRoom", PatchKind.Postfix)]
+        private static void CreatedRoomPostfix()
+        {
+            try
+            {
+                if (PhotonNetwork.CurrentRoom != null) _fleetRoom = PhotonNetwork.CurrentRoom.Name;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Noting the room you created", e);
+            }
+        }
+
+        /// <summary>
+        /// Whether the plugin counts as required right now: for sessions this player hosts in a Fleet room (or outside a
+        /// room), and on clients only when the host's session lists it.
         /// </summary>
         private static bool Required()
         {
-            if (!PhotonNetwork.InRoom || PhotonNetwork.IsMasterClient) return true;
-            GameSession session = GameSessionManager.ActiveSession;
-            return session != null && session.ExternalMods != null && session.ExternalMods.ContainsKey(ModId);
+            if (!PhotonNetwork.InRoom) return true;
+            // Asked on clients too: a client checking a Fleet room's session notes the room, so it stays a Fleet room if this
+            // player becomes its host.
+            bool fleetRoom = IsFleetRoom;
+            return PhotonNetwork.IsMasterClient ? fleetRoom : SessionListsFleet();
         }
 
         /// <summary>True when the session that is loaded is hosted with this plugin (so its effects may apply).</summary>
@@ -82,9 +143,8 @@ namespace VoidCrewFleet
                 {
                     if (!PhotonNetwork.InRoom) return false;
                     if (!ModdingUtils.IsCurrentSessionModded()) return false;
-                    GameSession session = GameSessionManager.ActiveSession;
-                    if (PhotonNetwork.IsMasterClient) return true;
-                    return session != null && session.ExternalMods != null && session.ExternalMods.ContainsKey(ModId);
+                    if (PhotonNetwork.IsMasterClient) return IsFleetRoom;
+                    return SessionListsFleet();
                 }
                 catch
                 {

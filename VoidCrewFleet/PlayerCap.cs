@@ -43,6 +43,26 @@ namespace VoidCrewFleet
             get { return Mathf.Clamp(Settings.MaxPlayers.Value, 4, MaxRoom); }
         }
 
+        /// <summary>
+        /// The largest size the room can be set to here: this player's own limit, but never less than the room's size or
+        /// its players, so a player who becomes host with a lower setting keeps the room as it is. In a vanilla room this
+        /// player took over as host, the game's own limit of 6 stands in for their own (its players may not have the
+        /// plugin). Outside a room, this player's own limit.
+        /// </summary>
+        private static int Ceiling
+        {
+            get
+            {
+                Room room = PhotonNetwork.InRoom ? PhotonNetwork.CurrentRoom : null;
+                if (room == null) return Limit;
+                int own = ModRegistration.IsFleetRoom ? Limit : GameLimit;
+                return Mathf.Max(own, Mathf.Max(room.MaxPlayers, room.PlayerCount));
+            }
+        }
+
+        /// <summary>The game's own largest room.</summary>
+        private const int GameLimit = 6;
+
         // ---------------------------------------------------------------- the room
 
         /// <summary>A new room starts at the full size; the host can lower it with the sliders, which now go to 24.</summary>
@@ -61,31 +81,55 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>Every slider and menu sets the room size through this; keep it within 1..24.</summary>
+        /// <summary>
+        /// Every slider and menu sets the room size through this; keep it within 1 and the ceiling (which never cuts the room
+        /// below its current size or players).
+        /// </summary>
         [GamePatch(Feature, "PhotonService", "SetCurrentRoomPlayerLimit", PatchKind.Prefix)]
         private static void SetLimitPrefix(ref int limit)
         {
-            limit = Mathf.Clamp(limit, 1, Limit);
+            limit = Mathf.Clamp(limit, 1, Ceiling);
         }
 
         [GamePatch(Feature, "MatchmakingRoomSetup", ".ctor", PatchKind.Postfix, Arguments = new[] { "UnityEngine.UIElements.VisualElement" })]
         private static void RoomSetupPostfix(IntSetting ___playerLimit, SliderIntSettingEntryVE ___playerLimitVE)
         {
-            RaiseSlider(___playerLimit, ___playerLimitVE, CurrentRoomLimit(), "hub matchmaking terminal");
+            RaiseSlider(___playerLimit, ___playerLimitVE, CurrentRoomLimit(), Ceiling, "hub matchmaking terminal");
+        }
+
+        /// <summary>
+        /// The hub terminal writes the room's size back through its slider whenever it reads the room (when it opens, and when
+        /// the room's players change), clamped to the slider's maximum. That maximum was set when the terminal was built: raise
+        /// it first when the room has grown past it since (another host made it bigger), or the write-back would shrink it.
+        /// </summary>
+        [GamePatch(Feature, "MatchmakingRoomSetup", "RetrieveAndUpdateInfo", PatchKind.Prefix, Optional = true)]
+        private static void RoomSetupReadPrefix(IntSetting ___playerLimit, SliderIntSettingEntryVE ___playerLimitVE)
+        {
+            WidenSlider(___playerLimit, ___playerLimitVE, Ceiling, "hub matchmaking terminal");
         }
 
         [GamePatch(Feature, "LobbyPanel", ".ctor", PatchKind.Postfix,
             Arguments = new[] { "UnityEngine.UIElements.VisualElement", "UnityEngine.UIElements.VisualTreeAsset" })]
         private static void LobbyPanelPostfix(IntSetting ____playerLimit, SliderIntSettingEntryVE ____playerLimitVE)
         {
-            RaiseSlider(____playerLimit, ____playerLimitVE, CurrentRoomLimit(), "lobby panel");
+            RaiseSlider(____playerLimit, ____playerLimitVE, CurrentRoomLimit(), Ceiling, "lobby panel");
+        }
+
+        /// <summary>
+        /// The escape menu's room settings read the room's size into their slider when they open, and a slider that moves
+        /// writes its value to the room: the same as the hub terminal.
+        /// </summary>
+        [GamePatch(Feature, "LobbyPanel", "OnConfigToggled", PatchKind.Prefix, Optional = true)]
+        private static void LobbyPanelOpenPrefix(IntSetting ____playerLimit, SliderIntSettingEntryVE ____playerLimitVE)
+        {
+            WidenSlider(____playerLimit, ____playerLimitVE, Ceiling, "lobby panel");
         }
 
         /// <summary>The main menu's host panel: the default becomes the full size.</summary>
         [GamePatch(Feature, "MatchMakingMenu", "Init", PatchKind.Postfix)]
         private static void HostMenuPostfix(IntSetting ____playerLimit, SliderIntSettingEntryVE ____playerLimitVE)
         {
-            RaiseSlider(____playerLimit, ____playerLimitVE, Limit, "host menu");
+            RaiseSlider(____playerLimit, ____playerLimitVE, Limit, Limit, "host menu");
         }
 
         private static int CurrentRoomLimit()
@@ -94,24 +138,18 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// Lets a 1..6 player-limit setting and its slider go to 24, and shows <paramref name="value"/> without telling the
-        /// room (the game's terminal would otherwise write the old clamp, 6, back to the room when it opens).
+        /// Lets a 1..6 player-limit setting and its slider go to <paramref name="ceiling"/>, and shows <paramref name="value"/>
+        /// without telling the room (the game's terminal would otherwise write the old clamp, 6, back to the room when it
+        /// opens).
         /// </summary>
-        private static void RaiseSlider(IntSetting setting, SliderIntSettingEntryVE slider, int value, string where)
+        private static void RaiseSlider(IntSetting setting, SliderIntSettingEntryVE slider, int value, int ceiling, string where)
         {
             try
             {
                 if (setting == null || ClampedMax == null) return;
-                ClampedMax.SetValue(setting, Limit);
+                ClampedMax.SetValue(setting, ceiling);
                 setting.SetValue(value, true);
-                if (slider == null || slider.slider == null) return;
-
-                int oldHigh = SliderHighValue != null ? (int)SliderHighValue.GetValue(slider, null) : slider.slider.highValue;
-                slider.slider.highValue = Limit;
-                if (SliderHighValue != null) SliderHighValue.SetValue(slider, Limit, null);
-                AddSteps(slider, oldHigh);
-                if (SliderSetting != null && SliderSetting.GetValue(slider) != null) slider.Reload();
-                if (SliderUpdateLabels != null) SliderUpdateLabels.Invoke(slider, null);
+                FitSlider(slider, ceiling);
             }
             catch (Exception e)
             {
@@ -119,15 +157,45 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>
+        /// Raises a player-limit setting's maximum and its slider to <paramref name="ceiling"/> when they are lower. Never
+        /// lowers them: a slider whose maximum drops below its value moves, and a moving slider writes its value to the room.
+        /// </summary>
+        private static void WidenSlider(IntSetting setting, SliderIntSettingEntryVE slider, int ceiling, string where)
+        {
+            try
+            {
+                if (setting == null || ClampedMax == null || ceiling <= setting.MaxValue) return;
+                ClampedMax.SetValue(setting, ceiling);
+                FitSlider(slider, ceiling);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Raising the player-limit slider (" + where + ")", e);
+            }
+        }
+
+        /// <summary>The slider (its steps included) goes up to the ceiling, showing its setting's value.</summary>
+        private static void FitSlider(SliderIntSettingEntryVE slider, int ceiling)
+        {
+            if (slider == null || slider.slider == null) return;
+            int oldHigh = SliderHighValue != null ? (int)SliderHighValue.GetValue(slider, null) : slider.slider.highValue;
+            slider.slider.highValue = ceiling;
+            if (SliderHighValue != null) SliderHighValue.SetValue(slider, ceiling, null);
+            AddSteps(slider, oldHigh, ceiling);
+            if (SliderSetting != null && SliderSetting.GetValue(slider) != null) slider.Reload();
+            if (SliderUpdateLabels != null) SliderUpdateLabels.Invoke(slider, null);
+        }
+
         /// <summary>Sliders drawn with one clickable step per value get the steps for the new values too.</summary>
-        private static void AddSteps(SliderIntSettingEntryVE slider, int oldHigh)
+        private static void AddSteps(SliderIntSettingEntryVE slider, int oldHigh, int ceiling)
         {
             if (SliderDisplayMode == null) return;
             var mode = (SliderIntSettingEntryVE.NumberDisplayMode)SliderDisplayMode.GetValue(slider, null);
             if (mode != SliderIntSettingEntryVE.NumberDisplayMode.RangeWithSteps && mode != SliderIntSettingEntryVE.NumberDisplayMode.ValueWithSteps) return;
             VisualElement steps = slider.Q("StepContainer");
             if (steps == null) return;
-            for (int value = oldHigh + 1; value <= Limit; value++)
+            for (int value = oldHigh + 1; value <= ceiling; value++)
             {
                 if (steps.Q(value.ToString()) != null) continue;
                 var step = new VisualElement { name = value.ToString(), focusable = true };

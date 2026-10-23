@@ -9,11 +9,16 @@ namespace VoidCrewFleet
     /// adds as much again, so 1.6 becomes 2.2 with three ships):
     /// - the size of every enemy group the game allows to scale (scripted encounters and waves);
     /// - how many units the game's AI Director keeps in the fight (each unit counts for less of its "intensity" budget).
-    /// Spawning only happens on the host, so this only acts there.
+    /// Spawning only happens on the host, so this only acts there. The multiplier is fixed for each mission the first time
+    /// the host needs it: a unit's intensity must be taken off at the rate it was added, or a setting changed mid-mission
+    /// would leave phantom intensity behind (and fewer enemies for the rest of the mission).
     /// </summary>
     internal static class FleetDifficulty
     {
         public const string Feature = "Fleet Pilgrimage enemies";
+
+        private static GameSession _session;
+        private static float _multiplier = 1f;
 
         private static bool Scaling
         {
@@ -24,13 +29,18 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>The running mission's multiplier, from the host's setting when the mission first needed it.</summary>
         private static float Multiplier
         {
             get
             {
+                GameSession session = GameSessionManager.ActiveSession;
+                if (session != null && ReferenceEquals(session, _session)) return _multiplier;
                 float twoShips = Settings.EnemyMultiplier != null ? Settings.EnemyMultiplier.Value : 1.6f;
                 int ships = Mathf.Max(2, FleetSession.ShipCount);
-                return 1f + (twoShips - 1f) * (ships - 1);
+                _multiplier = 1f + (twoShips - 1f) * (ships - 1);
+                _session = session;
+                return _multiplier;
             }
         }
 

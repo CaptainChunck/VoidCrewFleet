@@ -50,12 +50,6 @@ namespace VoidCrewFleet
         /// </summary>
         public int StartAlloys = -2;
 
-        /// <summary>A copy of slot 0's loadout (spawned from the very ShipLoadout slot 0 was spawned from).</summary>
-        public bool CopiesShip1
-        {
-            get { return Slot > 0 && Built == null; }
-        }
-
         public JObject ToJson()
         {
             return new JObject

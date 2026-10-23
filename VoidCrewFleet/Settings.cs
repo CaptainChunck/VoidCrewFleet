@@ -51,7 +51,7 @@ namespace VoidCrewFleet
             EnemyMultiplier = config.Bind("Fleet Pilgrimage", "EnemyMultiplier", 1.6f,
                 new ConfigDescription("How many more enemies the Fleet Pilgrimage sends with two ships than the game would for one ship's crew: enemy group " +
                                       "sizes and how many units the AI keeps in the fight are both multiplied by this (a third ship adds as much again). " +
-                                      "Only the host's setting counts.",
+                                      "Only the host's setting counts; a change applies from the next mission.",
                     new AcceptableValueRange<float>(1f, 4f)));
 
             PvpStartDistance = config.Bind("PvP", "StartDistance", 3600f,
