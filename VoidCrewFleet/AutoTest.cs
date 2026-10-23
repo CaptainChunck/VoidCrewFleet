@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Text;
+using CG.Client.Player.Interactions;
 using CG.Game;
 using CG.Game.Player;
 using CG.GameLoopStateMachine;
@@ -97,6 +98,12 @@ namespace VoidCrewFleet
             switch (_step)
             {
                 case Step.WaitMenu:
+                    if (Time.unscaledTime - _lastReport >= 15f)
+                    {
+                        _lastReport = Time.unscaledTime;
+                        Log.Info("[autotest] Waiting for the main menu: state " + StateName() + ", Photon " + PhotonNetwork.NetworkClientState + ", in a room " +
+                                 PhotonNetwork.InRoom + ".");
+                    }
                     if (StateName() != "GSMainMenu" || !PhotonNetwork.IsConnectedAndReady || PhotonNetwork.InRoom) return;
                     if (Since < 3f) return;
                     Host();
@@ -443,6 +450,19 @@ namespace VoidCrewFleet
         /// </summary>
         private static System.Collections.IEnumerator FistSequence()
         {
+            // Out of the clone tube first, as the game's leave key does: no fists in there.
+            LocalPlayer inTube = LocalPlayer.Instance;
+            InClonetube tube = inTube != null && inTube.Locomotion != null ? inTube.Locomotion.GetAbility<InClonetube>() : null;
+            if (tube != null && tube.ActiveClonetube != null && (inTube.InteractionState.ActiveModes & InteractionMode.InCloneTube) != 0)
+            {
+                tube.ActiveClonetube.RequestOpenDoorFromInside();
+                float until = Time.unscaledTime + 15f;
+                while (Time.unscaledTime < until && LocalPlayer.Instance != null && (LocalPlayer.Instance.InteractionState.ActiveModes & InteractionMode.InCloneTube) != 0)
+                    yield return new WaitForSeconds(0.25f);
+                yield return new WaitForSeconds(1f);
+                Log.Info("[autotest] Out of the clone tube: " +
+                         (LocalPlayer.Instance != null && (LocalPlayer.Instance.InteractionState.ActiveModes & InteractionMode.InCloneTube) == 0) + ".");
+            }
             PvpPunch.ForceStanceForTest(true);
             yield return new WaitForSeconds(1.5f);
             Log.Info("[autotest] Fists up: stance " + PvpPunch.LocalStanceUp + ", " + FistPose.Describe() + ".");
@@ -520,6 +540,12 @@ namespace VoidCrewFleet
                     tallied = true;
                     yield return new WaitForSeconds(3f);
                     Screenshot("tally");
+                    // The end screen waits for every player's "ready" (what its continue button sends), as the game's own test loop does.
+                    PhotonNetwork.RaiseEvent(10, new string[0], new Photon.Realtime.RaiseEventOptions
+                    {
+                        CachingOption = Photon.Realtime.EventCaching.AddToRoomCacheGlobal,
+                        Receivers = Photon.Realtime.ReceiverGroup.All
+                    }, ExitGames.Client.Photon.SendOptions.SendReliable);
                 }
                 yield return new WaitForSeconds(1f);
             }
@@ -587,7 +613,15 @@ namespace VoidCrewFleet
 
         private static void Finish()
         {
-            Report("final");
+            try
+            {
+                Report("final");
+            }
+            catch (Exception e)
+            {
+                // Back in the hub there may be no ship to describe; the test is still done.
+                Log.Failure("[autotest] the final report", e);
+            }
             Screenshot("final");
             Log.Info("[autotest] DONE. Leave the game running to look around, or close it.");
             Go(Step.Done);
@@ -651,6 +685,7 @@ namespace VoidCrewFleet
                             ", spectating " + Spectator.Active + ", game state " + StateName());
             text.AppendLine("  active sector " + (GameSessionManager.ActiveSector != null ? GameSessionManager.ActiveSector.Id.ToString() : "none") +
                             ", room players " + PhotonNetwork.PlayerList.Length + "/" + (PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.MaxPlayers : 0));
+            text.AppendLine("  crew row: " + CrewBadge.Describe());
             Log.Info(text.ToString());
         }
 
