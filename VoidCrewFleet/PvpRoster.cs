@@ -14,8 +14,9 @@ namespace VoidCrewFleet
     /// turns it into the crew list (FleetShips) a few times a second:
     /// - Both: a player who comes back returns to their ship; everyone given a ship that is destroyed is DEAD for the rest of
     ///   the mission (no respawn; they watch once their character dies), even if they were away when it happened.
-    /// - PvP: a player who leaves keeps their seat for 3 minutes. Free seats go to the waiting players (WAITING), each team's
-    ///   own first, before anyone who joins; a player without a seat waits.
+    /// - PvP: anyone who joins while there is room plays: they join the team with fewer active players, on its ship with the
+    ///   smallest crew, so the teams stay at most one apart. A player who leaves keeps their place for 3 minutes. Free places
+    ///   go to the waiting players (WAITING), each team's own first, before anyone who joins.
     /// - Co-op: a newcomer joins the living ship with the smallest crew.
     /// A player's ID is their PlayFab account ID, which the game itself publishes; without one, their Steam ID or an ID this
     /// plugin keeps in its settings, published as a player property.
@@ -31,7 +32,6 @@ namespace VoidCrewFleet
         private const int HoldMs = HoldSeconds * 1000;
 
         private static List<RosterSeat> _seats;
-        private static int _seatsPerTeam;
         private static object _session;
         private static string _published;
         private static string _localId;
@@ -47,7 +47,6 @@ namespace VoidCrewFleet
         private static object _readValue;
         private static object _readSession;
         private static List<RosterSeat> _readSeats;
-        private static int _readSeatsPerTeam;
 
         // ---------------------------------------------------------------- player IDs
 
@@ -139,8 +138,7 @@ namespace VoidCrewFleet
         public static List<RosterSeat> Seats()
         {
             if (PhotonNetwork.IsMasterClient && _seats != null && ReferenceEquals(_session, GameSessionManager.ActiveSession)) return _seats;
-            int perTeam;
-            return Read(out perTeam);
+            return Read();
         }
 
         // ---------------------------------------------------------------- the host
@@ -194,7 +192,7 @@ namespace VoidCrewFleet
                         continue;
                     }
                     RosterSeat was = seat != null ? seat.Clone() : null;
-                    seat = RosterRules.Arrive(_seats, id, player.ActorNumber, name, alive, pvp, _seatsPerTeam, now);
+                    seat = RosterRules.Arrive(_seats, id, player.ActorNumber, name, alive, pvp, now);
                     ById[id] = seat;
                     changed = true;
                     if (pvp || seat.State == CrewState.Dead) Announce(player.ActorNumber, seat.Name, was, seat);
@@ -225,7 +223,7 @@ namespace VoidCrewFleet
             {
                 if (!seat.Away && seat.State == CrewState.Waiting) WaitingBefore.Add(seat.Clone());
             }
-            if (WaitingBefore.Count == 0 || !RosterRules.FillSeats(_seats, alive, _seatsPerTeam, now)) return false;
+            if (WaitingBefore.Count == 0 || !RosterRules.FillSeats(_seats, alive, now)) return false;
             foreach (RosterSeat was in WaitingBefore)
             {
                 RosterSeat seat;
@@ -255,13 +253,11 @@ namespace VoidCrewFleet
         /// <summary>The first time the host looks at a mission: the roster it has inherited, else one from the crews as they are.</summary>
         private static bool Start(bool pvp)
         {
-            int perTeam;
-            List<RosterSeat> inherited = Read(out perTeam);
+            List<RosterSeat> inherited = Read();
             if (inherited != null)
             {
                 // Its own copy: the roster as read is shared with every reader.
                 _seats = inherited.Select(s => s.Clone()).ToList();
-                _seatsPerTeam = perTeam;
                 Log.Info("Fleet roster taken over: " + string.Join(", ", _seats.Select(s => s.ToString()).ToArray()) + ".");
                 return true;
             }
@@ -279,10 +275,7 @@ namespace VoidCrewFleet
                     Id = id, Actor = player.ActorNumber, Name = NameOf(player), Team = entry.Team, Slot = entry.Slot, State = entry.State, WaitingSince = now
                 });
             }
-            int blue = _seats.Count(s => s.Team == 0);
-            int red = _seats.Count(s => s.Team == 1);
-            _seatsPerTeam = pvp ? Math.Max(1, Math.Max(blue, red)) : 0;
-            Log.Info("Fleet roster: " + _seats.Count + " players" + (pvp ? ", " + _seatsPerTeam + " seats per team" : "") + ".");
+            Log.Info("Fleet roster: " + _seats.Count + " players" + (pvp ? ", " + RosterRules.Active(_seats, 0) + " against " + RosterRules.Active(_seats, 1) : "") + ".");
             Publish();
             return true;
         }
@@ -355,7 +348,7 @@ namespace VoidCrewFleet
             GameSession session = GameSessionManager.ActiveSession;
             string json = new JObject
             {
-                ["v"] = 1, ["session"] = session != null ? session.GameSessionID.ToString() : "", ["seats"] = _seatsPerTeam, ["players"] = players
+                ["v"] = 2, ["session"] = session != null ? session.GameSessionID.ToString() : "", ["players"] = players
             }.ToString(Newtonsoft.Json.Formatting.None);
             if (json == _published) return;
             _published = json;
@@ -366,7 +359,7 @@ namespace VoidCrewFleet
         /// The roster in the room for this mission, or null. It is parsed again only when the room property or the session
         /// changes, and the list is shared: only to read.
         /// </summary>
-        private static List<RosterSeat> Read(out int seatsPerTeam)
+        private static List<RosterSeat> Read()
         {
             object value = null;
             if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null) PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeyRoster, out value);
@@ -375,22 +368,19 @@ namespace VoidCrewFleet
             {
                 _readValue = value;
                 _readSession = session;
-                _readSeats = Parse(value as string, session, out _readSeatsPerTeam);
+                _readSeats = Parse(value as string, session);
             }
-            seatsPerTeam = _readSeatsPerTeam;
             return _readSeats;
         }
 
         /// <summary>The roster in a room property's text when it is this session's, or null.</summary>
-        private static List<RosterSeat> Parse(string text, GameSession session, out int seatsPerTeam)
+        private static List<RosterSeat> Parse(string text, GameSession session)
         {
-            seatsPerTeam = 0;
             if (text == null || session == null) return null;
             try
             {
                 JObject json = JObject.Parse(text);
                 if ((string)json["session"] != session.GameSessionID.ToString()) return null;
-                int perTeam = (int)json["seats"];
                 var seats = new List<RosterSeat>();
                 foreach (JObject entry in (JArray)json["players"])
                 {
@@ -401,7 +391,6 @@ namespace VoidCrewFleet
                         WaitingSince = ServerTime(entry["waiting"])
                     });
                 }
-                seatsPerTeam = perTeam;
                 return seats;
             }
             catch (Exception e)
