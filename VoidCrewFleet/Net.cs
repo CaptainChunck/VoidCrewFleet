@@ -55,7 +55,16 @@ namespace VoidCrewFleet
         HackTaken = 41,
 
         /// <summary>Client to host: the ship's own crew pulls a terminal out of its airlock panel. Data: ship view, airlock index.</summary>
-        HackPull = 42
+        HackPull = 42,
+
+        /// <summary>
+        /// A ship's void drive owner (its pilot, when that isn't the host) to the host: that ship's lever started the void jump,
+        /// so it leads. Data: slot.
+        /// </summary>
+        JumpLead = 50,
+
+        /// <summary>A ship's void drive owner (its pilot) to the player who pulled its lever: the jump didn't start. Data: text.</summary>
+        JumpRefused = 51
     }
 
     /// <summary>
