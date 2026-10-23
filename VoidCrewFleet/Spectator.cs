@@ -76,6 +76,7 @@ namespace VoidCrewFleet
         private static float _pitch = 12f;
         private static float _distance = 110f;
         private static float _deadSince = -1f;
+        private static float _nextPrepare;
         private static bool _endHandled;
         private static UIDocument _document;
         private static Label _title;
@@ -166,7 +167,11 @@ namespace VoidCrewFleet
                     Follow(entry);
                     FadeNotices();
                 }
-                else if (_restoreHud) RestoreHudWhenPlaying();
+                else
+                {
+                    if (_restoreHud) RestoreHudWhenPlaying();
+                    Prepare();
+                }
                 HandleMatchEnd();
             }
             catch (Exception e)
@@ -283,7 +288,7 @@ namespace VoidCrewFleet
             }
             try
             {
-                HUD_LayoutContainer layout = UnityEngine.Object.FindObjectOfType<HUD_LayoutContainer>();
+                HUD_LayoutContainer layout = HUD_LayoutContainer.Instance;
                 Canvas canvas = layout != null ? layout.GetComponentInParent<Canvas>() : null;
                 if (canvas != null)
                 {
@@ -573,7 +578,33 @@ namespace VoidCrewFleet
 
         private static void ShowLabel(bool show)
         {
-            if (show && _document == null)
+            if (show) MakeLabel();
+            if (_document != null && _document.rootVisualElement != null)
+                _document.rootVisualElement.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
+        }
+
+        /// <summary>
+        /// In a fleet mission, ahead of the view: its camera and label, made hidden, so opening the view doesn't make them too
+        /// (the label's overlay alone holds up a frame by about 20 ms). Only once the game itself is up (the overlay copies its
+        /// screens' settings, not a loading screen's), tried again a second later.
+        /// </summary>
+        private static void Prepare()
+        {
+            if (_document != null && _rig != null) return;
+            if (Time.unscaledTime < _nextPrepare || !FleetShips.Active || GameSessionManager.InHub) return;
+            _nextPrepare = Time.unscaledTime + 1f;
+            GameStateMachine machine = GameStateMachine.Instance;
+            if (machine == null || !(machine.CurrentState is GSIngame)) return;
+            EnsureRig();
+            if (_document != null) return;
+            MakeLabel();
+            if (_document != null && _document.rootVisualElement != null) _document.rootVisualElement.style.display = DisplayStyle.None;
+        }
+
+        /// <summary>The label's overlay, made once.</summary>
+        private static void MakeLabel()
+        {
+            if (_document == null)
             {
                 _document = Ui.CreateOverlay("Void Crew Fleet spectator", 4000);
                 if (_document != null && _document.rootVisualElement != null)
@@ -609,8 +640,6 @@ namespace VoidCrewFleet
                     root.Add(box);
                 }
             }
-            if (_document != null && _document.rootVisualElement != null)
-                _document.rootVisualElement.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
         }
 
         /// <summary>The label for the watched ship (slot -1: none, a waiting player without a team); written only when it changes.</summary>
@@ -899,13 +928,21 @@ namespace VoidCrewFleet
         /// <summary>
         /// When the view opens: every ship's hidden parts as from open space, at once. The controllers only update on the
         /// local player's own moves, so a player who died aboard a ship would otherwise watch with that room's walls and plates.
+        /// The controllers are looked for on the ships, not by a search of the whole scene (15-20 ms in a fleet mission).
         /// </summary>
         internal static void ShowShipsFromSpace()
         {
             try
             {
                 ShownFromSpace.Clear();
-                foreach (LocalPlayerOcclusionController controller in UnityEngine.Object.FindObjectsOfType<LocalPlayerOcclusionController>()) ShowFromSpace(controller);
+                // Most parts register with this one (OnShipLost).
+                LocalPlayerOcclusionController main = LocalPlayerOcclusionController.Instance;
+                if (main != null) ShowFromSpace(main);
+                foreach (PlayerControlledShip ship in FleetShips.All)
+                {
+                    LocalPlayerOcclusionController controller = ship != null ? ship.GetComponentInChildren<LocalPlayerOcclusionController>() : null;
+                    if (controller != null && controller != main) ShowFromSpace(controller);
+                }
             }
             catch (Exception e)
             {

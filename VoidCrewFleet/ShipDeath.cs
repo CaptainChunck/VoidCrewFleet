@@ -47,6 +47,9 @@ namespace VoidCrewFleet
         /// <summary>When each lost ship's wreck is due to be gone (Time.unscaledTime on this client).</summary>
         private static readonly Dictionary<PlayerControlledShip, float> WreckDue = new Dictionary<PlayerControlledShip, float>();
 
+        /// <summary>The game's death sequence timings added up (SequenceAwakePostfix); the game's usual ones until it starts up.</summary>
+        private static float _sequenceSeconds = 9f;
+
         /// <summary>The ship whose death is being announced right now (during the game's event).</summary>
         public static PlayerControlledShip Dying { get; private set; }
 
@@ -349,21 +352,22 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>
+        /// The game's death sequence (one per mission: the local player's view of a ship's death) as it starts up: its timings are
+        /// kept, so a ship's death doesn't search the whole scene for them (15-20 ms in a fleet mission).
+        /// </summary>
+        [GamePatch(Feature, "PlayerShipDeathSequence", "Awake", PatchKind.Postfix, Optional = true)]
+        private static void SequenceAwakePostfix(PlayerShipDeathSequence __instance)
+        {
+            if (__instance == null) return;
+            _sequenceSeconds = __instance.startExplodeDelay + __instance.startStageTwoDelay + __instance.startStageThreeDelay + __instance.disableRenderersDelay +
+                               __instance.actualDeathDelay;
+        }
+
         /// <summary>How long a ship's death sequence takes, from its start to the ship's destruction (the game's timings).</summary>
         private static float SequenceSeconds()
         {
-            try
-            {
-                PlayerShipDeathSequence sequence = UnityEngine.Object.FindObjectOfType<PlayerShipDeathSequence>();
-                if (sequence != null)
-                    return sequence.startExplodeDelay + sequence.startStageTwoDelay + sequence.startStageThreeDelay + sequence.disableRenderersDelay +
-                           sequence.actualDeathDelay;
-            }
-            catch
-            {
-                // the game's usual timings then
-            }
-            return 9f;
+            return _sequenceSeconds;
         }
 
         /// <summary>

@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using CG.GameLoopStateMachine;
+using CG.GameLoopStateMachine.GameStates;
 using UnityEngine;
 using UnityEngine.UIElements;
 
@@ -20,6 +22,22 @@ namespace VoidCrewFleet
         private static VisualElement _row;
         private static Label _key;
         private static Label _label;
+        private static float _nextPrepare;
+
+        /// <summary>
+        /// Makes the overlay before the first hint, as a PvP match starts: making it holds up a frame (about 20 ms), which would
+        /// otherwise land on the first punch or hack hint, in the middle of a fight. Only once the game itself is up (the
+        /// overlay copies its screens' settings, not a loading screen's), tried again a second later.
+        /// </summary>
+        public static void Prepare()
+        {
+            if (_row != null && _row.panel != null) return;
+            if (Time.unscaledTime < _nextPrepare) return;
+            _nextPrepare = Time.unscaledTime + 1f;
+            GameStateMachine machine = GameStateMachine.Instance;
+            if (machine == null || !(machine.CurrentState is GSIngame)) return;
+            Ensure();
+        }
 
         /// <summary>Sets (or with null or empty text, clears) one feature's text.</summary>
         public static void Set(string source, int priority, string text)

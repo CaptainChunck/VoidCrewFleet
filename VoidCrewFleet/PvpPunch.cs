@@ -132,6 +132,7 @@ namespace VoidCrewFleet
                     return;
                 }
                 SetPadActions(true);
+                ActionHint.Prepare();
                 bool fight = CanFight();
                 SetStance(fight && StanceHeld());
                 SendStance();

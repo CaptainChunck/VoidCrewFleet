@@ -140,6 +140,24 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>
+        /// Every clone tube the ships have registered here, without a search of the whole scene (one takes 15-20 ms in a fleet
+        /// mission); null when none are registered (this feature is off): the scene has to be searched then.
+        /// </summary>
+        public static List<CloneTube> RegisteredTubes()
+        {
+            if (Registered.Count == 0) return null;
+            var tubes = new List<CloneTube>();
+            foreach (ShipTubes entry in Registered)
+            {
+                foreach (CloneTube tube in entry.Tubes)
+                {
+                    if (tube != null) tubes.Add(tube);
+                }
+            }
+            return tubes;
+        }
+
         private static List<CloneTube> Rebuild()
         {
             var all = new List<CloneTube>();
