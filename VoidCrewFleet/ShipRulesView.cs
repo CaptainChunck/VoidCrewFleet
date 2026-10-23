@@ -39,7 +39,14 @@ namespace VoidCrewFleet
         private static Label _itemsTitle;
         private static Label _note;
         private static string _selected;
-        private static string _signature;
+
+        // What the tab shows, as last drawn: it is drawn again only when one of these changed (or Redraw asks).
+        private static bool _drawn;
+        private static string _drawnJson;
+        private static bool _drawnEdit;
+        private static bool _drawnChoosing;
+        private static string _drawnSelected;
+        private static int _drawnOptions;
 
         /// <summary>Whether the tab can show: the Customizer lists what the rules can restrict.</summary>
         public static bool Available
@@ -108,7 +115,7 @@ namespace VoidCrewFleet
             content.Add(_itemList);
             _view.Add(right);
 
-            _signature = null;
+            _drawn = false;
             return _view;
         }
 
@@ -144,7 +151,7 @@ namespace VoidCrewFleet
             _categories = categories;
             if (options.Count > 0)
             {
-                _signature = null;
+                _drawn = false;
                 Log.Info("Ship rules: Ship Customizer lists " + options.Count + " options in " + categories.Count + " categories.");
             }
         }
@@ -156,13 +163,20 @@ namespace VoidCrewFleet
         {
             if (_view == null) return;
             ReadOptions();
-            ShipRules.Rules rules = ShipRules.Shown;
+            // The rules' JSON as the room (or the host's pending change) holds it: the same string until the rules change.
+            string json = ShipRules.ShownJson;
             bool edit = ShipRules.CanEdit;
             bool choosing = PvpTeams.HubChoosing;
             if (_selected == null && _categories.Count > 0) _selected = _categories[0];
-            string signature = rules.ToJson() + "|" + edit + "|" + choosing + "|" + _selected + "|" + _options.Count;
-            if (signature == _signature) return;
-            _signature = signature;
+            if (_drawn && ReferenceEquals(json, _drawnJson) && edit == _drawnEdit && choosing == _drawnChoosing && _selected == _drawnSelected &&
+                _options.Count == _drawnOptions) return;
+            _drawn = true;
+            _drawnJson = json;
+            _drawnEdit = edit;
+            _drawnChoosing = choosing;
+            _drawnSelected = _selected;
+            _drawnOptions = _options.Count;
+            ShipRules.Rules rules = ShipRules.Shown;
             try
             {
                 PickingMode controls = edit ? PickingMode.Position : PickingMode.Ignore;
@@ -293,7 +307,7 @@ namespace VoidCrewFleet
         /// <summary>Redraws the tab now, instead of on the next tick.</summary>
         private static void Redraw()
         {
-            _signature = null;
+            _drawn = false;
             Refresh();
         }
 

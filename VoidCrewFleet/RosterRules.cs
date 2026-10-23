@@ -63,7 +63,7 @@ namespace VoidCrewFleet
     /// - a newcomer gets in line behind waiting players who could take a free place; otherwise they join the team with a free
     ///   place and fewer active players (BLUE on a tie), on its ship with the smallest crew, or wait when neither has one;
     /// - a player who comes back too late plays again on their own team when it has a free place none of their team waits
-    ///   for, else waits on their team;
+    ///   for (on their own ship when it has room, else on the team's ship with the smallest crew), else waits on their team;
     /// - a waiting player who leaves keeps their place in line for the hold time; after that they are forgotten.
     /// Co-op: nobody waits; a newcomer joins the living ship with the smallest crew.
     /// Times are the server's clock in milliseconds, an int that wraps around: they are only ever compared by their
@@ -150,14 +150,18 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// Puts a player on a living ship of their team: their own when it lives, else the one with the smallest crew (with
-        /// room in a team match). False when there is none.
+        /// Puts a player on a living ship of their team: their own when it lives (unless their place on it was given up and,
+        /// in a team match, its crew is full), else the one with the smallest crew (with room in a team match). False when
+        /// there is none.
         /// </summary>
         private static bool Seat(List<RosterSeat> seats, RosterSeat seat, IList<int> aliveSlots, bool teamMatch)
         {
-            int slot = seat.Slot >= 0 && aliveSlots.Contains(seat.Slot) && (!teamMatch || seat.Slot % 2 == seat.Team)
-                ? seat.Slot
-                : SmallestCrew(seats.Where(s => s != seat), aliveSlots, teamMatch, seat.Team, teamMatch ? CrewRules.MaxCrew : int.MaxValue);
+            int limit = teamMatch ? CrewRules.MaxCrew : int.MaxValue;
+            List<RosterSeat> others = seats.Where(s => s != seat).ToList();
+            // A player back too late finds their place given away: their own ship only when it still has room.
+            bool own = seat.Slot >= 0 && aliveSlots.Contains(seat.Slot) && (!teamMatch || seat.Slot % 2 == seat.Team) &&
+                       (!seat.Expired || CrewOf(others, seat.Slot) < limit);
+            int slot = own ? seat.Slot : SmallestCrew(others, aliveSlots, teamMatch, seat.Team, limit);
             if (slot < 0) return false;
             seat.Slot = slot;
             seat.State = CrewState.Playing;

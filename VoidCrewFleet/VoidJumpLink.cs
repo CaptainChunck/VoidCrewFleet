@@ -57,6 +57,9 @@ namespace VoidCrewFleet
         private static VoidJumpSystem _reading;
         private static float _nextWarning;
 
+        /// <summary>Each ship's jump system, by the ship's instance ID (asked for every ship every physics step, SectorKeeper).</summary>
+        private static readonly Dictionary<int, VoidJumpSystem> Systems = new Dictionary<int, VoidJumpSystem>();
+
         /// <summary>True while a following ship's jump system is changing state (the once-only parts of a jump are skipped then).</summary>
         private static bool InFollowerStep
         {
@@ -103,15 +106,39 @@ namespace VoidCrewFleet
                 }
                 int chosen = ChosenLead();
                 int lead = chosen >= 0 && FleetShips.IsAlive(chosen) ? chosen : -1;
-                if (lead < 0)
-                {
-                    List<int> alive = FleetShips.AliveSlots();
-                    lead = alive.Count > 0 ? alive[0] : -1;
-                }
+                if (lead < 0) lead = LowestLivingSlot();
                 if (lead != _lastLead && _lastLead >= 0 && lead >= 0) Log.Info("Ship " + (lead + 1) + " leads the void jump now.");
                 _lastLead = lead;
                 return lead;
             }
+        }
+
+        /// <summary>Whether a ship is living (not dying); a ship being torn down counts as dying.</summary>
+        private static bool Living(PlayerControlledShip ship)
+        {
+            try
+            {
+                return ship != null && !ship.StartedDeath;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>The lowest slot of a living ship, or -1 (FleetShips.AliveSlots()[0], without making a list).</summary>
+        private static int LowestLivingSlot()
+        {
+            int lowest = -1;
+            IList<PlayerControlledShip> ships = FleetShips.All;
+            for (int i = 0; i < ships.Count; i++)
+            {
+                PlayerControlledShip ship = ships[i];
+                if (!Living(ship)) continue;
+                int slot = FleetShips.Slot(ship);
+                if (slot >= 0 && (lowest < 0 || slot < lowest)) lowest = slot;
+            }
+            return lowest;
         }
 
         /// <summary>
@@ -216,8 +243,10 @@ namespace VoidCrewFleet
         /// <summary>True while any living ship is somewhere in a jump (past setting the escape vector).</summary>
         public static bool JumpUnderWay()
         {
-            foreach (PlayerControlledShip ship in FleetShips.All)
+            IList<PlayerControlledShip> ships = FleetShips.All;
+            for (int i = 0; i < ships.Count; i++)
             {
+                PlayerControlledShip ship = ships[i];
                 if (ship == null || ship.StartedDeath) continue;
                 VoidJumpSystem system = SystemOf(ship);
                 VoidJumpState state = system != null ? system.ActiveState : null;
@@ -238,9 +267,23 @@ namespace VoidCrewFleet
             return Linked && system != null && system.PlayerShip != null && FleetShips.Slot(system.PlayerShip) == LeaderSlot;
         }
 
+        /// <summary>A ship's jump system, looked up once per ship.</summary>
         private static VoidJumpSystem SystemOf(PlayerControlledShip ship)
         {
-            return ship != null ? ship.GetComponentInChildren<VoidJumpSystem>() : null;
+            if (ship == null) return null;
+            int id = ship.GetInstanceID();
+            VoidJumpSystem system;
+            if (Systems.TryGetValue(id, out system))
+            {
+                if (system != null) return system;
+                Systems.Remove(id);
+            }
+            system = ship.GetComponentInChildren<VoidJumpSystem>();
+            if (system == null) return null;
+            // Those of missions that are over.
+            if (Systems.Count >= 32) Systems.Clear();
+            Systems[id] = system;
+            return system;
         }
 
         /// <summary>True while a ship is somewhere between leaving a sector and arriving in the next one.</summary>
@@ -501,8 +544,8 @@ namespace VoidCrewFleet
         /// <summary>
         /// Pulling a void lever. In PvP there are no jumps. In co-op any ship's lever starts the jump for every ship, once
         /// every crewed ship's void drive is charged (and that ship has the escape vector, as the game checks): that ship leads
-        /// the jump and the others follow it. While a crewed ship's drive isn't charged, the lever says which ship and nothing
-        /// starts. During a jump, any ship's lever acts as the lead ship's.
+        /// the jump and the others follow it (TryStartJumpPostfix). While a crewed ship's drive isn't charged, the lever says
+        /// which ship and nothing starts. During a jump, any ship's lever acts as the lead ship's.
         /// The game checks a pull twice: on the puller's screen (for the message), then where that ship's drive is run (the
         /// host, or the ship's pilot), which decides and starts the jump.
         /// </summary>
@@ -516,7 +559,7 @@ namespace VoidCrewFleet
                 if (FleetSession.IsPvP)
                 {
                     __result = ImpulseJumpOutcome.CantFlyNoImpulse;
-                    Warn("No void jumps in a PvP match: the fight ends when a ship is destroyed.");
+                    Warn("No void jumps in Fleet Battle.");
                     return false;
                 }
                 if (!Linked) return true;
@@ -560,14 +603,33 @@ namespace VoidCrewFleet
                     }
                     return false;
                 }
-                // This ship leads the jump; the game's own checks follow (the escape vector, power, the helm, its charge).
-                if (deciding && slot >= 0) SetLead(slot);
+                // The game's own checks follow (the escape vector, power, the helm, its charge).
             }
             catch (Exception e)
             {
                 Log.Failure("Checking the void jump", e);
             }
             return true;
+        }
+
+        /// <summary>
+        /// A lever pull that starts the jump, where its ship's drive is run, makes that ship the lead ship; one the game
+        /// refuses (no escape vector, no power, the helm off, not charged) changes nothing. The lead is set before the jump's
+        /// first step, which the game takes right after this check.
+        /// </summary>
+        [GamePatch(Feature, "CG.Ship.Modules.VoidDriveModule", "TryStartJumpEngine", PatchKind.Postfix)]
+        private static void TryStartJumpPostfix(VoidDriveModule __instance, ImpulseJumpOutcome __result)
+        {
+            try
+            {
+                if (__result != ImpulseJumpOutcome.ImpulseFlightStarted || _startRequestFrom < 0 || !Linked) return;
+                int slot = FleetShips.Slot(FleetShips.OwnerOf(__instance));
+                if (slot >= 0) SetLead(slot);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Choosing the lead ship of the void jump", e);
+            }
         }
 
         /// <summary>
@@ -604,18 +666,35 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- arriving side by side
 
-        /// <summary>A ship's place in the line of ships arriving side by side: by its number among the living ships.</summary>
+        /// <summary>
+        /// A ship's place in the line of ships arriving side by side: by its number among the living ships (every frame of
+        /// the arrival, so counted without making a list).
+        /// </summary>
         private static Vector3 ArrivalOffset(VoidJumpSystem system, Sector.ImpulseEnterPoint enter)
         {
             if (!Linked || system == null || system.PlayerShip == null || enter == null) return Vector3.zero;
+            int mine = FleetShips.Slot(system.PlayerShip);
+            if (mine < 0) return Vector3.zero;
+            bool living = false;
+            int lower = 0;
+            int count = 0;
+            IList<PlayerControlledShip> ships = FleetShips.All;
+            for (int i = 0; i < ships.Count; i++)
+            {
+                PlayerControlledShip ship = ships[i];
+                if (!Living(ship)) continue;
+                int slot = FleetShips.Slot(ship);
+                if (slot < 0) continue;
+                count++;
+                if (slot < mine) lower++;
+                else if (slot == mine) living = true;
+            }
+            if (!living) return Vector3.zero;
             Vector3 look = enter.LookDirectionPosition - enter.Position;
             look.y = 0f;
             if (look.sqrMagnitude < 0.01f) look = Vector3.forward;
             Vector3 right = Vector3.Cross(Vector3.up, look.normalized);
-            List<int> alive = FleetShips.AliveSlots();
-            int index = alive.IndexOf(FleetShips.Slot(system.PlayerShip));
-            if (index < 0) return Vector3.zero;
-            return ShipSpawn.LineOffset(index, alive.Count, right, Settings.ShipSpacing.Value);
+            return ShipSpawn.LineOffset(lower, count, right, Settings.ShipSpacing.Value);
         }
 
         private static Sector.ImpulseEnterPoint EnterPoint(VoidJumpSystem system)

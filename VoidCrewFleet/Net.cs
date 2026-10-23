@@ -64,7 +64,13 @@ namespace VoidCrewFleet
         JumpLead = 50,
 
         /// <summary>A ship's void drive owner (its pilot) to the player who pulled its lever: the jump didn't start. Data: text.</summary>
-        JumpRefused = 51
+        JumpRefused = 51,
+
+        /// <summary>
+        /// Host to everyone else: the PvP match is decided, the host's word for every player's notice and end screen
+        /// (PvpMatch). Data: the losing team (int, 0 BLUE, 1 RED), whether it forfeited (bool).
+        /// </summary>
+        MatchResult = 60
     }
 
     /// <summary>

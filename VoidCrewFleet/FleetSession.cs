@@ -96,7 +96,7 @@ namespace VoidCrewFleet
     /// <summary>The fleet settings of one mission, fixed when the host starts it.</summary>
     internal sealed class FleetPlan
     {
-        public const int Protocol = 5;
+        public const int Protocol = 6;
 
         public FleetMode Mode;
 

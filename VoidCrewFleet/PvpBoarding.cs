@@ -13,10 +13,12 @@ using CG.Ship.Hull;
 using CG.Ship.Modules;
 using CG.Ship.Object;
 using CG.Space;
+using Gameplay.Carryables;
 using Gameplay.Enhancements;
 using Gameplay.Power;
 using Gameplay.SpacePlatforms;
 using Photon.Pun;
+using RSG;
 using UnityEngine;
 
 namespace VoidCrewFleet
@@ -39,6 +41,8 @@ namespace VoidCrewFleet
     ///   to switch its power (the whole ship's, a system's or a power line's), to change a panel's state, or any other of
     ///   its synced switches. The exception is what a boarder may use (a system's power switch, a panel's own switch),
     ///   asked by a boarder who is alive, aboard that ship and next to it.
+    /// - Whoever owns a seat (the helm, a turret, any other) or a socket of the ship refuses enemy players who ask for it or
+    ///   its item, and every client ignores an enemy taking over the ship's parts or the items in its sockets.
     /// </summary>
     internal static class PvpBoarding
     {
@@ -52,6 +56,19 @@ namespace VoidCrewFleet
 
         /// <summary>A switch found under no module yet (one still being put together) is looked at again after this long.</summary>
         private const float NoModuleSeconds = 2f;
+
+        // The game's requests to a carrier's owner (Gameplay.Carryables.CarrierCarryableHandler): put an item in, let it out,
+        // throw it out.
+        private const byte InsertRequestEvent = 3;
+        private const byte ReleaseRequestEvent = 4;
+        private const byte EjectRequestEvent = 5;
+
+        // Photon's own events (PUN's PunEvent): a player asks to own a network view, or one is given to a player.
+        private const byte OwnershipRequestEvent = 209;
+        private const byte OwnershipTransferEvent = 210;
+
+        /// <summary>The carrier request whose event Photon is handing out right now, or null (see CarrierRequestPrefix).</summary>
+        private static ExitGames.Client.Photon.EventData _carrierRequest;
 
         // What each thing is, worked out once per thing and forgotten when a match starts or the hub loads.
         private static readonly Dictionary<int, bool> EnhancementParts = new Dictionary<int, bool>();
@@ -634,6 +651,186 @@ namespace VoidCrewFleet
                 if (powerSwitch != null) return powerSwitch;
             }
             return null;
+        }
+
+        // ---------------------------------------------------------------- the ship's seats, sockets and items stay with its team
+
+        /// <summary>
+        /// The helm, a turret or any other seat of the ship: whoever owns the seat (the host while it is free) gives it to any
+        /// player who asks, and the helm's or turret's own network views go with it. Not to a player of the other team (door
+        /// access from a hack doesn't count, and the helm is kept whether or not its cockpit has doors): the request is
+        /// dropped, as the game itself drops one while the seat's module is being upgraded or taken apart. (The game's own
+        /// answer, TakeoverRejected, isn't marked as a network call, so it can't be sent.)
+        /// </summary>
+        [GamePatch(Feature, "TakeoverChair", "RequestSitInChair", PatchKind.Prefix, Optional = true)]
+        private static bool SeatRequestPrefix(TakeoverChair __instance, PhotonMessageInfo info)
+        {
+            if (!PvpCombat.Active || info.Sender == null) return true;
+            try
+            {
+                PlayerControlledShip ship = FleetShips.OwnerOf(__instance);
+                if (ship == null) ship = FleetShips.OwnerOf(__instance.ConnectedModule);
+                int actor = info.Sender.ActorNumber;
+                if (!IsEnemyOf(actor, ship)) return true;
+                LogRefusal("the seat " + __instance.name, ship, actor);
+                return false;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking a seat request", e);
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// An item in one of the ship's sockets whose network view asks before it changes hands: the socket's owner (the
+        /// game's Carrier) gives it to whoever asks, but not to a player of the other team. The game's own items change hands
+        /// without asking anyone (see OwnershipEventPrefix); this covers any that ask.
+        /// </summary>
+        [GamePatch(Feature, "Gameplay.Carryables.Carrier", "OnOwnershipRequest", PatchKind.Prefix, Optional = true)]
+        private static bool SocketItemRequestPrefix(Carrier __instance, PhotonView targetView, Photon.Realtime.Player requestingPlayer)
+        {
+            if (!PvpCombat.Active || requestingPlayer == null || targetView == null) return true;
+            try
+            {
+                // Every carrier hears every request: only the one holding that item, on its owner's game, gives it away.
+                CarryableObject item = __instance.Payload;
+                if (!targetView.IsMine || item == null || item.ViewID != targetView.ViewID) return true;
+                PlayerControlledShip ship = SocketShip(__instance.Owner as CarryablesSocket);
+                int actor = requestingPlayer.ActorNumber;
+                if (Net.FromHost(actor) || !IsEnemyOf(actor, ship)) return true;
+                LogRefusal("the item " + item.name + " in a socket", ship, actor);
+                return false;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking a request for an item in a socket", e);
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Every client: Photon hands each event to PUN's own handler (patched here) first, then to every carrier, and the
+        /// carrier a request is for (put an item in, let it out, throw it out) answers it there and then: the request is
+        /// noted here for that answer (see SocketRequest). Any other event clears it. (One check per event, where a check in
+        /// the carriers' own handler would run for every carrier of every ship on every event.)
+        /// </summary>
+        [GamePatch(Feature, "Photon.Pun.PhotonNetwork", "OnEvent", PatchKind.Prefix, Optional = true, AfterGameLoad = true)]
+        private static void CarrierRequestPrefix(ExitGames.Client.Photon.EventData photonEvent)
+        {
+            byte code = photonEvent != null ? photonEvent.Code : (byte)0;
+            _carrierRequest = code >= InsertRequestEvent && code <= EjectRequestEvent ? photonEvent : null;
+        }
+
+        [GamePatch(Feature, "Gameplay.Carryables.CarrierCarryableHandler", "TryInsertCarryable", PatchKind.Prefix, Optional = true)]
+        private static bool InsertRequestPrefix(PhotonView ___photonView, ICarrierComponent ___carrier, ref IPromise __result)
+        {
+            return SocketRequest(InsertRequestEvent, ___photonView, ___carrier, ref __result);
+        }
+
+        [GamePatch(Feature, "Gameplay.Carryables.CarrierCarryableHandler", "TryReleaseCarryable", PatchKind.Prefix, Optional = true)]
+        private static bool ReleaseRequestPrefix(PhotonView ___photonView, ICarrierComponent ___carrier, ref IPromise __result)
+        {
+            return SocketRequest(ReleaseRequestEvent, ___photonView, ___carrier, ref __result);
+        }
+
+        [GamePatch(Feature, "Gameplay.Carryables.CarrierCarryableHandler", "TryEjectCarryable", PatchKind.Prefix, Optional = true)]
+        private static bool EjectRequestPrefix(PhotonView ___photonView, ICarrierComponent ___carrier, ref IPromise __result)
+        {
+            return SocketRequest(EjectRequestEvent, ___photonView, ___carrier, ref __result);
+        }
+
+        /// <summary>
+        /// A player's game asks the owner of one of the ship's sockets to put an item into it, to let its item out (how a
+        /// player swaps the item in a socket for the one in their hands) or to throw it out: refused to a player of the other
+        /// team the way the game refuses a request itself (it fails, and the owner's game tells the asker so). The host's own
+        /// game logic may still ask. A carrier's own game asking itself goes through as before.
+        /// </summary>
+        private static bool SocketRequest(byte code, PhotonView view, ICarrierComponent carrierComponent, ref IPromise result)
+        {
+            ExitGames.Client.Photon.EventData request = _carrierRequest;
+            if (request == null || request.Code != code || view == null || !PvpCombat.Active) return true;
+            try
+            {
+                var data = request.CustomData as object[];
+                if (data == null || data.Length == 0 || !(data[0] is int) || (int)data[0] != view.ViewID) return true;
+                // This carrier answers it now.
+                _carrierRequest = null;
+                var carrier = carrierComponent as Carrier;
+                var socket = carrier != null ? carrier.Owner as CarryablesSocket : null;
+                PlayerControlledShip ship = SocketShip(socket);
+                int actor = request.Sender;
+                if (Net.FromHost(actor) || !IsEnemyOf(actor, ship)) return true;
+                var refused = new Promise();
+                refused.Reject(new Exception("refused to a player of the other team"));
+                result = refused;
+                LogRefusal("the socket " + socket.name, ship, actor);
+                return false;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking a socket request", e);
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Every client: the helm's seat, the network views it hands its pilot, and every item are network views that change
+        /// owner on each client by itself when a player asks for one or is handed one. No owner is asked, so the checks above
+        /// never see it. Every client ignores such a change that would give a part of a ship, or an item in one of its
+        /// sockets, to a player of the other team (the game of a player who tried may follow it, but no one else's does).
+        /// Never refused: the host (seats go back to it, and its own game logic takes items), and items a player carries or
+        /// that lie loose (the interaction rules above keep those).
+        /// </summary>
+        [GamePatch(Feature, "Photon.Pun.PhotonNetwork", "OnEvent", PatchKind.Prefix, Optional = true, AfterGameLoad = true)]
+        private static bool OwnershipEventPrefix(ExitGames.Client.Photon.EventData photonEvent)
+        {
+            byte code = photonEvent != null ? photonEvent.Code : (byte)0;
+            if ((code != OwnershipRequestEvent && code != OwnershipTransferEvent) || !PvpCombat.Active) return true;
+            try
+            {
+                var data = photonEvent.CustomData as int[];
+                if (data == null || data.Length < 2) return true;
+                // A request makes its sender the owner; a transfer names the new owner.
+                int actor = code == OwnershipRequestEvent ? photonEvent.Sender : data[1];
+                if (actor <= 0 || Net.FromHost(actor)) return true;
+                PhotonView view = PhotonView.Find(data[0]);
+                if (view == null || view.OwnershipTransfer != OwnershipOption.Takeover) return true;
+                PlayerControlledShip ship = ShipOfView(view);
+                if (!IsEnemyOf(actor, ship)) return true;
+                LogRefusal(view.name, ship, actor);
+                return false;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking a change of owner", e);
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// The ship a network view is part of, or for an item, the ship whose socket holds it; null for an item a player
+        /// carries, one lying loose or in another item's socket, and for anything that isn't part of a ship.
+        /// </summary>
+        private static PlayerControlledShip ShipOfView(PhotonView view)
+        {
+            var item = view.GetComponentInParent<CarryableObject>();
+            return item != null ? SocketShip(item.Carrier as CarryablesSocket) : FleetShips.OwnerOf(view);
+        }
+
+        /// <summary>The ship a socket is part of; null for none, or for a socket of an item (a magazine's), which moves with it.</summary>
+        private static PlayerControlledShip SocketShip(CarryablesSocket socket)
+        {
+            if (socket == null || socket.GetComponentInParent<CarryableObject>() != null) return null;
+            return FleetShips.OwnerOf(socket);
+        }
+
+        /// <summary>The first refusal of each kind to each player is logged; the rest only in verbose mode.</summary>
+        private static void LogRefusal(string what, PlayerControlledShip ship, int actor)
+        {
+            Log.InfoOnce("pvp refused " + what + " " + actor, "PvP: refused " + what + " of " + FleetShips.Describe(ship) + " to player " + actor +
+                                                             " of the other team (further ones are only logged in verbose mode).");
+            Log.Verbose("PvP: refused " + what + " of " + FleetShips.Describe(ship) + " to player " + actor + ".");
         }
     }
 }

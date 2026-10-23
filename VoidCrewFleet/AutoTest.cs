@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -14,8 +15,10 @@ using Gameplay.Quests;
 using Gameplay.Ship.VoidJump;
 using PlatformAbstractionLayer;
 using Photon.Pun;
+using ResourceAssets;
 using ToolClasses;
 using UnityEngine;
+using UnityEngine.UIElements;
 
 namespace VoidCrewFleet
 {
@@ -45,6 +48,7 @@ namespace VoidCrewFleet
             Starting,
             WaitMission,
             Report,
+            Tour,
             Fists,
             Respawning,
             Destroying,
@@ -134,6 +138,14 @@ namespace VoidCrewFleet
                     Screenshot("mission");
                     if (FleetSession.IsPvP && _reports == 0) StartHackTest();
                     if (++_reports < (FleetSession.IsPvP ? 10 : 3)) return;
+                    if (Settings.AutoTestTour.Value && FleetSession.IsPvP && Step.Tour > _done)
+                    {
+                        _done = Step.Tour;
+                        Go(Step.Tour);
+                        _sequenceDone = false;
+                        FleetRuntime.Instance.StartCoroutine(TourSequence());
+                        return;
+                    }
                     if (Settings.AutoTestFists.Value && FleetSession.IsPvP && Step.Fists > _done)
                     {
                         _done = Step.Fists;
@@ -152,6 +164,11 @@ namespace VoidCrewFleet
                     {
                         Go(Step.Destroying);
                     }
+                    return;
+                case Step.Tour:
+                    if (!_sequenceDone && Since < 300f) return;
+                    if (!_sequenceDone) Log.Warn("[autotest] The camera tour didn't finish in 300 s.");
+                    Go(Step.Report);
                     return;
                 case Step.Fists:
                     if (!_sequenceDone && Since < 60f) return;
@@ -503,6 +520,177 @@ namespace VoidCrewFleet
             _sequenceDone = true;
         }
 
+        /// <summary>
+        /// A camera tour of the PvP arena (AutoTestTour), to see what it looks like: a free camera over the whole arena, behind
+        /// each team, at its centre, at every ship and every salvage spot, and at a supply drop called in for the tour, with a
+        /// screenshot at each. The game's screens are hidden for the tour and the ships are shown as from open space.
+        /// </summary>
+        private static System.Collections.IEnumerator TourSequence()
+        {
+            var spots = new List<PvpArena.TourSpot>();
+            Vector3 centre;
+            Vector3 axis;
+            Vector3 drop;
+            string arena = PvpArena.TourArena(out centre, out axis, out drop, spots);
+            if (arena == null)
+            {
+                Log.Warn("[autotest] Tour: this match has no PvP arena.");
+                _sequenceDone = true;
+                yield break;
+            }
+            Log.Info("[autotest] Tour of " + arena + ": centre " + centre.ToString("0") + ", BLUE to RED along " + axis.ToString("0.00") + ".");
+            // The drop arrives through a void jump some seconds after it is due: it is the tour's last stop.
+            PvpArena.DropNowForTest();
+            var screens = new Dictionary<VisualElement, StyleEnum<DisplayStyle>>();
+            HideScreens(screens);
+            Spectator.ShowShipsFromSpace();
+            var rig = new GameObject("__FleetTourCamera");
+            var camera = rig.AddComponent<Cinemachine.CinemachineVirtualCamera>();
+            Cinemachine.LensSettings lens = camera.m_Lens;
+            lens.FieldOfView = 60f;
+            lens.NearClipPlane = 1f;
+            lens.FarClipPlane = 60000f;
+            camera.m_Lens = lens;
+            camera.Priority = 300;
+            // Room sound and atmosphere follow the view, as for the spectator camera.
+            rig.AddComponent<Gameplay.Atmosphere.RoomPoint>();
+            Transform view = rig.transform;
+            Vector3 side = Vector3.Cross(Vector3.up, axis).normalized;
+            Vector3 blue = centre - axis * 1800f;
+            Vector3 red = centre + axis * 1800f;
+
+            // The view cuts over from the player's eyes first.
+            PlaceView(view, centre + Vector3.up * 5200f, centre, axis);
+            yield return new WaitForSeconds(3f);
+            yield return TourShot(view, centre + Vector3.up * 5200f, centre, axis, screens, "tour-above",
+                "the whole arena from 5.2 km straight above: BLUE's start at the bottom, RED's at the top");
+            yield return TourShot(view, centre + side * 4500f + Vector3.up * 1500f, centre, Vector3.up, screens, "tour-side",
+                "the arena from the side, 4.5 km out: BLUE's start on one side of the centre, RED's on the other");
+            yield return TourShot(view, centre + (side - axis).normalized * 3500f + Vector3.up * 2500f, centre, Vector3.up, screens, "tour-diagonal",
+                "the arena from high above BLUE's side, looking across to RED's");
+            yield return TourShot(view, blue - axis * 500f + Vector3.up * 120f, centre, Vector3.up, screens, "tour-behind-blue",
+                "from behind BLUE's start, looking towards the centre and RED");
+            yield return TourShot(view, red + axis * 500f + Vector3.up * 120f, centre, Vector3.up, screens, "tour-behind-red",
+                "from behind RED's start, looking towards the centre and BLUE");
+            yield return TourShot(view, centre + Vector3.up * 60f, blue, Vector3.up, screens, "tour-centre-to-blue",
+                "from the centre of the arena, looking towards BLUE's start");
+            yield return TourShot(view, centre + Vector3.up * 60f, red, Vector3.up, screens, "tour-centre-to-red",
+                "from the centre of the arena, looking towards RED's start");
+
+            foreach (PlayerControlledShip ship in FleetShips.All.ToList())
+            {
+                if (ship == null) continue;
+                Bounds bounds;
+                Vector3 at = Extent(ship.gameObject, out bounds) ? bounds.center : ship.transform.position;
+                // Ships are about 100 m long; their meshes' bounds take in far more (effects, interiors), so a set distance frames them.
+                Vector3 from = at + (ship.transform.forward * 0.75f + ship.transform.right * 0.55f + Vector3.up * 0.35f).normalized * 170f;
+                string name = FleetShips.Describe(ship);
+                yield return TourShot(view, from, at, Vector3.up, screens, "tour-ship-" + name.Replace(' ', '-'), name + " from ahead and above");
+            }
+
+            foreach (PvpArena.TourSpot spot in spots)
+            {
+                GameObject found = NearestSpawned(spot.Prefab, spot.Position, 1500f);
+                Bounds bounds = new Bounds();
+                bool sized = found != null && Extent(found, out bounds);
+                if (!sized) bounds = new Bounds(found != null ? found.transform.position : spot.Position, Vector3.one * 60f);
+                float size = Mathf.Clamp(bounds.size.magnitude, 25f, 900f);
+                Vector3 home = spot.Team == 0 ? blue : red;
+                Vector3 toHome = home - bounds.center;
+                toHome.y = 0f;
+                Vector3 from = bounds.center + (toHome.normalized * 0.85f + Vector3.up * 0.5f).normalized * Mathf.Clamp(size * 1.2f, 40f, 420f);
+                yield return TourShot(view, from, bounds.center, Vector3.up, screens, "tour-" + spot.Label.Replace(' ', '-'),
+                    spot.Label + (found != null ? "" : " (not found: its planned spot)") + ", seen from its team's side (about " + size.ToString("0") + " m across)");
+            }
+
+            // The supply drop, once it has arrived (up to a minute after it was called in).
+            GUIDUnion package = DataTable<DefaultAssetTable>.Instance.DefaultCarePackageAsset.AssetGuid;
+            float until = Time.unscaledTime + 60f;
+            GameObject crate = NearestSpawned(package, drop, 600f);
+            while (crate == null && Time.unscaledTime < until)
+            {
+                yield return new WaitForSeconds(1f);
+                crate = NearestSpawned(package, drop, 600f);
+            }
+            yield return new WaitForSeconds(6f);
+            crate = NearestSpawned(package, drop, 2000f);
+            Vector3 dropAt = crate != null ? crate.transform.position : drop;
+            Vector3 dropSide = blue - dropAt;
+            dropSide.y = 0f;
+            yield return TourShot(view, dropAt + (dropSide.normalized * 0.8f + Vector3.up * 0.6f).normalized * 120f, dropAt, Vector3.up, screens, "tour-supply-drop",
+                crate != null ? "the supply drop, arrived between the teams" : "the supply drop's spot (no drop arrived within a minute)");
+            yield return TourShot(view, dropAt + side * 900f + Vector3.up * 300f, dropAt, Vector3.up, screens, "tour-supply-drop-wide",
+                "the supply drop's spot from further out");
+
+            UnityEngine.Object.Destroy(rig);
+            foreach (KeyValuePair<VisualElement, StyleEnum<DisplayStyle>> screen in screens) screen.Key.style.display = screen.Value;
+            Log.Info("[autotest] Tour done: " + _shots + " screenshots so far.");
+            _sequenceDone = true;
+        }
+
+        private static System.Collections.IEnumerator TourShot(Transform view, Vector3 from, Vector3 at, Vector3 up,
+            Dictionary<VisualElement, StyleEnum<DisplayStyle>> screens, string label, string what)
+        {
+            PlaceView(view, from, at, up);
+            yield return new WaitForSeconds(1.5f);
+            HideScreens(screens);
+            yield return null;
+            Screenshot(label);
+            Log.Info("[autotest] Tour " + _shots.ToString("00") + ": " + what + "; camera at " + from.ToString("0") + ", looking at " + at.ToString("0") + ".");
+            yield return new WaitForSeconds(0.3f);
+        }
+
+        private static void PlaceView(Transform view, Vector3 from, Vector3 at, Vector3 up)
+        {
+            Vector3 forward = at - from;
+            if (forward.sqrMagnitude < 0.01f) forward = Vector3.forward;
+            view.SetPositionAndRotation(from, Quaternion.LookRotation(forward.normalized, up));
+        }
+
+        /// <summary>Hides every screen-space panel not hidden yet (one can open mid-tour), remembering how it was.</summary>
+        private static void HideScreens(Dictionary<VisualElement, StyleEnum<DisplayStyle>> screens)
+        {
+            foreach (UIDocument document in UnityEngine.Object.FindObjectsOfType<UIDocument>())
+            {
+                if (document == null || document.panelSettings == null || document.panelSettings.targetTexture != null) continue;
+                VisualElement root = document.rootVisualElement;
+                if (root == null || screens.ContainsKey(root)) continue;
+                screens[root] = root.style.display;
+                root.style.display = DisplayStyle.None;
+            }
+        }
+
+        /// <summary>The bounds of an object's meshes; false when it has none.</summary>
+        private static bool Extent(GameObject thing, out Bounds bounds)
+        {
+            bounds = new Bounds();
+            bool any = false;
+            foreach (Renderer renderer in thing.GetComponentsInChildren<Renderer>())
+            {
+                if (!(renderer is MeshRenderer) && !(renderer is SkinnedMeshRenderer)) continue;
+                if (!any) bounds = renderer.bounds;
+                else bounds.Encapsulate(renderer.bounds);
+                any = true;
+            }
+            return any;
+        }
+
+        /// <summary>The spawned object of a prefab nearest a point, within a distance; null when there is none.</summary>
+        private static GameObject NearestSpawned(GUIDUnion prefab, Vector3 near, float within)
+        {
+            GameObject best = null;
+            float bestDistance = within;
+            foreach (CG.AbstractCloneStarObject thing in UnityEngine.Object.FindObjectsOfType<CG.AbstractCloneStarObject>())
+            {
+                if (thing == null || thing.assetGuid != prefab) continue;
+                float distance = Vector3.Distance(thing.transform.position, near);
+                if (distance >= bestDistance) continue;
+                best = thing.gameObject;
+                bestDistance = distance;
+            }
+            return best;
+        }
+
         /// <summary>The host's RETURN TO HUB: the escape menu shows it, the game's popup asks, and everyone goes back to the hub.</summary>
         private static System.Collections.IEnumerator ReturnSequence()
         {
@@ -595,10 +783,15 @@ namespace VoidCrewFleet
                 VoidDriveModule drive = ship.GetModule<VoidDriveModule>();
                 if (drive != null) drive.JumpCharge = 1f;
             }
-            Log.Info("[autotest] Pulling " + FleetShips.Describe(last) + "'s lever with every drive charged: it should lead.");
+            int leadBefore = VoidJumpLink.LeaderSlot;
+            Log.Info("[autotest] Pulling " + FleetShips.Describe(last) + "'s lever with every drive charged: it leads only if the game starts the jump " +
+                     "(escape vector, power and a powered helm), otherwise the lead stays.");
             lastDrive.TryStartImpulseJump();
             yield return new WaitForSeconds(2f);
-            Log.Info("[autotest] Lead ship now " + (VoidJumpLink.LeaderSlot + 1) + " (expected " + (FleetShips.Slot(last) + 1) + ").");
+            VoidJumpSystem pulled = last.GetComponentInChildren<VoidJumpSystem>();
+            bool started = pulled != null && pulled.ActiveState != null && !(pulled.ActiveState is VoidJumpInactive) && !(pulled.ActiveState is VoidJumpExitVectorSet);
+            Log.Info("[autotest] Lead ship now " + (VoidJumpLink.LeaderSlot + 1) + " (expected " + ((started ? FleetShips.Slot(last) : leadBefore) + 1) + ": the jump " +
+                     (started ? "started" : "didn't start") + ").");
             Report("lever");
             PlayerControlledShip lead = FleetShips.BySlot(VoidJumpLink.LeaderSlot);
             VoidJumpSystem system = lead != null ? lead.GetComponentInChildren<VoidJumpSystem>() : null;
@@ -641,13 +834,21 @@ namespace VoidCrewFleet
                             ", ships registered " + FleetShips.All.Count + ", active " + FleetShips.Active);
             foreach (PlayerControlledShip ship in FleetShips.All)
             {
-                VoidJumpSystem system = ship.GetComponentInChildren<VoidJumpSystem>();
-                CloneTubeModule tubes = ship.GetModule<CloneTubeModule>();
-                text.AppendLine("  " + FleetShips.Describe(ship) + ": view " + FleetShips.ViewId(ship) + ", pos " + ship.Platform.Position + ", sector " +
-                                (ship.Sector != null ? ship.Sector.Id.ToString() : "none") + ", jump " + (system != null && system.ActiveState != null ? system.ActiveState.GetType().Name : "?") +
-                                ", hp " + ship.HitPoints.ToString("0") + ", clone tubes " + (tubes != null ? string.Join(",", tubes.CloneTubes.Select(t => t.Index.ToString()).ToArray()) : "none") +
-                                ", crew " + FleetShips.CrewCount(FleetShips.Slot(ship)) + ", team " + FleetShips.TeamOfSlot(FleetShips.Slot(ship)) + ", faction " + ship.faction +
-                                (ship.StartedDeath ? ", DYING" : ""));
+                // The hub's ship has no platform or modules to report: one ship that can't be described doesn't end the report.
+                try
+                {
+                    VoidJumpSystem system = ship.GetComponentInChildren<VoidJumpSystem>();
+                    CloneTubeModule tubes = ship.GetModule<CloneTubeModule>();
+                    text.AppendLine("  " + FleetShips.Describe(ship) + ": view " + FleetShips.ViewId(ship) + ", pos " + ship.Platform.Position + ", sector " +
+                                    (ship.Sector != null ? ship.Sector.Id.ToString() : "none") + ", jump " + (system != null && system.ActiveState != null ? system.ActiveState.GetType().Name : "?") +
+                                    ", hp " + ship.HitPoints.ToString("0") + ", clone tubes " + (tubes != null ? string.Join(",", tubes.CloneTubes.Select(t => t.Index.ToString()).ToArray()) : "none") +
+                                    ", crew " + FleetShips.CrewCount(FleetShips.Slot(ship)) + ", team " + FleetShips.TeamOfSlot(FleetShips.Slot(ship)) + ", faction " + ship.faction +
+                                    (ship.StartedDeath ? ", DYING" : ""));
+                }
+                catch (Exception e)
+                {
+                    text.AppendLine("  " + FleetShips.Describe(ship) + ": can't be described here (" + e.GetType().Name + ")");
+                }
             }
             text.AppendLine("  crews: " + string.Join(", ", FleetShips.Crews().Values.Select(e => e.ToString()).ToArray()) + "; lead ship " + (VoidJumpLink.LeaderSlot + 1) +
                             "; roster: " + string.Join(", ", (PvpRoster.Seats() ?? new System.Collections.Generic.List<RosterSeat>()).Select(r => r.ToString()).ToArray()));
@@ -686,6 +887,7 @@ namespace VoidCrewFleet
             text.AppendLine("  active sector " + (GameSessionManager.ActiveSector != null ? GameSessionManager.ActiveSector.Id.ToString() : "none") +
                             ", room players " + PhotonNetwork.PlayerList.Length + "/" + (PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.MaxPlayers : 0));
             text.AppendLine("  crew row: " + CrewBadge.Describe());
+            text.AppendLine("  chat: " + DescribeChat());
             Log.Info(text.ToString());
         }
 
@@ -702,6 +904,25 @@ namespace VoidCrewFleet
                 counts[part.faction] = count + 1;
             }
             return string.Join(", ", counts.Select(p => "faction " + p.Key + " x" + p.Value).ToArray());
+        }
+
+        private static readonly System.Reflection.FieldInfo ChatPanelField =
+            typeof(Gameplay.Chat.TextChat).GetField("_chatUI", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+
+        /// <summary>For the reports: whether the local text chat exists and shows, the game's UI toggle, and the spectator view.</summary>
+        private static string DescribeChat()
+        {
+            try
+            {
+                Gameplay.Chat.TextChat chat = Gameplay.Chat.TextChat.Instance;
+                var panel = chat != null && ChatPanelField != null ? ChatPanelField.GetValue(chat) as VisualElement : null;
+                string shown = panel == null ? "no panel" : (panel.resolvedStyle.display == DisplayStyle.Flex && panel.panel != null ? "shown" : "hidden");
+                return (chat != null ? "chat " + shown : "no chat") + ", UI toggle " + UI.MainHUD.MainHUDUI.UIToggleState + ", spectating " + Spectator.Active;
+            }
+            catch (Exception e)
+            {
+                return "unknown (" + e.Message + ")";
+            }
         }
 
         private static void Screenshot(string label)

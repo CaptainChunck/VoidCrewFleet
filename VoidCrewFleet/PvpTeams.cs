@@ -21,13 +21,57 @@ namespace VoidCrewFleet
     ///   the ready room, and everyone spawns aboard their ship. Without teams from the hub (an older host flow), the team
     ///   screen shows at the start of the match instead and holds every spawn until confirmed. Players who join later go to
     ///   the smaller team.
-    /// Players who join the hub after the confirmation go to the smallest crew (of the smaller team).
+    /// Players who join the hub after the confirmation go to the smallest crew (of the smaller team). In Fleet Battle a crew
+    /// takes CrewRules.MaxCrew at most: who finds every crew full waits for a free place (in the hub, and in the match the
+    /// roster gives them one).
     /// </summary>
     internal static class PvpTeams
     {
         public const string Feature = "PvP teams";
 
         private const string KeyLocked = "VCF_TeamsLocked";
+
+        /// <summary>Orders players by actor number (join order), the one comparer for every sort.</summary>
+        private sealed class ByActor : IComparer<Player>
+        {
+            public static readonly ByActor Instance = new ByActor();
+
+            public int Compare(Player a, Player b)
+            {
+                return a.ActorNumber.CompareTo(b.ActorNumber);
+            }
+        }
+
+        /// <summary>
+        /// The room's players in join order (actor number), into a list the caller keeps. PhotonNetwork.PlayerList makes and
+        /// sorts a new array on every read, which adds up in work done a few times a second.
+        /// </summary>
+        public static void RoomPlayers(List<Player> into)
+        {
+            into.Clear();
+            Room room = PhotonNetwork.CurrentRoom;
+            if (room == null || room.Players == null) return;
+            foreach (Player player in room.Players.Values) into.Add(player);
+            into.Sort(ByActor.Instance);
+        }
+
+        /// <summary>The actor numbers of everyone in the room in join order, into a list the caller keeps.</summary>
+        public static void RoomActors(List<int> into)
+        {
+            into.Clear();
+            Room room = PhotonNetwork.CurrentRoom;
+            if (room == null || room.Players == null) return;
+            foreach (int actor in room.Players.Keys) into.Add(actor);
+            into.Sort();
+        }
+
+        /// <summary>The actor numbers of everyone in the room in join order (a new list).</summary>
+        private static List<int> PlayerActors()
+        {
+            var actors = new List<int>();
+            RoomActors(actors);
+            return actors;
+        }
 
         /// <summary>
         /// The host's own latest confirm or reopen, for a few seconds: the room's property only changes here once the server
@@ -154,14 +198,15 @@ namespace VoidCrewFleet
                 CrewEntry current;
                 if (crews.TryGetValue(sender, out current) && current.Slot == slot && current.State == CrewState.Playing) return;
                 bool teamMatch = FleetApi.IsTeamMatch;
-                string refusal = CrewRules.CanJoin(crews, ShipSpawn.PlayerActors(), sender, slot, ShipCount, teamMatch, ShipLabel, TeamName);
+                List<int> players = PlayerActors();
+                string refusal = CrewRules.CanJoin(crews, players, sender, slot, ShipCount, teamMatch, ShipLabel, TeamName);
                 if (refusal != null)
                 {
                     Net.ToActor(sender, Msg.Notice, refusal);
                     return;
                 }
                 crews[sender] = CrewEntry.Play(sender, CrewRules.TeamOf(slot, teamMatch), slot);
-                FleetShips.PublishCrew(crews);
+                PublishPicks(crews, players);
             });
             Net.On(Msg.CrewMove, (sender, data) =>
             {
@@ -172,27 +217,49 @@ namespace VoidCrewFleet
                 Dictionary<int, CrewEntry> crews = FleetShips.Crews();
                 if (slot >= 0 && slot < ShipCount) crews[actor] = CrewEntry.Play(actor, CrewRules.TeamOf(slot, FleetApi.IsTeamMatch), slot);
                 else crews.Remove(actor);
-                FleetShips.PublishCrew(crews);
+                PublishPicks(crews, PlayerActors());
             });
+        }
+
+        /// <summary>Host: the picks of the players in the room (a player who has left keeps no entry, so no count includes them).</summary>
+        private static void PublishPicks(Dictionary<int, CrewEntry> crews, ICollection<int> players)
+        {
+            DropAbsent(crews, players);
+            FleetShips.PublishCrew(crews);
+        }
+
+        /// <summary>Takes out the entries of players who aren't in the room; true when there were any.</summary>
+        private static bool DropAbsent(Dictionary<int, CrewEntry> crews, ICollection<int> players)
+        {
+            List<int> gone = null;
+            foreach (int actor in crews.Keys)
+            {
+                if (players.Contains(actor)) continue;
+                if (gone == null) gone = new List<int>();
+                gone.Add(actor);
+            }
+            if (gone == null) return false;
+            foreach (int actor in gone) crews.Remove(actor);
+            return true;
         }
 
         /// <summary>Host only: everyone on a ship, then even teams (Fleet Battle) and even crews; players keep their pick where they can.</summary>
         public static void AutoBalance()
         {
             if (!PhotonNetwork.IsMasterClient || !PickingTeams) return;
-            FleetShips.PublishCrew(CrewRules.Balance(FleetShips.Crews(), ShipSpawn.PlayerActors(), ShipCount, FleetApi.IsTeamMatch));
+            FleetShips.PublishCrew(CrewRules.Balance(FleetShips.Crews(), PlayerActors(), ShipCount, FleetApi.IsTeamMatch));
         }
 
         /// <summary>Null when the teams can be confirmed now; otherwise why not.</summary>
         public static string CheckTeams()
         {
-            return CrewRules.CheckTeams(FleetShips.Crews(), ShipSpawn.PlayerActors(), ShipCount, ShipLabel);
+            return CrewRules.CheckTeams(FleetShips.Crews(), PlayerActors(), ShipCount, ShipLabel);
         }
 
         /// <summary>Co-op: null when the crews can be confirmed now; otherwise why not.</summary>
         public static string CheckCrews()
         {
-            return CrewRules.CheckCrews(FleetShips.Crews(), ShipSpawn.PlayerActors(), ShipCount, ShipLabel);
+            return CrewRules.CheckCrews(FleetShips.Crews(), PlayerActors(), ShipCount, ShipLabel);
         }
 
         /// <summary>Null when the picks can be confirmed now (teams or co-op crews); otherwise why not.</summary>
@@ -213,12 +280,12 @@ namespace VoidCrewFleet
                 Notice.Show("Can't confirm yet: " + why);
                 return;
             }
+            List<int> actors = PlayerActors();
             Dictionary<int, CrewEntry> crews = FleetShips.Crews();
-            FleetShips.PublishCrew(crews);
+            PublishPicks(crews, actors);
             SetLocked(true);
             if (!teams)
             {
-                List<int> actors = ShipSpawn.PlayerActors();
                 Notice.ShowAll("Crews confirmed: " + string.Join(", ", Enumerable.Range(0, ShipCount).Select(s =>
                                {
                                    int crew = CrewRules.CrewOf(crews, actors, s);
@@ -226,8 +293,9 @@ namespace VoidCrewFleet
                                }).ToArray()) + ". Set up your ship at the loadout terminal, then sit in the ready room to start.");
                 return;
             }
-            int blue = crews.Values.Count(e => e.Team == 0);
-            int red = crews.Values.Count(e => e.Team == 1);
+            // The players in the room only: someone who picked a ship and left isn't on a team any more.
+            int blue = CrewRules.TeamSize(crews, actors, 0, false);
+            int red = CrewRules.TeamSize(crews, actors, 1, false);
             Notice.ShowAll("Teams confirmed: " + TeamName(0) + " " + blue + " against " + TeamName(1) + " " + red + ". " +
                            (inHub
                                ? "Set up your ship at the loadout terminal (the FLEET panel lists every ship). The host starts the match by sitting in the ready room."
@@ -238,35 +306,69 @@ namespace VoidCrewFleet
         public static void ForceConfirm()
         {
             if (!PhotonNetwork.IsMasterClient || !PickingTeams) return;
-            FleetShips.PublishCrew(FleetShips.Crews());
+            PublishPicks(FleetShips.Crews(), PlayerActors());
             SetLocked(true);
             Log.Info("[autotest] Teams locked without the checks: " + (CheckTeams() ?? "they would have passed") + ".");
         }
 
+        /// <summary>Hub, Fleet Battle teams confirmed: players who joined and found every crew full (actor numbers), told once.</summary>
+        private static readonly HashSet<int> HubWaiting = new HashSet<int>();
+
+        /// <summary>The room and its number of players at KeepHubTeamsComplete's last full look: a player who leaves may free a place.</summary>
+        private static string _hubRoom;
+
+        private static int _hubPlayers = -1;
+        private static readonly List<Player> HubPlayers = new List<Player>();
+        private static readonly List<int> HubActors = new List<int>();
+
         /// <summary>
         /// Host, a few times a second: in the hub, once the teams (or co-op crews) are confirmed, a player who joins later goes
         /// to the smallest crew (of the smaller team), as in a mission, so they can set up their ship without the host
-        /// reopening the picking. Not while the hub loads: the last mission's crews and lock are only cleared once it has.
+        /// reopening the picking. In Fleet Battle a crew takes CrewRules.MaxCrew at most: a player who finds every crew full
+        /// stays without a ship and is told why (the host too), gets the first place a leaving player frees, and otherwise
+        /// waits in the match like a player who joins it then (the roster gives them a free place). Not while the hub loads:
+        /// the last mission's crews and lock are only cleared once it has.
         /// </summary>
         public static void KeepHubTeamsComplete()
         {
             try
             {
-                if (!PhotonNetwork.IsMasterClient || !HubFleetPlanned || HubShipManager.Instance == null || !Locked) return;
+                if (!PhotonNetwork.IsMasterClient || !HubFleetPlanned || HubShipManager.Instance == null || !Locked)
+                {
+                    if (HubWaiting.Count > 0) HubWaiting.Clear();
+                    _hubPlayers = -1;
+                    return;
+                }
+                Room room = PhotonNetwork.CurrentRoom;
+                if (room == null) return;
+                int ships = ShipCount;
+                // Nearly always nothing to do: everyone has a ship (or already waits for one), and nobody left to free a place.
+                if (room.Name == _hubRoom && room.PlayerCount == _hubPlayers && EveryoneAccountedFor(room, ships)) return;
+                _hubRoom = room.Name;
+                _hubPlayers = room.PlayerCount;
+
                 bool teams = FleetApi.IsTeamMatch;
                 Dictionary<int, CrewEntry> crews = FleetShips.Crews();
-                List<int> players = ShipSpawn.PlayerActors();
-                var ships = Enumerable.Range(0, ShipCount).ToList();
-                bool changed = false;
-                foreach (Player player in PhotonNetwork.PlayerList.OrderBy(p => p.ActorNumber))
+                RoomPlayers(HubPlayers);
+                RoomActors(HubActors);
+                HubWaiting.RemoveWhere(actor => !HubActors.Contains(actor));
+                bool changed = DropAbsent(crews, HubActors);
+                List<int> slots = Enumerable.Range(0, ships).ToList();
+                foreach (Player player in HubPlayers)
                 {
+                    int actor = player.ActorNumber;
                     CrewEntry entry;
-                    if (crews.TryGetValue(player.ActorNumber, out entry) && entry.Slot >= 0 && entry.Slot < ShipCount) continue;
-                    int slot = CrewRules.PlaceFor(crews, players, ships, teams);
-                    if (slot < 0) continue;
-                    crews[player.ActorNumber] = CrewEntry.Play(player.ActorNumber, CrewRules.TeamOf(slot, teams), slot);
+                    if (crews.TryGetValue(actor, out entry) && entry.Slot >= 0 && entry.Slot < ships) continue;
+                    int slot = CrewRules.PlaceFor(crews, HubActors, slots, teams);
+                    if (slot < 0)
+                    {
+                        if (HubWaiting.Add(actor)) TellCrewsFull(player);
+                        continue;
+                    }
+                    HubWaiting.Remove(actor);
+                    crews[actor] = CrewEntry.Play(actor, CrewRules.TeamOf(slot, teams), slot);
                     changed = true;
-                    Net.ToActor(player.ActorNumber, Msg.Notice, teams
+                    Net.ToActor(actor, Msg.Notice, teams
                         ? "You joined the " + TeamName(slot % 2) + " team on " + FleetSlots.Name(slot, true) + " (the teams were already confirmed). Set it up at the loadout terminal."
                         : "You fly " + FleetSlots.Name(slot, false) + " (the crews were already confirmed). Set it up at the loadout terminal.");
                 }
@@ -276,6 +378,29 @@ namespace VoidCrewFleet
             {
                 Log.Failure("Giving a late joiner a ship", e);
             }
+        }
+
+        /// <summary>Whether everyone in the room has a ship, or is known to wait for one (KeepHubTeamsComplete).</summary>
+        private static bool EveryoneAccountedFor(Room room, int ships)
+        {
+            foreach (Player player in room.Players.Values)
+            {
+                if (HubWaiting.Contains(player.ActorNumber)) continue;
+                CrewEntry entry;
+                if (!FleetShips.TryGetEntry(player.ActorNumber, out entry) || entry.Slot < 0 || entry.Slot >= ships) return false;
+            }
+            return true;
+        }
+
+        /// <summary>Fleet Battle, teams confirmed: a player who joined found every crew full. They and the host learn why, and what helps.</summary>
+        private static void TellCrewsFull(Player player)
+        {
+            Net.ToActor(player.ActorNumber, Msg.Notice, "Every crew is full (" + CrewRules.MaxCrew + " players a ship), so you wait for a free place: " +
+                                                        "you get the first one that opens, here or in the match.");
+            if (player.IsLocal) return;
+            string name = string.IsNullOrEmpty(player.NickName) ? "Player " + player.ActorNumber : player.NickName;
+            Notice.Show(name + " joined, but every crew is full (" + CrewRules.MaxCrew + " players a ship), so they wait for a free place. " +
+                        "More ships per team (TEAMS & RULES on the FLEET panel) would give them one.");
         }
 
         /// <summary>

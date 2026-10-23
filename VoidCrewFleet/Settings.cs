@@ -28,6 +28,8 @@ namespace VoidCrewFleet
         public static ConfigEntry<bool> AutoTestRespawn;
         public static ConfigEntry<bool> AutoTestReturn;
         public static ConfigEntry<bool> AutoTestFists;
+        public static ConfigEntry<bool> AutoTestTour;
+        public static ConfigEntry<bool> Profile;
 
         public static void Bind(ConfigFile config)
         {
@@ -100,6 +102,12 @@ namespace VoidCrewFleet
                 "With AutoTest on: after destroying ships, the host uses RETURN TO HUB and the test waits to be back in the hub.");
             AutoTestFists = config.Bind("Diagnostics", "AutoTestFists", false,
                 "With AutoTest = PvP: the test player raises their fists and punches, with screenshots.");
+            Profile = config.Bind("Diagnostics", "Profile", false,
+                "Developer: times the plugin's own code (every patch method and periodic handler) and logs where its time went every 10 s. " +
+                "Adds a little overhead of its own; leave it off when playing.");
+            AutoTestTour = config.Bind("Diagnostics", "AutoTestTour", false,
+                "With AutoTest = PvP: a free camera tours the arena (above it, behind each team, its centre, every ship, every salvage spot and a " +
+                "supply drop called in for the tour), with a screenshot at each and the game's screens hidden.");
         }
     }
 }

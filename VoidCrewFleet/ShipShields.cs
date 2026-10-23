@@ -18,11 +18,19 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "CG.Space.OrbitObject", "SetSpatialParent", PatchKind.Postfix)]
         private static void SpatialParentPostfix(OrbitObject __instance, OrbitObject newParent)
         {
-            if (!(__instance is ShieldDamagable) || !(newParent is PlayerControlledShip) || __instance.transform.parent != newParent.transform) return;
-            if (__instance.transform.localPosition.sqrMagnitude < 0.01f && __instance.transform.localRotation == Quaternion.identity) return;
-            __instance.transform.localPosition = Vector3.zero;
-            __instance.transform.localRotation = Quaternion.identity;
-            Log.Verbose("A shield segment of " + FleetShips.Describe((PlayerControlledShip)newParent) + " is back on its ship.");
+            if (!(__instance is ShieldDamagable) || !(newParent is PlayerControlledShip)) return;
+            try
+            {
+                if (__instance.transform.parent != newParent.transform) return;
+                if (__instance.transform.localPosition.sqrMagnitude < 0.01f && __instance.transform.localRotation == Quaternion.identity) return;
+                __instance.transform.localPosition = Vector3.zero;
+                __instance.transform.localRotation = Quaternion.identity;
+                Log.Verbose("A shield segment of " + FleetShips.Describe((PlayerControlledShip)newParent) + " is back on its ship.");
+            }
+            catch (System.Exception e)
+            {
+                Log.Failure("Putting a shield segment back on its ship", e);
+            }
         }
     }
 }

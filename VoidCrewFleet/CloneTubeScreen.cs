@@ -28,14 +28,17 @@ namespace VoidCrewFleet
 
         private static readonly FieldInfo ActiveScreenField = GameMember.Field(typeof(ClonetubeUIController), "_activeController");
         private static readonly FieldInfo TextTableField = GameMember.Field(typeof(UILocalizationProvider), "localizationData");
-        private static readonly MethodInfo GetBiomass = AccessTools.PropertyGetter(typeof(GameSessionSuppliesManager), "BiomassAmount");
-        private static readonly MethodInfo ScreenBiomassMethod = AccessTools.Method(typeof(CloneTubeScreen), "ScreenBiomass");
+        private static readonly MethodInfo GetBiomass = Getter(GameMember.Property(typeof(GameSessionSuppliesManager), "BiomassAmount"));
+        private static readonly MethodInfo ScreenBiomassMethod = new Func<GameSessionSuppliesManager, int>(ScreenBiomass).Method;
 
         /// <summary>The tubes of lost ships (instance IDs), until they are destroyed.</summary>
         private static readonly HashSet<int> LostTubes = new HashSet<int>();
 
-        /// <summary>Screens (instance IDs) that have handed over already.</summary>
+        /// <summary>Screens (instance IDs) that have handed over already this mission.</summary>
         private static readonly HashSet<int> HandedOver = new HashSet<int>();
+
+        /// <summary>The mission (game session) LostTubes and HandedOver are about; they start empty in the next (ThisMission).</summary>
+        private static object _mission;
 
         /// <summary>The text table of the screen that draws, for a screen that takes over (the game removed the others').</summary>
         private static LocalizedStringTable _textTable;
@@ -48,13 +51,30 @@ namespace VoidCrewFleet
             get { return GameMember.Read<ClonetubeUIController>(ActiveScreenField, null, null); }
         }
 
+        /// <summary>The notes of an earlier mission are dropped as the first of this mission's comes (screens and tubes go with it).</summary>
+        private static void ThisMission()
+        {
+            object mission = GameSessionManager.ActiveSession;
+            if (ReferenceEquals(mission, _mission)) return;
+            _mission = mission;
+            LostTubes.Clear();
+            HandedOver.Clear();
+        }
+
+        /// <summary>A property's getter, or null when the property is missing.</summary>
+        private static MethodInfo Getter(PropertyInfo property)
+        {
+            return property != null ? property.GetGetMethod(true) : null;
+        }
+
         /// <summary>A ship is lost: its tubes are noted, and if one of them draws the screen, a tube of another ship takes over.</summary>
         public static void OnShipLost(PlayerControlledShip ship)
         {
             if (ship == null) return;
             try
             {
-                foreach (CloneTube tube in UnityEngine.Object.FindObjectsOfType<CloneTube>())
+                ThisMission();
+                foreach (CloneTube tube in ActiveTubes())
                 {
                     if (tube != null && FleetShips.OwnerOf(tube) == ship) LostTubes.Add(tube.GetInstanceID());
                 }
@@ -89,6 +109,7 @@ namespace VoidCrewFleet
         {
             try
             {
+                ThisMission();
                 if (!FleetShips.Active || HandedOver.Contains(__instance.GetInstanceID()) || !ReferenceEquals(ActiveScreen, __instance)) return;
                 PlayerControlledShip own = FleetShips.OwnerOf(__instance);
                 if (own == null || !own.StartedDeath || !AnotherShipLeft(own)) return;
@@ -135,7 +156,7 @@ namespace VoidCrewFleet
             VisualTreeAsset picture = current != null ? current.visualTreeAsset : null;
             UIDocument best = null;
             int bestRank = int.MaxValue;
-            foreach (CloneTube tube in UnityEngine.Object.FindObjectsOfType<CloneTube>())
+            foreach (CloneTube tube in ActiveTubes())
             {
                 PlayerControlledShip ship = tube != null ? FleetShips.OwnerOf(tube) : null;
                 if (ship == null || ship == lost || ship.StartedDeath) continue;
@@ -155,6 +176,18 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
+        /// The clone tubes whose objects are switched on: those the ships registered (CloneTubes), which saves a search of the
+        /// whole scene (15-20 ms in a fleet mission, on every client as a ship is lost), else that search.
+        /// </summary>
+        private static List<CloneTube> ActiveTubes()
+        {
+            List<CloneTube> tubes = CloneTubes.RegisteredTubes();
+            if (tubes == null) return new List<CloneTube>(UnityEngine.Object.FindObjectsOfType<CloneTube>());
+            tubes.RemoveAll(tube => !tube.gameObject.activeInHierarchy);
+            return tubes;
+        }
+
+        /// <summary>
         /// A lost ship's tube going away keeps the screen's events (the game would reset them for every screen) while
         /// another ship is left.
         /// </summary>
@@ -163,6 +196,7 @@ namespace VoidCrewFleet
         {
             try
             {
+                ThisMission();
                 bool lost = LostTubes.Remove(__instance.GetInstanceID());
                 PlayerControlledShip own = FleetShips.OwnerOf(__instance);
                 if (!lost) lost = own != null && own.StartedDeath;
@@ -213,8 +247,16 @@ namespace VoidCrewFleet
         /// <summary>Put in by the transpiler: the biomass of the local player's tube's ship, else the game's count.</summary>
         public static int ScreenBiomass(GameSessionSuppliesManager manager)
         {
-            CloneTube tube = LocalTube();
-            return tube != null ? ShipResources.BiomassFor(manager, tube) : manager.BiomassAmount;
+            try
+            {
+                CloneTube tube = LocalTube();
+                if (tube != null) return ShipResources.BiomassFor(manager, tube);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Showing the biomass on the clone tube screen", e);
+            }
+            return manager.BiomassAmount;
         }
 
         /// <summary>The clone tube the local player is in, or null.</summary>

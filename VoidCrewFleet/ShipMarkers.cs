@@ -7,7 +7,6 @@ using CG.Ship.Repair;
 using CG.Space;
 using Gameplay.Carryables;
 using Gameplay.Defects;
-using HarmonyLib;
 using Photon.Pun;
 using UI.MainHUD;
 using UI.ObjectMarker;
@@ -18,7 +17,8 @@ namespace VoidCrewFleet
     /// <summary>
     /// Pings and the HUD's ship markers with two ships. In co-op everyone sees every ping and both ships' damage markers
     /// (defects and hull breaches) and power-recovery hints. In PvP each team sees only its own team's pings and only its
-    /// own ship's damage markers and hints. In both modes:
+    /// own ship's damage markers and hints, and a player waiting for a place on no team yet sees none of either team's. In
+    /// both modes:
     /// - the HUD's hull bar shows its own ship's hull, not whichever ship was hit last;
     /// - "homunculus removed / connected" warnings show only to the players of that ship;
     /// - the blinking power-recovery hint follows one ship's power, breakers and homunculus, and points at that ship's
@@ -29,13 +29,26 @@ namespace VoidCrewFleet
     {
         public const string Feature = "Pings and ship markers per ship";
 
-        private static readonly MethodInfo RemoveDefectMarker = AccessTools.Method(typeof(DefectMarkerProvider), "RemoveMarker");
-        private static readonly MethodInfo RemoveBreachMarker = AccessTools.Method(typeof(HullMarkerProvider), "RemoveMarker");
+        private static readonly MethodInfo RemoveDefectMarker = GameMember.Method(typeof(DefectMarkerProvider), "RemoveMarker");
+        private static readonly MethodInfo RemoveBreachMarker = GameMember.Method(typeof(HullMarkerProvider), "RemoveMarker");
         private static readonly MethodInfo UrgencyInit = GameMember.Method(typeof(UrgencyMarkerProvider), "Init");
         private static readonly FieldInfo UrgencyMarkerField = GameMember.Field(typeof(UrgencyMarkerProvider), "_markerData");
 
         private static readonly Dictionary<PlayerControlledShip, UrgencyMarkerProvider> UrgencyByShip = new Dictionary<PlayerControlledShip, UrgencyMarkerProvider>();
+
+        /// <summary>The ship each hint target belongs to (by the target's instance ID); emptied when the ships are gone.</summary>
         private static readonly Dictionary<int, PlayerControlledShip> TargetHome = new Dictionary<int, PlayerControlledShip>();
+
+        /// <summary>
+        /// The mission's hint targets and what each marks, by the target's instance ID: searched for once, when the mission's
+        /// first hint starts, then kept up as each target registers (the game announces every target as it starts).
+        /// </summary>
+        private static readonly Dictionary<int, KeyValuePair<EUrgencyMarkerTargetSource, Transform>> Targets =
+            new Dictionary<int, KeyValuePair<EUrgencyMarkerTargetSource, Transform>>();
+
+        private static object _targetsSession;
+        private static int _searchFrame = -1;
+        private static readonly List<int> Gone = new List<int>();
         private static UrgencyMarkerProvider _urgencyTemplate;
 
         /// <summary>A power-recovery hint and the ship it is tied to.</summary>
@@ -51,13 +64,17 @@ namespace VoidCrewFleet
         /// </summary>
         private static readonly Dictionary<int, Hint> Hints = new Dictionary<int, Hint>();
 
-        /// <summary>True when an actor is on the other PvP team (a player not on a team yet is nobody's enemy).</summary>
+        /// <summary>
+        /// True when an actor is on the other PvP team. A player on no team (waiting for a place) is on neither side: no team's
+        /// pings reach them, and theirs reach no team (two players on no team share theirs).
+        /// </summary>
         private static bool IsOtherTeam(int actor)
         {
             if (!FleetSession.IsPvP) return false;
             int mine = FleetShips.TeamOfActor(FleetShips.LocalActor);
             int theirs = FleetShips.TeamOfActor(actor);
-            return mine >= 0 && theirs >= 0 && mine != theirs;
+            if (mine < 0 && theirs < 0) return false;
+            return mine != theirs;
         }
 
         /// <summary>A part of the other team's ship (PvP only).</summary>
@@ -66,9 +83,30 @@ namespace VoidCrewFleet
             return part != null && PvpBoarding.IsEnemyShip(FleetShips.OwnerOf(part));
         }
 
+        private static int _teamFrame = -1;
+        private static bool _noTeam;
+
+        /// <summary>
+        /// Whether the local player is a Fleet Battle player on no team (waiting for a place), worked out once a frame: every
+        /// team's ships are hidden from them.
+        /// </summary>
+        private static bool OnNoTeam()
+        {
+            int frame = Time.frameCount;
+            if (frame != _teamFrame)
+            {
+                _teamFrame = frame;
+                _noTeam = PvpCombat.Active && FleetShips.TeamOfActor(FleetShips.LocalActor) < 0;
+            }
+            return _noTeam;
+        }
+
         // ---------------------------------------------------------------- pings
 
-        /// <summary>Another team's ping: no marker, no sound, no chat line (co-op: everyone sees every ping).</summary>
+        /// <summary>
+        /// Another team's ping: no marker, no sound, no chat line (co-op: everyone sees every ping). A player on no team
+        /// gets no team's.
+        /// </summary>
         [GamePatch(Feature, "UI.Ping.PingComponent", "SharedPing", PatchKind.Prefix)]
         private static bool SharedPingPrefix(PhotonMessageInfo info)
         {
@@ -106,7 +144,7 @@ namespace VoidCrewFleet
         {
             try
             {
-                if (obj == null || !PvpBoarding.IsEnemyShip(ShipOfBreach(obj))) return true;
+                if (obj == null || !PvpCombat.Active || !PvpBoarding.IsEnemyShip(ShipOfBreach(obj))) return true;
                 if (__instance.Markers.ContainsKey(obj) && RemoveBreachMarker != null) RemoveBreachMarker.Invoke(__instance, new object[] { obj });
                 return false;
             }
@@ -129,13 +167,24 @@ namespace VoidCrewFleet
             return null;
         }
 
-        /// <summary>A safety net: no damage marker or power hint of the enemy ship is drawn, whoever made it.</summary>
+        /// <summary>
+        /// A safety net: no damage marker or power hint of the enemy ship is drawn, whoever made it. A player on no team
+        /// (waiting for a place) sees none of any ship's: theirs are kept, hidden, so their own ship's show once they get a
+        /// place.
+        /// </summary>
         [GamePatch(Feature, "UI.ObjectMarker.ObjectMarkerViewer", "IsVisible", PatchKind.Postfix)]
         private static void MarkerVisiblePostfix(ObjectMarkerData marker, ref bool __result)
         {
             const ObjectMarkerData.EMarkerType shipState = ObjectMarkerData.EMarkerType.Defect | ObjectMarkerData.EMarkerType.HullBreach | ObjectMarkerData.EMarkerType.Urgency;
-            if (!__result || marker == null || (marker.MarkerType & shipState) == 0 || marker.FollowTarget == null || !FleetSession.IsPvP) return;
-            if (IsEnemyPart(marker.FollowTarget)) __result = false;
+            try
+            {
+                if (!__result || marker == null || (marker.MarkerType & shipState) == 0 || !FleetSession.IsPvP) return;
+                if (OnNoTeam() || (marker.FollowTarget != null && IsEnemyPart(marker.FollowTarget))) __result = false;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking a ship marker's visibility", e);
+            }
         }
 
         // ---------------------------------------------------------------- the HUD's ship info follows your ship
@@ -149,17 +198,31 @@ namespace VoidCrewFleet
         private static readonly MethodInfo HudPowerChanged = GameMember.Method(typeof(UI.MainHUD.ShipInfoHUD), "PowerChanged");
         private static UI.MainHUD.ShipInfoHUD _hud;
 
+        /// <summary>True once the HUD has been caught as it was enabled (HudEnabledPostfix), so it is never searched for.</summary>
+        private static bool _hudCaught;
+
+        /// <summary>The HUD's ship info, caught as the game enables it (every mission's HUD).</summary>
+        [GamePatch(Feature, "UI.MainHUD.ShipInfoHUD", "OnEnable", PatchKind.Postfix, Optional = true)]
+        private static void HudEnabledPostfix(UI.MainHUD.ShipInfoHUD __instance)
+        {
+            _hud = __instance;
+            _hudCaught = true;
+        }
+
         /// <summary>
         /// The HUD's hull, power and breakers bind once, at spawn, to the ship of that moment. When the local player moves
-        /// to the other ship, or is re-cloned there after losing their own, they move along with the player.
+        /// to the other ship, or is re-cloned there after losing their own, they move along with the player. A spectator
+        /// without a character has no HUD to move.
         /// </summary>
         private static void KeepHudOnViewShip()
         {
             if (FleetSession.ShipCount < 2 || GameSessionManager.InHub || HudShipField == null || HudEnable == null || HudDisable == null) return;
+            if (LocalPlayer.Instance == null) return;
             CG.Game.ClientGame game = CG.Game.ClientGame.Current;
             PlayerControlledShip view = game != null ? game.PlayerShip : null;
             if (view == null || view.StartedDeath) return;
-            if (_hud == null) _hud = UnityEngine.Object.FindObjectOfType<UI.MainHUD.ShipInfoHUD>();
+            // Only searched for when the patch that catches it is missing.
+            if (_hud == null && !_hudCaught) _hud = UnityEngine.Object.FindObjectOfType<UI.MainHUD.ShipInfoHUD>();
             if (_hud == null || !_hud.isActiveAndEnabled) return;
             var bound = HudShipField.GetValue(null) as PlayerControlledShip;
             if (bound == view) return;
@@ -248,11 +311,9 @@ namespace VoidCrewFleet
                 if (IsLost(ship)) return;
                 UrgencyByShip[ship] = __instance;
                 if (____markerTargets == null) return;
-                ____markerTargets.Clear();
-                foreach (UrgencyMarkerTarget target in UnityEngine.Object.FindObjectsOfType<UrgencyMarkerTarget>())
-                {
-                    if (target != null && HomeShip(target.transform) == ship) ____markerTargets[target.TargetSourceType] = target.transform;
-                }
+                TakeTargets(____markerTargets, ship, false);
+                // None known for this ship (its parts started while no hint was listening): the scene is searched again.
+                if (____markerTargets.Count == 0) TakeTargets(____markerTargets, ship, true);
                 Log.Verbose("The power-recovery hint follows " + FleetShips.Describe(ship) + " (" + ____markerTargets.Count + " targets).");
             }
             catch (Exception e)
@@ -272,13 +333,50 @@ namespace VoidCrewFleet
         // made such a hint take every ship's targets and events).
 
         [GamePatch(Feature, "UI.ObjectMarker.UrgencyMarkerProvider", "OnHintMarkerTargetRegistered", PatchKind.Prefix)]
-        private static bool UrgencyTargetPrefix(UrgencyMarkerProvider __instance, Transform target)
+        private static bool UrgencyTargetPrefix(UrgencyMarkerProvider __instance, EUrgencyMarkerTargetSource targetSource, Transform target)
         {
+            if (target != null && _targetsSession != null) Targets[target.GetInstanceID()] = new KeyValuePair<EUrgencyMarkerTargetSource, Transform>(targetSource, target);
             if (TiedToLostShip(__instance)) return false;
             if (!FleetShips.Active || target == null) return true;
             PlayerControlledShip home = HomeShip(target);
             PlayerControlledShip mine = FleetShips.AssignedOwner(__instance);
             return home == null || mine == null || home == mine;
+        }
+
+        /// <summary>A hint's targets: those of the mission's hint targets (MissionTargets) that belong to its ship.</summary>
+        private static void TakeTargets(Dictionary<EUrgencyMarkerTargetSource, Transform> markerTargets, PlayerControlledShip ship, bool search)
+        {
+            markerTargets.Clear();
+            foreach (KeyValuePair<EUrgencyMarkerTargetSource, Transform> target in MissionTargets(search))
+            {
+                if (target.Value != null && HomeShip(target.Value) == ship) markerTargets[target.Key] = target.Value;
+            }
+        }
+
+        /// <summary>
+        /// The mission's hint targets: searched for once per mission (a search of the whole scene; one per hint cost 18 ms at
+        /// the start of a mission), or again when asked (at most once a frame), and kept up from the game's own announcement
+        /// of each target that starts later (UrgencyTargetPrefix).
+        /// </summary>
+        private static Dictionary<int, KeyValuePair<EUrgencyMarkerTargetSource, Transform>>.ValueCollection MissionTargets(bool search)
+        {
+            object session = GameSessionManager.ActiveSession;
+            if (!ReferenceEquals(session, _targetsSession) || _targetsSession == null)
+            {
+                _targetsSession = session;
+                Targets.Clear();
+                TargetHome.Clear();
+                search = true;
+            }
+            if (search && Time.frameCount != _searchFrame)
+            {
+                _searchFrame = Time.frameCount;
+                foreach (UrgencyMarkerTarget target in UnityEngine.Object.FindObjectsOfType<UrgencyMarkerTarget>())
+                {
+                    if (target != null) Targets[target.transform.GetInstanceID()] = new KeyValuePair<EUrgencyMarkerTargetSource, Transform>(target.TargetSourceType, target.transform);
+                }
+            }
+            return Targets.Values;
         }
 
         [GamePatch(Feature, "UI.ObjectMarker.UrgencyMarkerProvider", "OnCarryableInserted", PatchKind.Prefix)]
@@ -488,12 +586,35 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>
+        /// The hint targets' ships that are gone are forgotten, and every target once no ship is left (between missions), so
+        /// a mission's ships aren't kept in memory after it.
+        /// </summary>
+        private static void PruneTargets()
+        {
+            if (TargetHome.Count == 0 && Targets.Count == 0) return;
+            if (FleetShips.All.Count == 0)
+            {
+                TargetHome.Clear();
+                Targets.Clear();
+                return;
+            }
+            foreach (KeyValuePair<int, PlayerControlledShip> entry in TargetHome)
+            {
+                if (entry.Value == null) Gone.Add(entry.Key);
+            }
+            if (Gone.Count == 0) return;
+            foreach (int target in Gone) TargetHome.Remove(target);
+            Gone.Clear();
+        }
+
         /// <summary>A few times a second: a ship that arrived late gets its hint; a lost ship's hint goes.</summary>
         public static void Tick()
         {
             KeepHudOnViewShip();
             PruneHints();
             PruneUrgency();
+            PruneTargets();
             if (_urgencyTemplate == null || !FleetShips.Active || FleetSession.IsPvP) return;
             if (UrgencyByShip.Count < LivingShipCount()) EnsureUrgencyPerShip();
         }

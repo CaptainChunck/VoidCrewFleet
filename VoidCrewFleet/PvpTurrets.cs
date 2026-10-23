@@ -19,8 +19,10 @@ namespace VoidCrewFleet
     /// PvP: a ship's point defenses and B.R.A.I.N. auto-turrets also shoot enemy players floating in open space near it.
     /// Inside a ship the turrets can't see them (punches deal with boarders there).
     /// - Point defenses pick their targets and play their bursts on every client. When there's no missile to shoot, an
-    ///   enemy player in range, in the turret's arc and in sight becomes the target. The host deals the hit. (Which enemy
-    ///   players float near a ship is worked out a few times a second, not at every physics step.)
+    ///   enemy player in range, in the turret's arc and in sight becomes the target. The host deals the hit when the burst
+    ///   arrives, if the player is still out in space and in sight. (Which enemy players float near a ship, with their
+    ///   health, is worked out a few times a second, and each turret's line of sight to them ten times a second, not at
+    ///   every physics step.)
     /// - Auto-turrets (run by the host): when there's no ship to shoot, an enemy player becomes the turret's target. The
     ///   turret aims and fires as it does at a ship. The game's bullets pass through people, so each time the turret fires
     ///   while on target (once per fire cycle, however many barrels fire together) it may hit the player instead, as the
@@ -32,8 +34,9 @@ namespace VoidCrewFleet
     ///   the ship's real velocity and turn rate (player ships strafe and drift, the game assumes they fly nose first);
     /// - fire only while on target and the lead point is inside the turret's arc, and let go of the trigger otherwise (the
     ///   game kept the trigger down once it had fired, so a turret clamped at the edge of its arc sprayed into space);
-    /// - the line of fire is tested with the layers bullets actually hit, ignoring the turret's own ship's shields, and
-    ///   the target ship's own modules and shields count as hits (the game took them for cover and dropped the target);
+    /// - the line of fire is tested with the layers bullets actually hit, ignoring the shields of the turret's own ship and
+    ///   its team's ships (player shots pass through those), and the target ship's own modules and shields count as hits
+    ///   (the game took them for cover and dropped the target);
     /// - a visible enemy ship always wins over an enemy player in space.
     /// </summary>
     internal static class PvpTurrets
@@ -64,6 +67,12 @@ namespace VoidCrewFleet
         /// <summary>How often each ship's list of enemy players floating near it is worked out (point defenses ask at every physics step).</summary>
         private const float EnemyScanSeconds = 0.25f;
 
+        /// <summary>How long a turret's line of sight to a player is taken as tested (point defenses ask at every physics step).</summary>
+        private const float SightSeconds = 0.1f;
+
+        /// <summary>The most entries the per-collider and per-sight caches hold before they start again.</summary>
+        private const int MaxCached = 4096;
+
         private const float OnTargetDelta = 2.5f;
         private const float SendSeconds = 0.25f;
         private const int SightMask = 134222848; // the auto-turret's own occlusion test: ship hulls and objects
@@ -81,10 +90,32 @@ namespace VoidCrewFleet
         private static readonly Action<AutoShootingTurretController> UpdateActiveElementsCall =
             Bind<Action<AutoShootingTurretController>>(GameMember.Method(typeof(AutoShootingTurretController), "UpdateActiveElements"));
 
+        /// <summary>A point defense's current target (the game's private field), read directly; null when the game has changed.</summary>
+        private static readonly HarmonyLib.AccessTools.FieldRef<KineticPointDefenseModule, IDamageReceiver> PointDefenseTarget =
+            FieldRef<KineticPointDefenseModule, IDamageReceiver>(GameMember.Field(typeof(KineticPointDefenseModule), "_targetProjectile"));
+
         /// <summary>What the game's bullets hit (static and space-object layers; not the interior and pivot layer 27).</summary>
         private const int ShotMask = (1 << 10) | (1 << 12);
         private static readonly RaycastHit[] SightHits = new RaycastHit[16];
         private static readonly Dictionary<int, Vector3> HullCentres = new Dictionary<int, Vector3>();
+
+        /// <summary>
+        /// Colliders the auto-turrets' lines of fire have met, by instance ID: the player ship whose shield the collider is
+        /// part of, or null for anything else (an NPC's shield included), so a ray hit needs no walk up the hierarchy.
+        /// </summary>
+        private static readonly Dictionary<int, PlayerControlledShip> ShieldShips = new Dictionary<int, PlayerControlledShip>();
+
+        /// <summary>A turret's latest line-of-sight test to a player (by pivot and player: see SightSeconds).</summary>
+        private struct Sight
+        {
+            public bool Clear;
+            public float At;
+        }
+
+        private static readonly Dictionary<long, Sight> Sights = new Dictionary<long, Sight>();
+
+        /// <summary>The point defense each enemy player was last given to as its target (by the instance ID of the player's health).</summary>
+        private static readonly Dictionary<int, KineticPointDefenseModule> PointDefenseOn = new Dictionary<int, KineticPointDefenseModule>();
 
         /// <summary>Host: an auto-turret on target at an enemy player (kept by the gun's instance ID).</summary>
         private struct PlayerAim
@@ -105,15 +136,16 @@ namespace VoidCrewFleet
         private static float _nextSend;
         private static float _lastWarning = -100f;
 
-        /// <summary>A ship's enemy players in open space, as last worked out.</summary>
+        /// <summary>A ship's enemy players in open space, each with their health (what turrets aim at and hit), as last worked out.</summary>
         private sealed class EnemyScan
         {
             public float At = float.NegativeInfinity;
             public readonly List<Player> Players = new List<Player>();
+            public readonly List<CustomCharacterHealth> Healths = new List<CustomCharacterHealth>();
         }
 
         private static readonly Dictionary<int, EnemyScan> Scans = new Dictionary<int, EnemyScan>();
-        private static readonly List<Player> NoPlayers = new List<Player>();
+        private static readonly EnemyScan NoEnemies = new EnemyScan();
 
         /// <summary>A fast call to a private game method, or null when it is missing or has changed.</summary>
         private static T Bind<T>(MethodInfo method) where T : class
@@ -129,32 +161,50 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>A direct reader for a game's private field, or null when it is missing or has changed.</summary>
+        private static HarmonyLib.AccessTools.FieldRef<T, F> FieldRef<T, F>(FieldInfo field) where T : class
+        {
+            if (field == null) return null;
+            try
+            {
+                return HarmonyLib.AccessTools.FieldRefAccess<T, F>(field);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         // ---------------------------------------------------------------- who can be shot
 
         /// <summary>
-        /// Enemy players of this ship who are alive and floating in open space, worked out at most every 0.25 s (so check
-        /// each one is still there and alive before using them).
+        /// Enemy players of this ship who are alive and floating in open space, with their health, worked out at most every
+        /// 0.25 s (so check each one is still there and alive before using them).
         /// </summary>
-        private static List<Player> EnemiesInSpace(PlayerControlledShip ship)
+        private static EnemyScan EnemiesInSpace(PlayerControlledShip ship)
         {
-            if (ship == null) return NoPlayers;
+            if (ship == null) return NoEnemies;
             EnemyScan scan;
             int id = ship.GetInstanceID();
             if (!Scans.TryGetValue(id, out scan)) Scans[id] = scan = new EnemyScan();
-            if (Time.time - scan.At < EnemyScanSeconds) return scan.Players;
+            if (Time.time - scan.At < EnemyScanSeconds) return scan;
             scan.At = Time.time;
             scan.Players.Clear();
+            scan.Healths.Clear();
             ClientGame game = ClientGame.Current;
-            if (game == null || game.Players == null) return scan.Players;
+            if (game == null || game.Players == null) return scan;
             foreach (Player player in game.Players)
             {
                 if (player == null || PlayerLife.IsDead(player) || !player.IsInSpace) continue;
                 int actor = ActorOf(player);
                 if (actor < 0 || !PvpBoarding.IsEnemyOf(actor, ship)) continue;
                 if (FleetShips.InteriorAt(player.transform.position) != null) continue;
+                CustomCharacterHealth health = HealthOf(player);
+                if (health == null) continue;
                 scan.Players.Add(player);
+                scan.Healths.Add(health);
             }
-            return scan.Players;
+            return scan;
         }
 
         private static int ActorOf(Player player)
@@ -179,34 +229,59 @@ namespace VoidCrewFleet
             return hit.collider != null && hit.collider.GetComponentInParent<Player>() == player;
         }
 
+        /// <summary>InSight from a turret pivot, tested again only once the last test for that pivot and player is SightSeconds old.</summary>
+        private static bool InSightCached(WeaponPivot pivot, Vector3 from, Vector3 to, Player player)
+        {
+            long key = ((long)pivot.GetInstanceID() << 32) | (uint)player.GetInstanceID();
+            float now = Time.time;
+            Sight sight;
+            if (Sights.TryGetValue(key, out sight) && now - sight.At < SightSeconds) return sight.Clear;
+            bool clear = InSight(from, to, player);
+            if (Sights.Count >= MaxCached) Sights.Clear();
+            Sights[key] = new Sight { Clear = clear, At = now };
+            return clear;
+        }
+
         // ---------------------------------------------------------------- point defenses
 
-        /// <summary>No missile to shoot: the nearest enemy player in range, in the arc and in sight.</summary>
+        /// <summary>
+        /// No missile to shoot: the nearest enemy player in range, in the arc and in sight. A player the game's list says
+        /// another point defense is on is left to it, unless that one has let go of them (PointDefenseStillOn).
+        /// </summary>
         [GamePatch(Feature, "CG.Ship.Modules.Weapons.ProjectileUtils", "GetValidPointDefenseTargets", PatchKind.Postfix)]
         private static void PointDefenseTargetsPostfix(WeaponPivot pivot, float trackingRange, List<IDamageReceiver> excludeList, ref IDamageReceiver __result)
         {
             if (__result != null || pivot == null || !PvpCombat.Active) return;
             try
             {
-                List<Player> enemies = EnemiesInSpace(FleetShips.OwnerOf(pivot));
-                if (enemies.Count == 0) return;
+                EnemyScan enemies = EnemiesInSpace(FleetShips.OwnerOf(pivot));
+                if (enemies.Players.Count == 0) return;
                 Vector3 origin = pivot.transform.position;
                 float range = Mathf.Min(trackingRange, PlayerRange);
                 CustomCharacterHealth best = null;
                 float bestDistance = float.MaxValue;
-                foreach (Player player in enemies)
+                for (int i = 0; i < enemies.Players.Count; i++)
                 {
-                    if (player == null || PlayerLife.IsDead(player)) continue;
-                    CustomCharacterHealth health = HealthOf(player);
-                    if (health == null || (excludeList != null && excludeList.Contains(health))) continue;
+                    Player player = enemies.Players[i];
+                    CustomCharacterHealth health = enemies.Healths[i];
+                    if (player == null || health == null || PlayerLife.IsDead(player)) continue;
+                    if (excludeList != null && excludeList.Contains(health))
+                    {
+                        if (PointDefenseStillOn(health)) continue;
+                        // Left on the list by a point defense that let go of them without taking them off it.
+                        excludeList.Remove(health);
+                    }
                     Vector3 aim = health.CentralPosition;
                     float distance = Vector3.Distance(aim, origin);
                     if (distance > range || distance >= bestDistance) continue;
-                    if (!pivot.IsOrbitObjectInFiringArc(aim) || !InSight(origin, aim, player)) continue;
+                    if (!pivot.IsOrbitObjectInFiringArc(aim) || !InSightCached(pivot, origin, aim, player)) continue;
                     best = health;
                     bestDistance = distance;
                 }
-                if (best != null) __result = best;
+                if (best == null) return;
+                __result = best;
+                // The point defense asking takes the player as its target and puts them on the list.
+                PointDefenseOn[best.GetInstanceID()] = pivot.GetComponentInParent<KineticPointDefenseModule>();
             }
             catch (Exception e)
             {
@@ -214,7 +289,27 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>Host: a point defense burst reached a player. A hit, not the game's "destroy the missile".</summary>
+        /// <summary>
+        /// Whether a point defense really is on this player: the one they were last given to is still tracking or firing at
+        /// them. The game keeps one list of what every point defense is on (each skips what another tracks) and takes a
+        /// target off it only when that point defense loses it. One switched off while on a player (power, a breaker,
+        /// sabotage) left them on the list for good, and as a character is reused on respawn, no point defense shot that
+        /// player again all match.
+        /// </summary>
+        private static bool PointDefenseStillOn(CustomCharacterHealth health)
+        {
+            KineticPointDefenseModule module;
+            if (!PointDefenseOn.TryGetValue(health.GetInstanceID(), out module) || module == null) return false;
+            KineticPointDefenseModule.LogicState state = module.State;
+            if (state != KineticPointDefenseModule.LogicState.TargetAcquired && state != KineticPointDefenseModule.LogicState.Cooldown) return false;
+            return PointDefenseTarget == null || ReferenceEquals(PointDefenseTarget(module), health);
+        }
+
+        /// <summary>
+        /// Host: a point defense burst reached a player. A hit, not the game's "destroy the missile", if the player is still
+        /// out in space (not just inside an airlock or the ship) and in the point defense's sight: the burst arrives a moment
+        /// after it was fired, and a point defense on target doesn't check its sight again before it fires.
+        /// </summary>
         [GamePatch(Feature, "CG.Ship.Modules.Weapons.ProjectileUtils", "DestroyProjectile", PatchKind.Prefix)]
         private static bool DestroyProjectilePrefix(IDamageReceiver target, OrbitObject source)
         {
@@ -226,7 +321,8 @@ namespace VoidCrewFleet
                 {
                     Player victim = health.GetComponentInParent<Player>();
                     int actor = ActorOf(victim);
-                    if (victim != null && !PlayerLife.IsDead(victim) && actor >= 0 && PvpBoarding.IsEnemyOf(actor, FleetShips.OwnerOf(source)))
+                    if (victim != null && !PlayerLife.IsDead(victim) && actor >= 0 && PvpBoarding.IsEnemyOf(actor, FleetShips.OwnerOf(source)) &&
+                        victim.IsInSpace && FleetShips.InteriorAt(victim.transform.position) == null && InSight(PointDefenseOrigin(source), health.CentralPosition, victim))
                     {
                         AddDamage(actor, PointDefenseHit, source.transform.position);
                     }
@@ -237,6 +333,14 @@ namespace VoidCrewFleet
                 Log.Failure("A point defense hitting a player", e);
             }
             return false;
+        }
+
+        /// <summary>Where a point defense fires from: its turret pivot, else the module.</summary>
+        private static Vector3 PointDefenseOrigin(OrbitObject source)
+        {
+            var module = source as KineticPointDefenseModule;
+            WeaponPivot pivot = module != null ? module.Pivot : null;
+            return pivot != null ? pivot.transform.position : source.transform.position;
         }
 
         // ---------------------------------------------------------------- auto-turrets
@@ -256,15 +360,15 @@ namespace VoidCrewFleet
             if (___turret == null || ___activePivot == null || ___activeBarrel == null) return;
             try
             {
-                List<Player> enemies = EnemiesInSpace(FleetShips.OwnerOf(___turret));
-                if (enemies.Count == 0) return;
+                EnemyScan enemies = EnemiesInSpace(FleetShips.OwnerOf(___turret));
+                if (enemies.Players.Count == 0) return;
                 Vector3 muzzle = Muzzle(___activeBarrel);
                 float range = Mathf.Min(___turret.Range != null ? ___turret.Range.Value : PlayerRange, PlayerRange);
-                foreach (Player player in enemies)
+                for (int i = 0; i < enemies.Players.Count; i++)
                 {
-                    if (player == null || PlayerLife.IsDead(player)) continue;
-                    CustomCharacterHealth health = HealthOf(player);
-                    if (health == null) continue;
+                    Player player = enemies.Players[i];
+                    CustomCharacterHealth health = enemies.Healths[i];
+                    if (player == null || health == null || PlayerLife.IsDead(player)) continue;
                     Vector3 aim = health.CentralPosition;
                     if (Vector3.Distance(aim, muzzle) > range || !___activePivot.IsOrbitObjectInFiringArc(aim) || !InSight(muzzle, aim, player)) continue;
                     ___potentialTargets.Add(new WeaponTarget { TargetedUnit = player, ShootingElement = health });
@@ -279,6 +383,7 @@ namespace VoidCrewFleet
         /// <summary>
         /// Host, every physics step of an auto-turret whose target is a player: aim and fire at the player (the game's own
         /// step would drop a target that isn't a ship); while it is on target, its shots may hit the player (BarrelShootPostfix).
+        /// Its sight of the player is tested ten times a second (InSightCached).
         /// </summary>
         [GamePatch(Feature, "AutoShootingTurretController", "FixedUpdate", PatchKind.Prefix)]
         private static bool AutoTurretStepPrefix(AutoShootingTurretController __instance, CompositeWeaponModule ___turret, WeaponTarget ___activeTarget,
@@ -304,7 +409,8 @@ namespace VoidCrewFleet
                 Vector3 aim = health != null ? health.CentralPosition : victim.transform.position;
                 bool valid = health != null && ___activePivot != null && ___activeBarrel != null && !PlayerLife.IsDead(victim) && victim.IsInSpace &&
                              actor >= 0 && PvpBoarding.IsEnemyOf(actor, ship) && FleetShips.InteriorAt(victim.transform.position) == null &&
-                             Vector3.Distance(aim, muzzle) <= PlayerRange * 1.2f && ___activePivot.IsOrbitObjectInFiringArc(aim) && InSight(muzzle, aim, victim);
+                             Vector3.Distance(aim, muzzle) <= PlayerRange * 1.2f && ___activePivot.IsOrbitObjectInFiringArc(aim) &&
+                             InSightCached(___activePivot, muzzle, aim, victim);
                 if (!valid)
                 {
                     if (SetActiveTargetCall != null) SetActiveTargetCall(__instance, ___noTarget);
@@ -466,12 +572,36 @@ namespace VoidCrewFleet
             {
                 Collider collider = SightHits[i].collider;
                 if (collider == null || SightHits[i].distance >= nearest) continue;
-                // Our own shields: bullets fly out through them.
-                if (own != null && collider.GetComponentInParent<ShieldDamagable>() != null && FleetShips.OwnerOf(collider) == own) continue;
+                // Shields of our own ship and our team's ships: player bullets fly through them.
+                if (own != null && IsTeamShield(own, collider)) continue;
                 nearest = SightHits[i].distance;
                 first = collider;
             }
             return first == null || FleetShips.OwnerOf(first) == target;
+        }
+
+        /// <summary>Whether a collider belongs to a shield of this ship or of a ship of its team (not an enemy's, and not an NPC's).</summary>
+        private static bool IsTeamShield(PlayerControlledShip own, Collider collider)
+        {
+            PlayerControlledShip ship = ShieldShip(collider);
+            return ship != null && !PvpCombat.Enemies(own, ship);
+        }
+
+        /// <summary>
+        /// The player ship whose shield a collider is part of, or null for anything else, worked out once per collider. A
+        /// shield not (yet) on a player ship is not remembered, so it is looked at again once it is attached.
+        /// </summary>
+        private static PlayerControlledShip ShieldShip(Collider collider)
+        {
+            int id = collider.GetInstanceID();
+            PlayerControlledShip ship;
+            if (ShieldShips.TryGetValue(id, out ship)) return ship;
+            bool shield = collider.GetComponentInParent<ShieldDamagable>() != null;
+            ship = shield ? FleetShips.OwnerOf(collider) : null;
+            if (shield && ship == null) return null;
+            if (ShieldShips.Count >= MaxCached) ShieldShips.Clear();
+            ShieldShips[id] = ship;
+            return ship;
         }
 
         /// <summary>For the self-test: the hull centre the turrets aim at, and how far its shield segments sit from it.</summary>
@@ -560,8 +690,8 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// Every frame: outside a match the turrets' targets and scans are forgotten; the host sends the damage gathered for
-        /// each player a few times a second.
+        /// Every frame: outside a match the turrets' targets, scans and caches are forgotten (the ships they hold go with
+        /// the mission); the host sends the damage gathered for each player a few times a second.
         /// </summary>
         public static void Frame()
         {
@@ -570,12 +700,17 @@ namespace VoidCrewFleet
                 if (OnPlayer.Count > 0) OnPlayer.Clear();
                 if (LastRoll.Count > 0) LastRoll.Clear();
                 if (Scans.Count > 0) Scans.Clear();
+                if (Sights.Count > 0) Sights.Clear();
+                if (PointDefenseOn.Count > 0) PointDefenseOn.Clear();
+                if (ShieldShips.Count > 0) ShieldShips.Clear();
+                if (HullCentres.Count > 0) HullCentres.Clear();
             }
             if (PendingDamage.Count == 0 || Time.unscaledTime < _nextSend) return;
             _nextSend = Time.unscaledTime + SendSeconds;
             if (!PvpCombat.Active || !PhotonNetwork.IsMasterClient)
             {
                 PendingDamage.Clear();
+                PendingFrom.Clear();
                 return;
             }
             foreach (KeyValuePair<int, float> entry in PendingDamage)

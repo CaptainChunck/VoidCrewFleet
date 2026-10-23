@@ -129,16 +129,17 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// The ship with the smallest crew among these slots (lowest slot on ties), so a ship with a full crew (MaxCrew) is
-        /// only picked when none of the others has room; -1 when there is none.
+        /// only picked when none of the others has room. Ships whose crew has reached the limit are left out. -1 when there
+        /// is none.
         /// </summary>
-        public static int SmallestCrew(IDictionary<int, CrewEntry> crews, ICollection<int> players, IEnumerable<int> slots)
+        public static int SmallestCrew(IDictionary<int, CrewEntry> crews, ICollection<int> players, IEnumerable<int> slots, int limit = int.MaxValue)
         {
             int best = -1;
             int bestCount = int.MaxValue;
             foreach (int slot in slots)
             {
                 int count = CrewOf(crews, players, slot);
-                if (count < bestCount)
+                if (count < bestCount && count < limit)
                 {
                     best = slot;
                     bestCount = count;
@@ -155,23 +156,28 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// Where a player without a ship goes: in a team match the smaller team (or the team given), then its smallest crew
-        /// among the living ships; otherwise the smallest crew. -1 when no ship is left.
+        /// among the living ships that has room (MaxCrew), and on a tie the other team's when the smaller one is full;
+        /// otherwise the smallest crew. -1 when no ship is left, or in a team match when no crew has room for them without
+        /// putting the teams more than one apart (they then wait for a free place, as in a match).
         /// </summary>
         public static int PlaceFor(IDictionary<int, CrewEntry> crews, ICollection<int> players, ICollection<int> aliveSlots, bool teamMatch, int team = -1)
         {
-            if (teamMatch)
-            {
-                if (team < 0) team = SmallerTeam(crews, players);
-                return SmallestCrew(crews, players, aliveSlots.Where(s => s % 2 == team));
-            }
-            return SmallestCrew(crews, players, aliveSlots);
+            if (!teamMatch) return SmallestCrew(crews, players, aliveSlots);
+            if (team >= 0) return SmallestCrew(crews, players, aliveSlots.Where(s => s % 2 == team), MaxCrew);
+            int smaller = SmallerTeam(crews, players);
+            int slot = SmallestCrew(crews, players, aliveSlots.Where(s => s % 2 == smaller), MaxCrew);
+            if (slot < 0 && TeamSize(crews, players, 0, true) == TeamSize(crews, players, 1, true))
+                slot = SmallestCrew(crews, players, aliveSlots.Where(s => s % 2 != smaller), MaxCrew);
+            return slot;
         }
 
         /// <summary>
         /// Everyone in the room on a ship: picks on living ships stay, the rest (and anyone whose ship isn't there) go to the
         /// smallest crew (in a team match, their team's when they have one, else the smaller team's). Spectators stay as they are.
-        /// A ship picked by more than a full crew (players who joined while every ship was full) hands its latest joiners to
-        /// the smallest crew with room, of their team in a team match: a ship the mission added for them, for example.
+        /// In a team match nobody is put on a full crew (MaxCrew): who finds no room stays without a ship, and the roster has
+        /// them wait for a free place. A ship picked by more than a full crew (players who joined while every ship was full)
+        /// hands its latest joiners to the smallest crew with room, of their team in a team match: a ship the mission added
+        /// for them, for example.
         /// </summary>
         public static Dictionary<int, CrewEntry> PlaceEveryone(IDictionary<int, CrewEntry> picks, IList<int> players, ICollection<int> aliveSlots, bool teamMatch)
         {
@@ -206,7 +212,13 @@ namespace VoidCrewFleet
         public static string CheckTeams(IDictionary<int, CrewEntry> crews, ICollection<int> players, int ships, Func<int, string> shipName)
         {
             int unplaced = players.Count(a => !crews.ContainsKey(a) || crews[a].State != CrewState.Playing || crews[a].Slot < 0 || crews[a].Slot >= ships);
-            if (unplaced > 0) return unplaced + (unplaced == 1 ? " player hasn't" : " players haven't") + " picked a ship yet.";
+            if (unplaced > 0)
+            {
+                // More players than all the crews take together: only more ships give the last ones a place.
+                if (players.Count > ships * MaxCrew)
+                    return players.Count + " players are more than the ships' crews take (" + MaxCrew + " a ship): more ships per team give everyone a place.";
+                return unplaced + (unplaced == 1 ? " player hasn't" : " players haven't") + " picked a ship yet.";
+            }
             int blue = TeamSize(crews, players, 0, false);
             int red = TeamSize(crews, players, 1, false);
             if (Math.Abs(blue - red) > 1) return "The teams are " + blue + " against " + red + "; they may differ by one at most.";

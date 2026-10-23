@@ -119,11 +119,19 @@ namespace VoidCrewFleet
         private static bool BoosterPrefix(ThrusterBoosterController __instance, float duration, ref IEnumerator __result)
         {
             if (!FleetShips.Active) return true;
-            PlayerControlledShip ship = FleetShips.OwnerOf(__instance);
-            ShipEngine engine = ship != null ? ship.GetModule<ShipEngine>() : null;
-            if (engine == null) return true;
-            __result = BoostEngine(engine, duration);
-            return false;
+            try
+            {
+                PlayerControlledShip ship = FleetShips.OwnerOf(__instance);
+                ShipEngine engine = ship != null ? ship.GetModule<ShipEngine>() : null;
+                if (engine == null) return true;
+                __result = BoostEngine(engine, duration);
+                return false;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Boosting a ship's engine", e);
+                return true;
+            }
         }
 
         private static IEnumerator BoostEngine(ShipEngine engine, float duration)
@@ -164,14 +172,28 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "SittingInChair", "OnDestroy", PatchKind.Prefix)]
         private static void SeatPrefix(Component ___chair)
         {
-            ShipRedirect.BeginOverride(FleetShips.Active && ___chair != null ? FleetShips.OwnerOf(___chair) : null);
+            ShipRedirect.BeginOverride(ChairShip(___chair));
         }
 
         [GamePatch(Feature, "CoopBuddyStatsSync", "ChairTaken", PatchKind.Prefix)]
         [GamePatch(Feature, "CoopBuddyStatsSync", "ChairFreed", PatchKind.Prefix)]
         private static void BuddyChairPrefix(Component chair)
         {
-            ShipRedirect.BeginOverride(FleetShips.Active && chair != null ? FleetShips.OwnerOf(chair) : null);
+            ShipRedirect.BeginOverride(ChairShip(chair));
+        }
+
+        /// <summary>The ship of a seat with two ships, else null (the finalizer's EndOverride always has its BeginOverride).</summary>
+        private static PlayerControlledShip ChairShip(Component chair)
+        {
+            try
+            {
+                return FleetShips.Active && chair != null ? FleetShips.OwnerOf(chair) : null;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Reading which ship a seat is on", e);
+                return null;
+            }
         }
 
         [GamePatch(Feature, "SittingInChair", "AbilityStarted", PatchKind.Finalizer)]

@@ -17,7 +17,7 @@ namespace VoidCrewFleet
     {
         public const string Guid = "com.captainchunck.voidcrew.fleet";
         public const string Name = "Void Crew Fleet";
-        public const string Version = "0.4.1";
+        public const string Version = "0.4.2";
 
         private GameObject _runtime;
         private bool _running;
@@ -62,7 +62,7 @@ namespace VoidCrewFleet
         }
 
         /// <summary>Runs one start-up step; a failure is logged in full and the next steps still run.</summary>
-        private static bool Step(string what, Action step)
+        internal static bool Step(string what, Action step)
         {
             try
             {

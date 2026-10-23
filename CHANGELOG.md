@@ -1,5 +1,100 @@
 # Changelog
 
+## 0.4.2
+Fixes from a second full code review (of 0.4.1), and Fleet's own work per frame cut down. Everyone in a room needs
+0.4.2: the network protocol changed.
+
+**Spectators**
+- **Spectators keep the game's text chat**: they read and write chat while they watch, and see Fleet's notices (the
+  winner, "gets a free place", and so on). Before, the view switched the chat off with the HUD. Players who watch
+  without a character see the notices on the view itself.
+- While you type in the chat, your keys and mouse no longer switch or turn the view.
+
+**Losing ships**
+- A crew member out in space when their ship explodes dies only within about 150 m of it; further out they play on (and
+  still can't be re-cloned). Only players aboard get the death camera.
+- A respawn can't land in the clone tube of a ship that is starting to explode.
+- A lost ship's crew is always marked lost, also when the host changes during the explosion.
+
+**Co-op fleets**
+- Asteroid rain and other near-player spawns go for every ship in turn, not only the host's (the total is shared
+  between the ships).
+- Each ship's signature follows its own movement and silent mode, so enemies notice each ship by its own signature.
+  Before, only the ship you were looking from had one that changed.
+- Item and mutator rules that depend on the ship (power overdraw, per-N-alloys, breakers, speed) follow the ship they
+  are on, also when an item moves to another ship.
+- Each ship starts with its own crew's biomass and alloy bonus, not the whole room's.
+- A void jump lever the game refuses no longer makes that ship the lead of the next jump.
+
+**Fleet Battle**
+- Point defences can no longer lose sight of a player for the rest of the match (when switched off mid-aim), and their
+  hits need the player out in space and in sight.
+- Missiles from a payload thrown by hand belong to the thrower's team on every player's game (they always went for RED).
+- Auto-turrets fire past a teammate's shield.
+- The winner and every end screen follow the host's decision.
+- Enemy name tags show only for enemies on screen and in sight, not at the edge of the screen behind you.
+- Punches need a clear line between the fighters, and work right after sending a chat message (they stayed blocked
+  until Escape).
+- Players waiting without a team see no team's pings, markers or hints.
+- The hack countdown steps aside for the menus, and a used hacking terminal stays used after a host change.
+- The arena's salvage is placed by a new host when the first one left early, and spawns without a hitch.
+- The lever says "No void jumps in Fleet Battle."
+
+**Lobby**
+- Fleet Battle can't get stuck at the start without a BLUE 1 loadout (after the Loadout Challenge, for example): BLUE 1
+  gets its type's standard loadout, and the host is told.
+- Players who join after the teams are confirmed never make a ship's crew more than 8: they wait for a free place, and
+  the host is told that more ships per team would give them one.
+- Choosing the Fleet Pilgrimage and then the normal Pilgrimage no longer leaves 2 ships planned.
+- BOTH TEAMS: SAME SHIPS gives RED BLUE's types; HIDE doesn't carry over to the next room; "Teams confirmed" counts only
+  the players in the room.
+- A player who left while waiting doesn't get a free place; a late returner whose ship is full goes to a team ship with
+  room.
+- FLEET BATTLE isn't offered while a game update has switched one of its parts off.
+
+**Progression**
+- A player who only passes through the room (sent back for missing mods, or quitting while loading) no longer turns
+  off progression for the mission: players count once their character is in.
+
+**Against modified games** (public rooms)
+- The host and the players check:
+  - who reports a ship's death or damage to a ship;
+  - spawn requests from living players;
+  - BLUE 1's loadout requests (with Ship Customizer 0.9.2 or newer, a refused request can't switch CUSTOM on or off
+    either);
+  - seat, helm and socket requests from the other team;
+  - copied player IDs.
+- Nobody but the host can decide the match.
+
+**Robustness**
+- Late patches respect a feature that is switched off. Start-up registers each piece of work on its own, and work that
+  keeps failing is switched off with a log line.
+- Ship-lost reactions run one by one.
+- Lookups of game members can't break a whole class after a game update.
+- The Steam lobby's size follows the room's.
+
+**Performance**
+- Fleet's own work per frame in a 3v3 Fleet Battle went from about 0.45 ms to about 0.19 ms (measured with Diagnostics >
+  Profile). The check of which ship a player is on runs about 560 times a second instead of 24,000.
+- Smaller hitches in a match:
+  - a ship's loss held up every player's game by 20-38 ms, now by under 12 ms (two searches of the whole scene are gone);
+  - the spectator view opens with a 6 ms hitch instead of 45 ms: its camera and label are made as the match starts;
+  - the first punch or hack hint and the first hack no longer hold up a frame (about 20 ms each): their overlays are made
+    as the match starts;
+  - the host places the arena's salvage over several frames instead of one (158 ms at the start), and the rock checks
+    take one ship at a time.
+- Other costs that were cut:
+  - the play-area pull;
+  - ship status events and the danger checks;
+  - fabricator terminals, which only refresh for their own ship's alloys;
+  - faction checks spread over frames;
+  - proximity voice and turret line-of-sight checks;
+  - allocations in the periodic checks.
+
+**Developer tools** (off by default)
+- Diagnostics > Profile times Fleet's own code and logs it every 10 s.
+- Diagnostics > AutoTestTour takes a camera tour of the Fleet Battle arena with screenshots.
+
 ## 0.4.1
 Fixes from a full code review of 0.4.0. Everyone in a room needs 0.4.1: the network protocol changed.
 

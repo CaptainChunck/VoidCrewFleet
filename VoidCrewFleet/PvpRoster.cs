@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using CG.GameLoopStateMachine;
+using CG.GameLoopStateMachine.GameStates;
 using ExitGames.Client.Photon;
 using Newtonsoft.Json.Linq;
 using Photon.Pun;
 using Photon.Realtime;
+using UnityEngine;
 
 namespace VoidCrewFleet
 {
@@ -19,28 +22,45 @@ namespace VoidCrewFleet
     ///   go to the waiting players (WAITING), each team's own first, before anyone who joins.
     /// - Co-op: a newcomer joins the living ship with the smallest crew.
     /// A player's ID is their PlayFab account ID, which the game itself publishes; without one, their Steam ID or an ID this
-    /// plugin keeps in its settings, published as a player property.
+    /// plugin keeps in its settings, published as a player property. An ID is whatever a player's game publishes, so a
+    /// place stays with the player who has it while they are in the room, even when someone else shows the same ID.
     /// </summary>
     internal static class PvpRoster
     {
         private const string KeyRoster = "VCF_Roster";
         private const string KeyId = "VCF_Pid";
 
+        /// <summary>FleetShips' room property: each ship this mission started with by slot (its view ID; 0 for one that never spawned).</summary>
+        private const string KeyShips = "VCF_Ships";
+
         /// <summary>How long a seat is held for a player who lost their connection.</summary>
         public const int HoldSeconds = 180;
 
         private const int HoldMs = HoldSeconds * 1000;
 
+        /// <summary>How often the crew list is compared with the roster when the roster itself didn't change (seconds).</summary>
+        private const float ApplyCheckSeconds = 2f;
+
         private static List<RosterSeat> _seats;
         private static object _session;
         private static string _published;
         private static string _localId;
+        private static float _nextApplyCheck;
 
         /// <summary>Host, during a tick: the seats by player ID, the IDs in the room, and the waiting players before a fill.</summary>
         private static readonly Dictionary<string, RosterSeat> ById = new Dictionary<string, RosterSeat>();
 
         private static readonly HashSet<string> Present = new HashSet<string>();
         private static readonly List<RosterSeat> WaitingBefore = new List<RosterSeat>();
+
+        /// <summary>Host, during a tick: the room's players in join order.</summary>
+        private static readonly List<Player> Players = new List<Player>();
+
+        /// <summary>Host: each player's "pf:" ID with the PlayFab ID it was made from, so it isn't made again every tick.</summary>
+        private static readonly Dictionary<int, KeyValuePair<object, string>> PlayFabIds = new Dictionary<int, KeyValuePair<object, string>>();
+
+        /// <summary>Host: players refused a place another player in the room holds under the same ID (logged once a mission).</summary>
+        private static readonly HashSet<int> Refused = new HashSet<int>();
 
         // The room's roster as last read: the property's value and the session it was read for (it is parsed again only when
         // either changes), and what it held. Shared with every reader, so nobody changes it.
@@ -114,7 +134,15 @@ namespace VoidCrewFleet
         {
             if (player == null || player.CustomProperties == null) return null;
             object value;
-            if (player.CustomProperties.TryGetValue("PLAYFAB_ID", out value) && value is string && ((string)value).Length > 0) return "pf:" + value;
+            if (player.CustomProperties.TryGetValue("PLAYFAB_ID", out value) && value is string && ((string)value).Length > 0)
+            {
+                // The same property value gives the same ID: made once, not on every tick.
+                KeyValuePair<object, string> made;
+                if (PlayFabIds.TryGetValue(player.ActorNumber, out made) && ReferenceEquals(made.Key, value)) return made.Value;
+                string id = "pf:" + value;
+                PlayFabIds[player.ActorNumber] = new KeyValuePair<object, string>(value, id);
+                return id;
+            }
             if (player.CustomProperties.TryGetValue(KeyId, out value) && value is string && ((string)value).Length > 0) return (string)value;
             return player.IsLocal ? LocalId : null;
         }
@@ -159,6 +187,14 @@ namespace VoidCrewFleet
         {
             try
             {
+                if (!PhotonNetwork.IsMasterClient && _seats != null)
+                {
+                    // No longer the host: should this player become host again, they take over the roster as it is then, not
+                    // their own old copy.
+                    _seats = null;
+                    _session = null;
+                    _published = null;
+                }
                 FleetPlan plan = ActivePlan();
                 if (plan == null) return;
                 bool pvp = plan.Mode == FleetMode.PvP;
@@ -168,25 +204,54 @@ namespace VoidCrewFleet
                 int now = Now;
                 bool changed = RosterRules.ExpireHolds(_seats, now, HoldMs);
                 if (RosterRules.DropGone(_seats, now, HoldMs)) changed = true;
+                if (LoseGoneShips(alive)) changed = true;
                 ById.Clear();
                 foreach (RosterSeat seat in _seats) ById[seat.Id] = seat;
+                PvpTeams.RoomPlayers(Players);
+                Present.Clear();
+                foreach (Player player in Players)
+                {
+                    string id = IdOf(player);
+                    if (!string.IsNullOrEmpty(id)) Present.Add(id);
+                }
+
+                // Who left goes first: a waiting player who just left must not be given a free place (and hold it for minutes).
+                foreach (RosterSeat seat in _seats)
+                {
+                    if (seat.Away || Present.Contains(seat.Id)) continue;
+                    RosterRules.Leave(_seats, seat.Id, now);
+                    changed = true;
+                    if (pvp && seat.State == CrewState.Playing)
+                        Notice.ShowAll(seat.Name + " lost their connection: their place on the " + PvpTeams.TeamName(seat.Team) + " team is held for " + HoldSeconds / 60 + " minutes.");
+                }
                 // Seats freed since the last look go to the players already waiting, before anyone who arrives now.
                 if (pvp && FillSeats(alive, now)) changed = true;
 
-                Present.Clear();
-                // The player list comes sorted by actor number: of two players with one ID, the later one counts.
-                foreach (Player player in PhotonNetwork.PlayerList)
+                // In join order (actor number): of two players new to the roster with one ID, the first one gets the place.
+                foreach (Player player in Players)
                 {
                     string id = IdOf(player);
                     if (string.IsNullOrEmpty(id)) continue;
-                    Present.Add(id);
                     string name = NameOf(player);
                     RosterSeat seat;
                     if (ById.TryGetValue(id, out seat) && !seat.Away)
                     {
-                        // Still here: only their actor number or name can change.
-                        if (seat.Actor == player.ActorNumber && seat.Name == name) continue;
-                        seat.Actor = player.ActorNumber;
+                        if (seat.Actor != player.ActorNumber)
+                        {
+                            // Someone else with this ID. While the player who has the place is in the room it stays theirs;
+                            // once they have left, this is them back after a lost connection, and they take it over.
+                            if (InRoomNow(seat.Actor))
+                            {
+                                RefuseCopy(seat, player);
+                                continue;
+                            }
+                            seat.Actor = player.ActorNumber;
+                            seat.Name = name;
+                            changed = true;
+                            continue;
+                        }
+                        // Still here: only their name can change.
+                        if (seat.Name == name) continue;
                         seat.Name = name;
                         changed = true;
                         continue;
@@ -197,22 +262,78 @@ namespace VoidCrewFleet
                     changed = true;
                     if (pvp || seat.State == CrewState.Dead) Announce(player.ActorNumber, seat.Name, was, seat);
                 }
-                foreach (RosterSeat seat in _seats)
-                {
-                    if (seat.Away || Present.Contains(seat.Id)) continue;
-                    RosterRules.Leave(_seats, seat.Id, now);
-                    changed = true;
-                    if (pvp && seat.State == CrewState.Playing)
-                        Notice.ShowAll(seat.Name + " lost their connection: their place on the " + PvpTeams.TeamName(seat.Team) + " team is held for " + HoldSeconds / 60 + " minutes.");
-                }
                 if (pvp && FillSeats(alive, now)) changed = true;
                 if (changed) Publish();
-                Apply();
+                Apply(changed);
             }
             catch (Exception e)
             {
                 Log.Failure("Keeping the fleet's roster", e);
             }
+        }
+
+        /// <summary>Whether a player (by actor number) is in the room now and connected.</summary>
+        private static bool InRoomNow(int actor)
+        {
+            Room room = PhotonNetwork.CurrentRoom;
+            Player player;
+            return room != null && room.Players != null && room.Players.TryGetValue(actor, out player) && player != null && !player.IsInactive;
+        }
+
+        /// <summary>A second player shows the ID of one who has a place: they get none while both are here (logged once a mission).</summary>
+        private static void RefuseCopy(RosterSeat seat, Player player)
+        {
+            if (!Refused.Add(player.ActorNumber)) return;
+            Log.Warn(NameOf(player) + " (" + player.ActorNumber + ") shows the same player ID as " + seat.Name + " (" + seat.Actor + "), who has that place: " +
+                     NameOf(player) + " gets none while " + seat.Name + " is in the room.");
+        }
+
+        /// <summary>
+        /// Host: everyone still playing on a ship this mission started with that is no longer alive is DEAD, as the host does
+        /// when the ship starts dying (OnShipLost). A player who becomes host during a ship's death never saw that happen, and
+        /// the ship's crew would otherwise stay on the roster as players of a ship that is gone. Only once the host is in the
+        /// game with a ship left (a host still loading the mission doesn't have every ship yet); a ship that never spawned
+        /// doesn't count. True when anyone changed.
+        /// </summary>
+        private static bool LoseGoneShips(List<int> alive)
+        {
+            if (alive.Count == 0 || !InGame()) return false;
+            int[] published = PublishedShips();
+            if (published == null || published.Length < 2) return false;
+            bool changed = false;
+            for (int slot = 0; slot < published.Length; slot++)
+            {
+                if (published[slot] == 0 || alive.Contains(slot) || !PlayingOn(slot)) continue;
+                RosterRules.ShipLost(_seats, slot);
+                changed = true;
+                Log.Info(FleetSlots.Name(slot, FleetSession.IsPvP) + " is lost but its crew was still playing on the roster (a new host?): they are out (DEAD) now.");
+            }
+            return changed;
+        }
+
+        /// <summary>Whether anyone on the roster still plays on this ship (there or away).</summary>
+        private static bool PlayingOn(int slot)
+        {
+            foreach (RosterSeat seat in _seats)
+            {
+                if (seat.Slot == slot && seat.State == CrewState.Playing) return true;
+            }
+            return false;
+        }
+
+        /// <summary>The ships this mission started with, as the host published them (FleetShips); null before that.</summary>
+        private static int[] PublishedShips()
+        {
+            Room room = PhotonNetwork.CurrentRoom;
+            object value;
+            return room != null && room.CustomProperties != null && room.CustomProperties.TryGetValue(KeyShips, out value) ? value as int[] : null;
+        }
+
+        /// <summary>Whether this player is in the mission itself (past loading and spawning).</summary>
+        private static bool InGame()
+        {
+            GameStateMachine machine = GameStateMachine.Instance;
+            return machine != null && machine.CurrentState is GSIngame;
         }
 
         /// <summary>PvP: free seats to the waiting players in the room (RosterRules.FillSeats), with a notice for each who got one.</summary>
@@ -240,12 +361,20 @@ namespace VoidCrewFleet
             _session = session;
             _published = null;
             _seats = null;
+            // A new roster (a new mission, or this player took over as host) is compared with the crew list at once.
+            _nextApplyCheck = 0f;
+            Refused.Clear();
             return Start(pvp);
         }
 
-        /// <summary>Host: the crew list says what the roster says.</summary>
-        private static void Apply()
+        /// <summary>
+        /// Host: the crew list says what the roster says. Both are only made and compared when the roster changed, and every
+        /// few seconds besides in case anything else wrote the crew list (making them on every tick showed up).
+        /// </summary>
+        private static void Apply(bool changed)
         {
+            if (!changed && Time.unscaledTime < _nextApplyCheck) return;
+            _nextApplyCheck = Time.unscaledTime + ApplyCheckSeconds;
             Dictionary<int, CrewEntry> crews = RosterRules.Crews(_seats);
             if (!SameCrews(crews, FleetShips.Crews())) FleetShips.PublishCrew(crews);
         }
@@ -265,11 +394,19 @@ namespace VoidCrewFleet
             if (crews.Count == 0) return false;
             _seats = new List<RosterSeat>();
             int now = Now;
-            foreach (Player player in PhotonNetwork.PlayerList)
+            PvpTeams.RoomPlayers(Players);
+            foreach (Player player in Players)
             {
                 CrewEntry entry;
                 string id = IdOf(player);
                 if (string.IsNullOrEmpty(id) || !crews.TryGetValue(player.ActorNumber, out entry)) continue;
+                RosterSeat first = _seats.FirstOrDefault(s => s.Id == id);
+                if (first != null)
+                {
+                    // One place per ID: the first player in the room with it has it.
+                    RefuseCopy(first, player);
+                    continue;
+                }
                 _seats.Add(new RosterSeat
                 {
                     Id = id, Actor = player.ActorNumber, Name = NameOf(player), Team = entry.Team, Slot = entry.Slot, State = entry.State, WaitingSince = now
@@ -314,7 +451,7 @@ namespace VoidCrewFleet
             if (!Ready(plan.Mode == FleetMode.PvP)) return false;
             RosterRules.ShipLost(_seats, slot);
             Publish();
-            Apply();
+            Apply(true);
             return true;
         }
 
@@ -412,6 +549,7 @@ namespace VoidCrewFleet
             _seats = null;
             _session = null;
             _published = null;
+            PlayFabIds.Clear();
             if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null) return;
             PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyRoster, null } });
         }

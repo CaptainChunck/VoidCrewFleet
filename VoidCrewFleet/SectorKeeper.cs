@@ -15,20 +15,35 @@ namespace VoidCrewFleet
     {
         public const string Feature = FleetShips.Feature;
 
+        /// <summary>The game's own pull of "the player ship" into the play area, called directly (no reflection call per ship).</summary>
+        private static readonly Action<PlayableAreaController, PlayableArea> PullShip =
+            Bind<Action<PlayableAreaController, PlayableArea>>(GameMember.Method(typeof(PlayableAreaController), "CheckPlayableAreaPlayership"));
+
         [GamePatch(Feature, "GameSessionSector", "Unload", PatchKind.Prefix)]
         private static void UnloadPrefix(GameSessionSector __instance)
         {
+            List<PlayerControlledShip> ships;
             try
             {
                 if (FleetShips.All.Count < 2) return;
-                foreach (PlayerControlledShip ship in FleetShips.All)
-                {
-                    if (ship != null && __instance.OrbitObjects.Contains(ship)) __instance.RemoveOrbitObject(ship);
-                }
+                ships = new List<PlayerControlledShip>(FleetShips.All);
             }
             catch (Exception e)
             {
                 Log.Failure("Keeping the player ships out of an unloading sector", e);
+                return;
+            }
+            // Each ship on its own: one that fails must not leave the others to be destroyed with the sector.
+            foreach (PlayerControlledShip ship in ships)
+            {
+                try
+                {
+                    if (ship != null && __instance.OrbitObjects.Contains(ship)) __instance.RemoveOrbitObject(ship);
+                }
+                catch (Exception e)
+                {
+                    Log.Failure("Keeping a player ship out of an unloading sector", e);
+                }
             }
         }
 
@@ -36,21 +51,32 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "GameSessionSectorManager", "EnterSectorInternal", PatchKind.Postfix)]
         private static void EnterSectorPostfix()
         {
+            GameSessionSector active;
+            List<PlayerControlledShip> ships;
             try
             {
-                GameSessionSector active = GameSessionManager.ActiveSector;
+                active = GameSessionManager.ActiveSector;
                 if (active == null || FleetShips.All.Count < 2) return;
-                foreach (PlayerControlledShip ship in FleetShips.All)
+                ships = new List<PlayerControlledShip>(FleetShips.All);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Adding the player ships to the new sector", e);
+                return;
+            }
+            foreach (PlayerControlledShip ship in ships)
+            {
+                try
                 {
                     if (ship == null || ship.StartedDeath || ship.Sector == active) continue;
                     // A ship still on its way (mid-jump) joins when its own jump arrives.
                     if (VoidJumpLink.IsTravelling(ship)) continue;
                     active.AddOrbitObject(ship);
                 }
-            }
-            catch (Exception e)
-            {
-                Log.Failure("Adding the player ships to the new sector", e);
+                catch (Exception e)
+                {
+                    Log.Failure("Adding a player ship to the new sector", e);
+                }
             }
         }
 
@@ -61,35 +87,32 @@ namespace VoidCrewFleet
         /// Each physics step every client pulls "the player ship" back into the sector's play area when it strays outside. With
         /// several ships each client pulled only the ship it looks at, so a ship could fly off for good while the client that
         /// runs its movement (the host, or its pilot) looked at another. The game's own pull now runs for every ship in the
-        /// sector on every client, each in turn as "the player ship".
+        /// sector on every client, each in turn as "the player ship". A ship inside the area is skipped at once (the game's pull
+        /// does nothing for it), so the usual step costs a distance check per ship.
         /// </summary>
         [GamePatch(Feature, "PlayableAreaController", "CheckPlayableAreaPlayership", PatchKind.Prefix, Optional = true)]
         private static bool PlayAreaPrefix(PlayableAreaController __instance, PlayableArea area, MethodBase __originalMethod)
         {
-            if (_pullingShips || !FleetShips.Active) return true;
+            if (_pullingShips || !FleetShips.Active || area == null) return true;
             _pullingShips = true;
             try
             {
-                IList<PlayerControlledShip> ships = FleetShips.All;
+                List<PlayerControlledShip> ships = FleetShips.All;
                 for (int i = 0; i < ships.Count; i++)
                 {
                     PlayerControlledShip ship = ships[i];
-                    // A ship still on its way through the void (a moment behind the lead ship) isn't in the sector yet.
-                    if (ship == null || VoidJumpLink.IsTravelling(ship)) continue;
-                    ShipRedirect.BeginOverride(ship);
                     try
                     {
-                        PullArguments[0] = area;
-                        __originalMethod.Invoke(__instance, PullArguments);
+                        if (ship == null) continue;
+                        // Inside the area: nothing to pull (the game's own test).
+                        if ((area.Center - ship.transform.position).magnitude < area.Radius) continue;
+                        // A ship still on its way through the void (a moment behind the lead ship) isn't in the sector yet.
+                        if (VoidJumpLink.IsTravelling(ship)) continue;
+                        Pull(__instance, area, ship, __originalMethod);
                     }
                     catch (Exception e)
                     {
                         Log.WarnOnce("play area pull", "Pulling a ship back into the play area failed: " + e.Message);
-                    }
-                    finally
-                    {
-                        PullArguments[0] = null;
-                        ShipRedirect.EndOverride();
                     }
                 }
             }
@@ -98,6 +121,42 @@ namespace VoidCrewFleet
                 _pullingShips = false;
             }
             return false;
+        }
+
+        /// <summary>The game's pull for one ship, as "the player ship".</summary>
+        private static void Pull(PlayableAreaController controller, PlayableArea area, PlayerControlledShip ship, MethodBase original)
+        {
+            ShipRedirect.BeginOverride(ship);
+            try
+            {
+                if (PullShip != null)
+                {
+                    PullShip(controller, area);
+                    return;
+                }
+                // The method has changed so it can't be called directly: through reflection then.
+                PullArguments[0] = area;
+                original.Invoke(controller, PullArguments);
+            }
+            finally
+            {
+                PullArguments[0] = null;
+                ShipRedirect.EndOverride();
+            }
+        }
+
+        /// <summary>A fast call to a private game method, or null when it is missing or has changed.</summary>
+        private static T Bind<T>(MethodInfo method) where T : class
+        {
+            if (method == null) return null;
+            try
+            {
+                return Delegate.CreateDelegate(typeof(T), method, false) as T;
+            }
+            catch
+            {
+                return null;
+            }
         }
     }
 }

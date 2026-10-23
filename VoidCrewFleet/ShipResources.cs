@@ -3,8 +3,12 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.CompilerServices;
+using CG.Client.UserData;
 using CG.Game;
+using CG.Ship.Modules;
 using CG.Space;
+using Gameplay.Factory;
 using Gameplay.Utilities;
 using HarmonyLib;
 using Photon.Pun;
@@ -24,11 +28,13 @@ namespace VoidCrewFleet
     ///   learn blueprints for their own ship;
     /// - the game's own count (HUD, ship voice lines, ship status) is the count of the ship the local player belongs to
     ///   right now (FleetShips.ViewShip), switched silently when that changes; fabricator terminals always show their own
-    ///   ship's count, and the clone tube screen the count of the ship whose tube the local player is in (CloneTubeScreen);
+    ///   ship's count, and only refresh when it changes, and the clone tube screen the count of the ship whose tube the
+    ///   local player is in (CloneTubeScreen);
     /// - items' "per N alloys" and "more / fewer than N alloys (biomass)" rules count their own ship's resources
     ///   (ShipStatRules says which ship a rule is for), and re-check when that ship's count changes;
-    /// - every ship starts with the game's own starting amounts, except that a ship 2-6 with a loadout of its own starts with
-    ///   its own alloys (its CUSTOM loadout's, or the game's default); the end-of-mission tally counts the player's own ship.
+    /// - the game's starting bonus (biomass for every player in the room, alloys by every player's rank) is shared out: each
+    ///   ship starts with its own crew's (players not on a ship yet are shared out evenly), except that a ship 2-6 with a
+    ///   CUSTOM loadout of its own starts with that loadout's alloys; the end-of-mission tally counts the player's own ship.
     /// With one ship nothing is tagged or redirected.
     /// </summary>
     internal static class ShipResources
@@ -51,22 +57,67 @@ namespace VoidCrewFleet
         private static int _survivor = -1;
         private static bool _wasActive;
 
+        /// <summary>The ship whose results the end-of-mission tally is working out right now, or -1.</summary>
+        private static int _tallySlot = -1;
+
         private static readonly FieldInfo AlloyField = GameMember.Field(typeof(GameSessionSuppliesManager), "_alloyAmount");
         private static readonly FieldInfo BiomassField = GameMember.Field(typeof(GameSessionSuppliesManager), "_biomassAmount");
-        private static readonly FieldInfo TabData = GameMember.Field(typeof(FabricatorActionTab), "data");
-        private static readonly FieldInfo DataLogic = GameMember.Field(typeof(FabricatorData), "logic");
-        private static readonly FieldInfo StateTube = GameMember.Field(typeof(CloneTubeState), "CloneTube");
 
-        private static readonly MethodInfo GetAlloy = AccessTools.PropertyGetter(typeof(GameSessionSuppliesManager), "AlloyAmount");
-        private static readonly MethodInfo GetBiomass = AccessTools.PropertyGetter(typeof(GameSessionSuppliesManager), "BiomassAmount");
-        private static readonly MethodInfo ModAlloy = AccessTools.Method(typeof(GameSessionSuppliesManager), "ModifyAlloyCount");
-        private static readonly MethodInfo ModBiomass = AccessTools.Method(typeof(GameSessionSuppliesManager), "ModifyBiomassCount");
-        private static readonly MethodInfo AlloyForMethod = AccessTools.Method(typeof(ShipResources), "AlloyFor");
-        private static readonly MethodInfo BiomassForMethod = AccessTools.Method(typeof(ShipResources), "BiomassFor");
-        private static readonly MethodInfo ModifyAlloyForMethod = AccessTools.Method(typeof(ShipResources), "ModifyAlloyFor");
-        private static readonly MethodInfo ModifyBiomassForMethod = AccessTools.Method(typeof(ShipResources), "ModifyBiomassFor");
-        private static readonly MethodInfo RuleCheck = GameMember.Method(typeof(ModDynamicCondition), "CheckIfActive");
-        private static readonly MethodInfo RuleAmountChanged = GameMember.Method(typeof(ModValueResourceCount), "OnResourceChanged");
+        // Read for every shop item a terminal lists and every occupied clone tube each frame: direct readers, not reflection.
+        private static readonly AccessTools.FieldRef<FabricatorActionTab, FabricatorData> TabData =
+            InstanceRef<FabricatorActionTab, FabricatorData>(GameMember.Field(typeof(FabricatorActionTab), "data"));
+        private static readonly AccessTools.FieldRef<FabricatorData, CarryableFactoryLogic> DataLogic =
+            InstanceRef<FabricatorData, CarryableFactoryLogic>(GameMember.Field(typeof(FabricatorData), "logic"));
+        private static readonly AccessTools.FieldRef<CloneTubeState, CloneTube> StateTube =
+            InstanceRef<CloneTubeState, CloneTube>(GameMember.Field(typeof(CloneTubeState), "CloneTube"));
+
+        private static readonly MethodInfo GetAlloy = Getter(GameMember.Property(typeof(GameSessionSuppliesManager), "AlloyAmount"));
+        private static readonly MethodInfo GetBiomass = Getter(GameMember.Property(typeof(GameSessionSuppliesManager), "BiomassAmount"));
+        private static readonly MethodInfo ModAlloy = GameMember.Method(typeof(GameSessionSuppliesManager), "ModifyAlloyCount");
+        private static readonly MethodInfo ModBiomass = GameMember.Method(typeof(GameSessionSuppliesManager), "ModifyBiomassCount");
+        private static readonly MethodInfo PlayerBiomass = GameMember.Method(typeof(GameSessionSuppliesManager), "PlayerBiomassBonus");
+        private static readonly MethodInfo AlloyForMethod = AccessTools.Method(typeof(ShipResources), nameof(AlloyFor));
+        private static readonly MethodInfo BiomassForMethod = AccessTools.Method(typeof(ShipResources), nameof(BiomassFor));
+        private static readonly MethodInfo ModifyAlloyForMethod = AccessTools.Method(typeof(ShipResources), nameof(ModifyAlloyFor));
+        private static readonly MethodInfo ModifyBiomassForMethod = AccessTools.Method(typeof(ShipResources), nameof(ModifyBiomassFor));
+        private static readonly Action<ModDynamicCondition> RuleCheck =
+            Bind<Action<ModDynamicCondition>>(GameMember.Method(typeof(ModDynamicCondition), "CheckIfActive"));
+        private static readonly Action<ModValueResourceCount, int> RuleAmountChanged =
+            Bind<Action<ModValueResourceCount, int>>(GameMember.Method(typeof(ModValueResourceCount), "OnResourceChanged"));
+
+        /// <summary>A direct reader of a game's instance field; null when the field is missing or has changed.</summary>
+        private static AccessTools.FieldRef<T, F> InstanceRef<T, F>(FieldInfo field)
+        {
+            if (field == null) return null;
+            try
+            {
+                return AccessTools.FieldRefAccess<T, F>(field);
+            }
+            catch (Exception e)
+            {
+                Log.Warn("Game field " + field.DeclaringType.Name + "." + field.Name + " can't be read directly (" + e.Message + "); the game may have changed.");
+                return null;
+            }
+        }
+
+        /// <summary>A fast call to a game method (the instance is the first argument); null when it is missing or has changed.</summary>
+        private static T Bind<T>(MethodInfo method) where T : class
+        {
+            if (method == null) return null;
+            try
+            {
+                return Delegate.CreateDelegate(typeof(T), method, false) as T;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static MethodInfo Getter(PropertyInfo property)
+        {
+            return property != null ? property.GetGetMethod(true) : null;
+        }
 
         /// <summary>An item rule that counts a ship's alloys or biomass.</summary>
         private sealed class ResourceRule
@@ -107,9 +158,12 @@ namespace VoidCrewFleet
 
         private static int SlotOf(object context)
         {
-            if (context is FabricatorActionTab) context = GameMember.Read<object>(TabData, context, null);
-            if (context is FabricatorData) context = GameMember.Read<object>(DataLogic, context, null);
-            if (context is CloneTubeState) context = GameMember.Read<object>(StateTube, context, null);
+            var tab = context as FabricatorActionTab;
+            if (tab != null) context = TabData != null ? TabData(tab) : null;
+            var data = context as FabricatorData;
+            if (data != null) context = DataLogic != null ? DataLogic(data) : null;
+            var state = context as CloneTubeState;
+            if (state != null) context = StateTube != null ? StateTube(state) : null;
             if (context == null) return -1;
             Component component = context as Component;
             if (component == null) component = ShipRedirect.OuterComponent(context);
@@ -283,29 +337,42 @@ namespace VoidCrewFleet
         {
             if (!Active) return true;
             if (!__instance.photonView.IsMine) return false;
+            int[] shares = null;
             for (int slot = 0; slot < ShipSlots; slot++)
             {
                 if (changeCause == ResourceChangeAlloy.DEBUG && slot != Shown()) continue;
-                int amount = slot > 0 ? StartAlloys(__instance, slot, alloyAmount, changeCause) : alloyAmount;
+                int amount = StartAlloys(__instance, slot, alloyAmount, changeCause, ref shares);
                 Send(__instance, slot, true, amount, false, (byte)changeCause, GUIDUnion.Empty());
             }
             return false;
         }
 
         /// <summary>
-        /// A ship 2-6's amount when the run starts: the same as ship 1 when it is a copy of ship 1; with a loadout of its own,
-        /// its CUSTOM starting alloys (Ship Customizer), or else the game's own amount (not ship 1's CUSTOM amount).
+        /// A ship's amount when the run starts. The game's own starting amount (every player's rank bonus, for a new run) is
+        /// shared out by crew. A ship 2-6 with a loadout of its own starts with its CUSTOM starting alloys (Ship Customizer),
+        /// or else its crew's bonus (not ship 1's CUSTOM amount); a copy of ship 1 starts as ship 1 does.
         /// </summary>
-        private static int StartAlloys(GameSessionSuppliesManager manager, int slot, int sessionAmount, ResourceChangeAlloy changeCause)
+        private static int StartAlloys(GameSessionSuppliesManager manager, int slot, int sessionAmount, ResourceChangeAlloy changeCause, ref int[] shares)
         {
-            if (changeCause != ResourceChangeAlloy.GAME_SESSION_PROGRESS_TRACKER_START && changeCause != ResourceChangeAlloy.GAME_STATE_INGAME_ENTER) return sessionAmount;
+            bool bonus = changeCause == ResourceChangeAlloy.GAME_STATE_INGAME_ENTER;
+            if (!bonus && changeCause != ResourceChangeAlloy.GAME_SESSION_PROGRESS_TRACKER_START) return sessionAmount;
             FleetPlan plan = FleetSession.Current;
-            ShipPlan ship = plan != null ? plan.Ship(slot) : null;
-            if (ship == null || ship.StartAlloys == -2) return sessionAmount;
-            int amount = ship.StartAlloys >= 0 ? ship.StartAlloys : manager.GetTotalPlayerAlloyBonus();
-            Log.Info("Ship " + (slot + 1) + " starts with " + amount + " alloys (" + (ship.StartAlloys >= 0 ? "its CUSTOM loadout's" : "the game's own amount") +
-                     "); ship 1 with " + sessionAmount + ".");
-            return amount;
+            ShipPlan ship = slot > 0 && plan != null ? plan.Ship(slot) : null;
+            int own = ship != null ? ship.StartAlloys : -2;
+            if (own >= 0)
+            {
+                Log.Info("Ship " + (slot + 1) + " starts with " + own + " alloys (its CUSTOM loadout's).");
+                return own;
+            }
+            // Ship 1, or a copy of it, in a run with an amount of its own (ship 1's CUSTOM loadout's).
+            if (own == -2 && !bonus) return sessionAmount;
+            if (shares == null)
+            {
+                int roomBonus = bonus ? sessionAmount : manager.GetTotalPlayerAlloyBonus();
+                shares = BonusShares(manager, true, roomBonus);
+                LogShares(true, roomBonus, shares);
+            }
+            return slot < shares.Length ? shares[slot] : 0;
         }
 
         [GamePatch(Feature, "GameSessionSuppliesManager", "SetBiomassAmountNoNotification", PatchKind.Prefix)]
@@ -313,12 +380,103 @@ namespace VoidCrewFleet
         {
             if (!Active) return true;
             if (!__instance.photonView.IsMine) return false;
+            // A new run's starting biomass is the game's bonus for every player in the room: each ship gets its crew's.
+            int[] shares = null;
+            if (changeCause == ResourceChangeBiomass.GAMESESSION_SETUP && NewRunBiomass())
+            {
+                shares = BonusShares(__instance, false, biomassAmount);
+                LogShares(false, biomassAmount, shares);
+            }
             for (int slot = 0; slot < ShipSlots; slot++)
             {
                 if (changeCause == ResourceChangeBiomass.DEBUG && slot != Shown()) continue;
-                Send(__instance, slot, false, biomassAmount, false, (byte)changeCause, GUIDUnion.Empty());
+                int amount = shares != null && slot < shares.Length ? shares[slot] : biomassAmount;
+                Send(__instance, slot, false, amount, false, (byte)changeCause, GUIDUnion.Empty());
             }
             return false;
+        }
+
+        /// <summary>Whether the run starts with the game's bonus biomass (a new run), not with an amount of its own (a saved run's).</summary>
+        private static bool NewRunBiomass()
+        {
+            GameSession session = GameSessionManager.ActiveSession;
+            return session != null && session.InitialBiomass == -1;
+        }
+
+        // ---------------------------------------------------------------- the starting bonus is shared out by crew
+
+        /// <summary>
+        /// Each ship's share of a starting bonus the game gives once for the whole room (biomass for every player, alloys by
+        /// every player's rank) and would give every ship in full: its own crew's bonus, from the crews the host has placed
+        /// (as the mission loads, ShipSpawn). The bonus of players not on a ship yet (Fleet Battle teams still to be picked)
+        /// is shared out evenly, and so is all of it when the players' bonuses don't add up to the game's (a game update
+        /// counting it differently).
+        /// </summary>
+        private static int[] BonusShares(GameSessionSuppliesManager manager, bool alloy, int roomBonus)
+        {
+            int ships = ShipSlots;
+            var shares = new int[ships];
+            int placed = 0;
+            try
+            {
+                Dictionary<int, CrewEntry> crews = FleetShips.Crews();
+                int total = 0;
+                foreach (Photon.Realtime.Player player in PhotonNetwork.PlayerList)
+                {
+                    int bonus = alloy ? AlloyBonusOf(player) : BiomassBonusOf(manager, player);
+                    total += bonus;
+                    CrewEntry entry;
+                    if (!crews.TryGetValue(player.ActorNumber, out entry) || entry.State != CrewState.Playing || entry.Slot < 0 || entry.Slot >= ships) continue;
+                    shares[entry.Slot] += bonus;
+                    placed += bonus;
+                }
+                if (total != roomBonus)
+                {
+                    Log.WarnOnce("starting bonus " + alloy, "The game's starting " + (alloy ? "alloys" : "biomass") + " (" + roomBonus + ") is not the sum of the " +
+                                                          "players' (" + total + "); every ship gets an equal part. The game may have changed.");
+                    Array.Clear(shares, 0, ships);
+                    placed = 0;
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Sharing out the starting " + (alloy ? "alloys" : "biomass") + " by crew", e);
+                Array.Clear(shares, 0, ships);
+                placed = 0;
+            }
+            int rest = Mathf.Max(0, roomBonus - placed);
+            for (int slot = 0; slot < ships; slot++) shares[slot] += rest / ships + (slot < rest % ships ? 1 : 0);
+            return shares;
+        }
+
+        /// <summary>For the log: "Starting biomass by crew (100 for the room): ship 1 50, ship 2 50."</summary>
+        private static void LogShares(bool alloy, int roomBonus, int[] shares)
+        {
+            var text = new System.Text.StringBuilder();
+            for (int slot = 0; slot < shares.Length; slot++) text.Append(slot > 0 ? ", " : "").Append("ship ").Append(slot + 1).Append(' ').Append(shares[slot]);
+            Log.Info("Starting " + (alloy ? "alloys" : "biomass") + " by crew (" + roomBonus + " for the room): " + text + ".");
+        }
+
+        /// <summary>A player's starting alloys: the alloy rewards of their rank, as the game counts them for the room.</summary>
+        private static int AlloyBonusOf(Photon.Realtime.Player player)
+        {
+            object rank;
+            if (player == null || player.CustomProperties == null || !player.CustomProperties.TryGetValue("RP_PR", out rank)) return 0;
+            int bonus = 0;
+            foreach (UnlockItemDef item in ResourceAssetContainer<UnlockContainer, UnityEngine.Object, UnlockItemDef>.Instance.GetUnlocksInCategory(
+                         ResourceAssetContainer<AlloyRewardContainer, AlloyReward, AlloyRewardDef>.Instance, 0, (int)rank, UnlockCriteriaType.PlayerRank))
+            {
+                bonus += ((AlloyReward)item.Asset).Alloys;
+            }
+            return bonus;
+        }
+
+        /// <summary>A player's starting biomass, by the game's own rule for one player; 0 when that can't be read.</summary>
+        private static int BiomassBonusOf(GameSessionSuppliesManager manager, Photon.Realtime.Player player)
+        {
+            if (PlayerBiomass == null) return 0;
+            object bonus = PlayerBiomass.Invoke(manager, new object[] { player });
+            return bonus is int ? (int)bonus : 0;
         }
 
         /// <summary>Host: a player joining gets both ships' counts (the game has every client send its one count).</summary>
@@ -352,7 +510,7 @@ namespace VoidCrewFleet
             HasAlloy[slot] = true;
             RefreshRules(slot, false);
             if (slot == Shown()) return true;
-            // The other ship's count: only its own fabricator terminals re-read their count.
+            // Another ship's count: every fabricator terminal hears of it, and only that ship's own refresh (TabChanged).
             try
             {
                 if (ClientGame.Current != null) ClientGame.Current.ModelEventBus.OnAlloysChangedSilent.Publish(__instance.AlloyAmount);
@@ -503,16 +661,64 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- fabricator terminals show their own ship's count
 
-        [GamePatch(Feature, "FabricationTab", "UpdateAlloyLabel", PatchKind.Prefix)]
-        private static void FabricationLabelPrefix(FabricatorActionTab __instance, ref int obj)
+        /// <summary>What a fabricator terminal's tab shows now (its own ship's count; an upgrade tab, with the upgrade's cost).</summary>
+        private sealed class TabShown
         {
-            if (Active) obj = AlloyFor(GameSessionSuppliesManager.Instance, __instance);
+            public long State;
+        }
+
+        private static readonly ConditionalWeakTable<FabricatorActionTab, TabShown> TabsShown = new ConditionalWeakTable<FabricatorActionTab, TabShown>();
+
+        /// <summary>
+        /// Whether a tab has something new to show. The game's "alloys changed" reaches every terminal of every ship, any
+        /// ship's change (and a fabrication tab rebuilds its whole shop list for it); a tab whose own ship's count is what it
+        /// already shows skips it.
+        /// </summary>
+        private static bool TabChanged(FabricatorActionTab tab, long state)
+        {
+            TabShown shown;
+            if (!TabsShown.TryGetValue(tab, out shown))
+            {
+                TabsShown.Add(tab, new TabShown { State = state });
+                return true;
+            }
+            if (shown.State == state) return false;
+            shown.State = state;
+            return true;
+        }
+
+        [GamePatch(Feature, "FabricationTab", "UpdateAlloyLabel", PatchKind.Prefix)]
+        private static bool FabricationLabelPrefix(FabricatorActionTab __instance, ref int obj)
+        {
+            try
+            {
+                if (!Active) return true;
+                obj = AlloyFor(GameSessionSuppliesManager.Instance, __instance);
+                return TabChanged(__instance, obj);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Showing a fabricator terminal its own ship's alloys", e);
+                return true;
+            }
         }
 
         [GamePatch(Feature, "UpgradeTab", "OnAlloysUpdated", PatchKind.Prefix)]
-        private static void UpgradeLabelPrefix(FabricatorActionTab __instance, ref int alloys)
+        private static bool UpgradeLabelPrefix(FabricatorActionTab __instance, FabricatorModule ____module, ref int alloys)
         {
-            if (Active) alloys = AlloyFor(GameSessionSuppliesManager.Instance, __instance);
+            try
+            {
+                if (!Active) return true;
+                alloys = AlloyFor(GameSessionSuppliesManager.Instance, __instance);
+                // Its button also depends on the next upgrade's cost, which an upgrade changes.
+                int cost = ____module != null ? ____module.CurrentUpgradeCost : 0;
+                return TabChanged(__instance, ((long)cost << 32) | (uint)alloys);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Showing a fabricator terminal its own ship's alloys", e);
+                return true;
+            }
         }
 
         // ---------------------------------------------------------------- blueprints are learned per ship
@@ -625,6 +831,7 @@ namespace VoidCrewFleet
                     if (Valid(slot))
                     {
                         _pinned = slot;
+                        _tallySlot = slot;
                         Show(GameSessionSuppliesManager.Instance, slot);
                         own = FleetShips.BySlot(slot);
                     }
@@ -640,7 +847,38 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "CG.GameLoopStateMachine.GameStates.GSIngame", "OnGameEnded", PatchKind.Finalizer)]
         private static void GameEndedFinalizer()
         {
+            _tallySlot = -1;
             ShipRedirect.EndOverride();
+        }
+
+        /// <summary>
+        /// The tally takes off the starting bonus the player's own ship had: its crew's share, not the whole room's (worked
+        /// out from the crews now, so players who left count no more).
+        /// </summary>
+        [GamePatch(Feature, "GameSessionSuppliesManager", "GetTotalPlayerAlloyBonus", PatchKind.Postfix, Optional = true)]
+        private static void AlloyBonusPostfix(GameSessionSuppliesManager __instance, ref int __result)
+        {
+            if (_tallySlot >= 0) __result = TallyShare(__instance, true, __result);
+        }
+
+        [GamePatch(Feature, "GameSessionSuppliesManager", "GetTotalPlayerBiomassBonus", PatchKind.Postfix, Optional = true)]
+        private static void BiomassBonusPostfix(GameSessionSuppliesManager __instance, ref int __result)
+        {
+            if (_tallySlot >= 0) __result = TallyShare(__instance, false, __result);
+        }
+
+        private static int TallyShare(GameSessionSuppliesManager manager, bool alloy, int roomBonus)
+        {
+            try
+            {
+                int[] shares = BonusShares(manager, alloy, roomBonus);
+                return _tallySlot < shares.Length ? shares[_tallySlot] : roomBonus;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Tallying the player's own ship's starting bonus", e);
+                return roomBonus;
+            }
         }
 
         // ---------------------------------------------------------------- items' rules that count a ship's resources
@@ -658,12 +896,30 @@ namespace VoidCrewFleet
             return true;
         }
 
+        /// <summary>A rule just set up counts its ship's resource (a rule set up again for another ship, that ship's only).</summary>
         private static void Register(object rule, CG.Ship.Object.ResourceType type)
         {
             bool biomass = type == CG.Ship.Object.ResourceType.Biomass;
             if (!biomass && type != CG.Ship.Object.ResourceType.Alloys) return;
+            Unregister(rule);
             PlayerControlledShip ship = ShipStatRules.RuleShip(rule);
             if (ship != null) Rules.Add(new ResourceRule { Rule = new WeakReference(rule), Ship = ship, Biomass = biomass });
+        }
+
+        private static void Unregister(object rule)
+        {
+            for (int i = Rules.Count - 1; i >= 0; i--)
+            {
+                if (ReferenceEquals(Rules[i].Rule.Target, rule)) Rules.RemoveAt(i);
+            }
+        }
+
+        /// <summary>A rule let go of its ship (its item is gone, or it is set up again for another ship): it counts nothing more.</summary>
+        [GamePatch(Feature, "Gameplay.Utilities.ResourceCountModRule", "OnDestroy", PatchKind.Postfix, Optional = true)]
+        [GamePatch(Feature, "Gameplay.Utilities.ModValueResourceCount", "OnDestroy", PatchKind.Postfix, Optional = true)]
+        private static void RuleDestroyPostfix(object __instance)
+        {
+            if (Rules.Count > 0) Unregister(__instance);
         }
 
         /// <summary>
@@ -687,13 +943,15 @@ namespace VoidCrewFleet
                 if (entry.Biomass != biomass || FleetShips.Slot(entry.Ship) != slot) continue;
                 try
                 {
-                    if (rule is ModDynamicCondition)
+                    var condition = rule as ModDynamicCondition;
+                    if (condition != null)
                     {
-                        if (RuleCheck != null) RuleCheck.Invoke(rule, null);
+                        if (RuleCheck != null) RuleCheck(condition);
                     }
-                    else if (RuleAmountChanged != null)
+                    else
                     {
-                        RuleAmountChanged.Invoke(rule, new object[] { amount });
+                        var perAmount = rule as ModValueResourceCount;
+                        if (perAmount != null && RuleAmountChanged != null) RuleAmountChanged(perAmount, amount);
                     }
                 }
                 catch (Exception e)

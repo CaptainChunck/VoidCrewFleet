@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
 using CG.Client;
 using CG.Client.Ship;
 using CG.Game.Player;
+using CG.GameLoopStateMachine;
+using CG.GameLoopStateMachine.GameStates;
 using CG.Objects;
 using CG.Ship.Hull;
 using CG.Ship.Modules;
@@ -25,12 +28,20 @@ namespace VoidCrewFleet
     ///    airlock's door buttons and pressurise lever (not its safety override). Both teams see a countdown.
     /// Enemies never get into the cockpit: its doors stay shut to them, and one who walks in anyway is pushed back out.
     /// The host decides everything and keeps the hacks in a room property, so everyone (late joiners too) sees them. Their
-    /// end times are the server's clock in milliseconds, an int that wraps around, so they are compared by difference.
+    /// end times are the server's clock in milliseconds, an int that wraps around, so they are compared by difference. The
+    /// terminals plugged in are in the room too, until they are gone, so a new host never takes one a second time.
     /// </summary>
     internal static class PvpHack
     {
         public const string Feature = HackTerminal.Feature;
         private const string RoomKey = "VCF_Hack";
+
+        /// <summary>
+        /// The terminals plugged in that are still in the world (photon view IDs), written with the hacks: whoever is host
+        /// refuses to take one again, and removes it if its holder's game didn't. A terminal leaves the list once it is gone
+        /// (a later terminal may be given the same view ID).
+        /// </summary>
+        private const string UsedKey = "VCF_HackUsed";
 
         private const float Reach = 2.6f;
         private const float HostReach = 5f;
@@ -43,7 +54,10 @@ namespace VoidCrewFleet
         private const int AccessMs = (int)(AccessSeconds * 1000f);
         private const int SightMask = (1 << 10) | (1 << 12) | (1 << 27);
 
-        /// <summary>How long the hacker's game has to put a plugged-in terminal away before the host removes it itself.</summary>
+        /// <summary>
+        /// How long the hacker's game has to put a plugged-in terminal away before the host removes it itself (and then
+        /// between the host's tries).
+        /// </summary>
         private const float RemoveSeconds = 3f;
 
         /// <summary>Further than this from the enemy ship's rooms, none of its airlock panels can be in reach.</summary>
@@ -136,11 +150,28 @@ namespace VoidCrewFleet
             public bool? Lit;
         }
 
-        /// <summary>A terminal plugged into a panel, which its holder's game puts away and destroys; the host checks it did.</summary>
-        private sealed class Plugged
+        /// <summary>What a line of the countdowns is about, as the local team sees it.</summary>
+        private enum TimerKind : byte
         {
-            public CarryableObject Terminal;
-            public float CheckAt;
+            /// <summary>We are hacking an enemy ship's airlock.</summary>
+            Hacking,
+
+            /// <summary>The enemy is hacking one of our ships' airlocks.</summary>
+            EnemyHacking,
+
+            /// <summary>We can open an enemy ship's doors.</summary>
+            Access,
+
+            /// <summary>The enemy can open one of our ships' doors.</summary>
+            EnemyAccess
+        }
+
+        /// <summary>One line of the countdowns: what it is about, which ship, and the whole seconds left.</summary>
+        private struct TimerLine
+        {
+            public TimerKind Kind;
+            public int Slot;
+            public int Seconds;
         }
 
         /// <summary>A ship's airlocks, in the order every client finds them (an airlock's index names it in messages).</summary>
@@ -171,33 +202,50 @@ namespace VoidCrewFleet
         private static readonly Dictionary<int, Outside> OutsideByAirlock = new Dictionary<int, Outside>();
         private static readonly Dictionary<int, Room> CockpitRooms = new Dictionary<int, Room>();
 
-        /// <summary>Host: every terminal plugged in this match (by object), so none is plugged in twice.</summary>
-        private static readonly HashSet<int> UsedTerminals = new HashSet<int>();
+        /// <summary>
+        /// The terminals plugged in that are still in the world (see UsedKey), and when the host removes each one itself if it
+        /// is still there (unscaled time).
+        /// </summary>
+        private static readonly List<int> UsedTerminals = new List<int>();
 
-        /// <summary>Host: plugged-in terminals to check on (see Plugged).</summary>
-        private static readonly List<Plugged> PluggedTerminals = new List<Plugged>();
+        private static readonly List<float> UsedRemoveAt = new List<float>();
+
+        /// <summary>The host's tick works through the hacks from this list (it may change them), filled again each time.</summary>
+        private static readonly List<Entry> TickEntries = new List<Entry>();
 
         private static readonly int EmissiveColorId = Shader.PropertyToID("_EmissiveColor");
 
         /// <summary>Stands for "not read yet": never the value of a room property.</summary>
         private static readonly object NotRead = new object();
 
+        /// <summary>The room's hacks and used terminals as last read (each array is replaced whenever the room's changes).</summary>
         private static object _roomData;
 
+        private static object _roomUsed;
+
         /// <summary>
-        /// The host's own list (Entries) is the latest one. A room property only changes on the host itself once the server
-        /// sends the change back (the game broadcasts property changes to everyone), so right after a write the room still
-        /// holds the old list, and a second change built on it would undo the first. So from its first write in a room the
-        /// host builds on its own list, for as long as it is that room's host; any other client, and a new host until its
-        /// first write, reads the room property.
+        /// The host's own lists (Entries, UsedTerminals) are the latest ones. A room property only changes on the host itself
+        /// once the server sends the change back (the game broadcasts property changes to everyone), so right after a write
+        /// the room still holds the old list, and a second change built on it would undo the first. So from its first write
+        /// in a room the host builds on its own lists, for as long as it is that room's host; any other client, and a new
+        /// host until its first write, reads the room properties.
         /// </summary>
         private static bool _hostWrote;
 
         private static string _hostRoom;
         private static int _hostActor = -1;
 
+        /// <summary>The session the caches of ships, airlocks, panels and cockpits are for: a new one forgets them.</summary>
+        private static object _session;
+
         private static string _timerText;
         private static float _nextTimers;
+
+        /// <summary>The countdowns' lines as last built into _timerText, and this time's (reused, so a tick allocates nothing).</summary>
+        private static readonly List<TimerLine> ShownTimerLines = new List<TimerLine>();
+
+        private static readonly List<TimerLine> TimerLines = new List<TimerLine>();
+        private static readonly StringBuilder TimerBuilder = new StringBuilder();
         private static long _takenKey;
         private static int _takenSeconds = -1;
         private static string _takenText;
@@ -220,6 +268,11 @@ namespace VoidCrewFleet
 
         private static UIDocument _timerDocument;
         private static Label _timerLabel;
+
+        /// <summary>What the countdowns' label shows now (null while hidden), and when making it may be tried again.</summary>
+        private static string _timerShown;
+
+        private static float _nextTimerBuild;
 
         private static long KeyOf(int ship, int index)
         {
@@ -247,8 +300,11 @@ namespace VoidCrewFleet
 
         private static PlayerControlledShip ShipOfView(int view)
         {
-            foreach (PlayerControlledShip ship in FleetShips.All)
+            // By index: a foreach over the list's interface would allocate, and this runs every frame while a hack is shown.
+            IList<PlayerControlledShip> ships = FleetShips.All;
+            for (int i = 0; i < ships.Count; i++)
             {
+                PlayerControlledShip ship = ships[i];
                 if (ship != null && FleetShips.ViewId(ship) == view) return ship;
             }
             return null;
@@ -524,9 +580,10 @@ namespace VoidCrewFleet
             Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
             Photon.Realtime.Player master = PhotonNetwork.MasterClient;
             if (room != null && PhotonNetwork.IsMasterClient && master != null && master.ActorNumber == _hostActor && room.Name == _hostRoom) return true;
-            // Another room, or not its host any more: the room property is the list again.
+            // Another room, or not its host any more: the room properties are the lists again.
             _hostWrote = false;
             _roomData = NotRead;
+            _roomUsed = NotRead;
             return false;
         }
 
@@ -534,8 +591,18 @@ namespace VoidCrewFleet
         {
             if (HostHasLatest()) return;
             object data = null;
+            object used = null;
             Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
-            if (room != null && room.CustomProperties != null) room.CustomProperties.TryGetValue(RoomKey, out data);
+            if (room != null && room.CustomProperties != null)
+            {
+                room.CustomProperties.TryGetValue(RoomKey, out data);
+                room.CustomProperties.TryGetValue(UsedKey, out used);
+            }
+            if (!ReferenceEquals(used, _roomUsed))
+            {
+                _roomUsed = used;
+                ReadUsed(used as int[]);
+            }
             if (ReferenceEquals(data, _roomData)) return;
             _roomData = data;
             _nextTimers = 0f;
@@ -549,33 +616,73 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>
+        /// The room's used terminals: one this player already knew keeps its removal time; a new one gets the full time from
+        /// now (a player who takes over as host gives the holder's game that long before removing it).
+        /// </summary>
+        private static void ReadUsed(int[] views)
+        {
+            for (int i = UsedTerminals.Count - 1; i >= 0; i--)
+            {
+                if (views != null && Array.IndexOf(views, UsedTerminals[i]) >= 0) continue;
+                UsedTerminals.RemoveAt(i);
+                UsedRemoveAt.RemoveAt(i);
+            }
+            if (views == null) return;
+            foreach (int view in views)
+            {
+                if (UsedTerminals.Contains(view)) continue;
+                UsedTerminals.Add(view);
+                UsedRemoveAt.Add(Time.unscaledTime + RemoveSeconds);
+            }
+        }
+
         private static void WriteRoom()
         {
             if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null) return;
             var entries = new List<object>();
             foreach (Entry entry in Entries.Values) entries.Add(entry.ToData());
             object data = entries.Count > 0 ? entries.ToArray() : null;
-            PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { RoomKey, data } });
+            object used = UsedTerminals.Count > 0 ? UsedTerminals.ToArray() : null;
+            PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { RoomKey, data }, { UsedKey, used } });
             _roomData = data;
+            _roomUsed = used;
             _hostWrote = true;
             _hostRoom = PhotonNetwork.CurrentRoom.Name;
             _hostActor = FleetShips.LocalActor;
             _nextTimers = 0f;
         }
 
-        /// <summary>Host, at the start of a PvP match: no hacks from an earlier one.</summary>
+        /// <summary>Host, at the start of a PvP match: no hacks or used terminals from an earlier one.</summary>
         public static void ResetRoom()
         {
             Entries.Clear();
-            AirlocksByShip.Clear();
-            OutsideByAirlock.Clear();
-            CockpitRooms.Clear();
+            ForgetShips();
             UsedTerminals.Clear();
-            PluggedTerminals.Clear();
+            UsedRemoveAt.Clear();
             _roomData = NotRead;
+            _roomUsed = NotRead;
             _glow = null;
             _nextTimers = 0f;
             WriteRoom();
+        }
+
+        /// <summary>Forgets every ship's airlocks, outside panels and cockpit (they hold the last mission's destroyed objects).</summary>
+        private static void ForgetShips()
+        {
+            AirlocksByShip.Clear();
+            OutsideByAirlock.Clear();
+            CockpitRooms.Clear();
+        }
+
+        /// <summary>Every client, when the session changes (the hub, or the next match): the last one's ships are forgotten.</summary>
+        private static void SyncSession()
+        {
+            object session = GameSessionManager.ActiveSession;
+            if (ReferenceEquals(session, _session)) return;
+            _session = session;
+            ForgetShips();
+            _inCockpitSince = -1f;
         }
 
         // ---------------------------------------------------------------- every frame, every client
@@ -584,6 +691,9 @@ namespace VoidCrewFleet
         {
             // Notices a new room or host between matches too.
             HostHasLatest();
+            SyncSession();
+            // The countdowns' overlay is made as a PvP match starts, not at the first hack: making it holds up a frame (about 19 ms).
+            if (_timerLabel == null && FleetSession.IsPvP && InGame()) EnsureTimers();
             if (!Active)
             {
                 if (Models.Count > 0) ClearModels();
@@ -713,60 +823,128 @@ namespace VoidCrewFleet
             return (total / 60) + ":" + (total % 60).ToString("00");
         }
 
-        /// <summary>The local team's hacks and door access, and the enemy's on our ship.</summary>
+        /// <summary>
+        /// The local team's hacks and door access, and the enemy's on our ships. The text is only built again when a line or
+        /// its whole seconds change; otherwise the last one is returned, and nothing is allocated.
+        /// </summary>
         private static string TimerText()
         {
+            TimerLines.Clear();
             int mine = FleetShips.TeamOfActor(FleetShips.LocalActor);
-            if (mine < 0 || Entries.Count == 0) return null;
-            var lines = new List<string>();
-            foreach (Entry entry in Entries.Values)
+            if (mine >= 0)
             {
-                int msLeft = MsUntil(entry.Until);
-                if (msLeft <= 0) continue;
-                double left = msLeft / 1000.0;
-                PlayerControlledShip ship = ShipOfView(entry.Ship);
-                int shipSlot = FleetShips.Slot(ship);
-                if (shipSlot < 0) continue;
-                string shipName = FleetSlots.Name(shipSlot, true);
-                bool ours = FleetShips.TeamOfSlot(shipSlot) == mine;
-                // The game's colours: light blue for our own progress, light green for what we won, orange and red for threats.
-                if (entry.State == State.Hacking)
+                foreach (Entry entry in Entries.Values)
                 {
-                    if (entry.Team == mine) lines.Add("<color=#BDE7FB>HACKING " + shipName + "'S AIRLOCK  " + Clock(left) + "</color>");
-                    else if (ours) lines.Add("<color=#F6AE3C>ENEMY HACKING " + shipName + "'S AIRLOCK  " + Clock(left) + "</color>");
-                }
-                else
-                {
-                    if (entry.Team == mine) lines.Add("<color=#83C886>DOOR ACCESS TO " + shipName + "  " + Clock(left) + "</color>");
-                    else if (ours) lines.Add("<color=#EC1E24>THE ENEMY CAN OPEN " + shipName + "'S DOORS  " + Clock(left) + "</color>");
+                    int msLeft = MsUntil(entry.Until);
+                    if (msLeft <= 0) continue;
+                    int slot = FleetShips.Slot(ShipOfView(entry.Ship));
+                    if (slot < 0) continue;
+                    TimerKind kind;
+                    if (entry.Team == mine) kind = entry.State == State.Hacking ? TimerKind.Hacking : TimerKind.Access;
+                    else if (FleetShips.TeamOfSlot(slot) == mine) kind = entry.State == State.Hacking ? TimerKind.EnemyHacking : TimerKind.EnemyAccess;
+                    else continue;
+                    TimerLines.Add(new TimerLine { Kind = kind, Slot = slot, Seconds = Mathf.Max(0, Mathf.CeilToInt(msLeft / 1000f)) });
                 }
             }
-            return lines.Count > 0 ? string.Join("\n", lines.ToArray()) : null;
+            if (SameLines(TimerLines, ShownTimerLines)) return _timerText;
+            ShownTimerLines.Clear();
+            // One by one: AddRange copies through a new array.
+            for (int i = 0; i < TimerLines.Count; i++) ShownTimerLines.Add(TimerLines[i]);
+            if (TimerLines.Count == 0) return null;
+            StringBuilder text = TimerBuilder;
+            text.Length = 0;
+            foreach (TimerLine line in TimerLines)
+            {
+                if (text.Length > 0) text.Append('\n');
+                string ship = FleetSlots.Name(line.Slot, true);
+                // The game's colours: light blue for our own progress, light green for what we won, orange and red for threats.
+                switch (line.Kind)
+                {
+                    case TimerKind.Hacking:
+                        text.Append("<color=#BDE7FB>HACKING ").Append(ship).Append("'S AIRLOCK  ");
+                        break;
+                    case TimerKind.EnemyHacking:
+                        text.Append("<color=#F6AE3C>ENEMY HACKING ").Append(ship).Append("'S AIRLOCK  ");
+                        break;
+                    case TimerKind.Access:
+                        text.Append("<color=#83C886>DOOR ACCESS TO ").Append(ship).Append("  ");
+                        break;
+                    default:
+                        text.Append("<color=#EC1E24>THE ENEMY CAN OPEN ").Append(ship).Append("'S DOORS  ");
+                        break;
+                }
+                text.Append(line.Seconds / 60).Append(':');
+                if (line.Seconds % 60 < 10) text.Append('0');
+                text.Append(line.Seconds % 60).Append("</color>");
+            }
+            return text.ToString();
         }
 
+        private static bool SameLines(List<TimerLine> a, List<TimerLine> b)
+        {
+            if (a.Count != b.Count) return false;
+            for (int i = 0; i < a.Count; i++)
+            {
+                if (a[i].Kind != b[i].Kind || a[i].Slot != b[i].Slot || a[i].Seconds != b[i].Seconds) return false;
+            }
+            return true;
+        }
+
+        /// <summary>The countdowns, or none; never over the game's menus (the overlay is drawn above them).</summary>
         private static void ShowTimers(string text)
         {
-            if (string.IsNullOrEmpty(text))
+            if (string.IsNullOrEmpty(text) || MenuScreenController.IsOpen()) text = null;
+            if (ReferenceEquals(text, _timerShown) && (text == null || (_timerLabel != null && _timerLabel.panel != null))) return;
+            if (text == null)
             {
                 if (_timerLabel != null) _timerLabel.style.display = DisplayStyle.None;
+                _timerShown = null;
                 return;
             }
-            if (_timerLabel == null || _timerLabel.panel == null)
+            if (!EnsureTimers()) return;
+            _timerLabel.text = text;
+            _timerLabel.style.display = DisplayStyle.Flex;
+            _timerShown = text;
+        }
+
+        /// <summary>
+        /// The countdowns' overlay and label (made again if the label has lost its panel); false while there is no game screen
+        /// to copy the overlay's settings from yet (tried again a second later).
+        /// </summary>
+        private static bool EnsureTimers()
+        {
+            if (_timerLabel != null && _timerLabel.panel != null) return true;
+            if (Time.unscaledTime < _nextTimerBuild) return false;
+            _nextTimerBuild = Time.unscaledTime + 1f;
+            try
             {
                 if (_timerDocument == null) _timerDocument = Ui.CreateOverlay("Void Crew Fleet hack timers", 3900);
-                if (_timerDocument == null || _timerDocument.rootVisualElement == null) return;
+                if (_timerDocument == null || _timerDocument.rootVisualElement == null) return false;
                 VisualElement root = _timerDocument.rootVisualElement;
                 root.pickingMode = PickingMode.Ignore;
+                if (_timerLabel != null) _timerLabel.RemoveFromHierarchy();
                 _timerLabel = Ui.HudLabel("", 20, Color.white);
                 _timerLabel.style.position = Position.Absolute;
                 _timerLabel.style.left = 0;
                 _timerLabel.style.right = 0;
                 _timerLabel.style.top = new Length(9, LengthUnit.Percent);
                 _timerLabel.style.unityTextAlign = TextAnchor.UpperCenter;
+                _timerLabel.style.display = DisplayStyle.None;
+                _timerShown = null;
                 root.Add(_timerLabel);
+                return true;
             }
-            _timerLabel.text = text;
-            _timerLabel.style.display = DisplayStyle.Flex;
+            catch (Exception e)
+            {
+                Log.Failure("Making the hack countdowns", e);
+                return false;
+            }
+        }
+
+        private static bool InGame()
+        {
+            GameStateMachine machine = GameStateMachine.Instance;
+            return machine != null && machine.CurrentState is GSIngame;
         }
 
         // ---------------------------------------------------------------- the local player's actions
@@ -861,9 +1039,11 @@ namespace VoidCrewFleet
             // Holding a terminal, looking at the outside panel of an enemy airlock (from close by: nothing to do further off).
             if (!HackTerminal.Is(held)) return Step.None;
             float bestAngle = AimAngle;
-            foreach (PlayerControlledShip enemy in FleetShips.All)
+            IList<PlayerControlledShip> ships = FleetShips.All;
+            for (int i = 0; i < ships.Count; i++)
             {
                 // Every enemy ship close enough: the airlock panel aimed at most directly wins.
+                PlayerControlledShip enemy = ships[i];
                 if (!PvpBoarding.IsEnemyShip(enemy) || FarFrom(enemy, eye)) continue;
                 Airlock[] airlocks = AirlocksOf(enemy);
                 int view = FleetShips.ViewId(enemy);
@@ -1097,14 +1277,13 @@ namespace VoidCrewFleet
                 PlayerControlledShip ship = ShipOfView(shipView);
                 Vector3 outward = Vector3.forward;
                 AirlockButtonPanel panel = airlock != null ? OutsidePanel(airlock, out outward) : null;
-                PhotonView itemObject = PhotonView.Find(itemView);
-                var item = itemObject != null ? itemObject.GetComponent<CarryableObject>() : null;
+                CarryableObject item = HackTerminal.Find(itemView);
                 string refusal = null;
                 if (airlock == null || ship == null || panel == null) refusal = "That airlock can't be hacked.";
                 else if (!PvpBoarding.IsEnemyOf(sender, ship)) refusal = "That's your own ship's airlock.";
                 else if (Entries.ContainsKey(KeyOf(shipView, index))) refusal = "That airlock is being hacked already, or is hacked.";
-                else if (!HackTerminal.Is(item) || itemObject.OwnerActorNr != sender || !CarriedBy(sender, item)) refusal = "You need to be holding a hacking terminal.";
-                else if (UsedTerminals.Contains(item.GetInstanceID())) refusal = "That hacking terminal has been used already.";
+                else if (item == null || item.photonView.OwnerActorNr != sender || !CarriedBy(sender, item)) refusal = "You need to be holding a hacking terminal.";
+                else if (UsedTerminals.Contains(itemView)) refusal = "That hacking terminal has been used already.";
                 else if (!Near(sender, panel, HostReach)) refusal = "Get closer to the airlock's outside panel.";
                 if (refusal != null)
                 {
@@ -1124,11 +1303,11 @@ namespace VoidCrewFleet
                     Position = ship.transform.InverseTransformPoint(point),
                     Rotation = Quaternion.Inverse(ship.transform.rotation) * rotation
                 };
-                WriteRoom();
                 // The hacker's game puts the terminal down and destroys it, as the game does with a used item; the host
-                // makes sure it is gone (and never takes it again).
-                UsedTerminals.Add(item.GetInstanceID());
-                PluggedTerminals.Add(new Plugged { Terminal = item, CheckAt = Time.unscaledTime + RemoveSeconds });
+                // makes sure it is gone. Until it is, it is in the room with the hacks, so no host ever takes it again.
+                UsedTerminals.Add(itemView);
+                UsedRemoveAt.Add(Time.unscaledTime + RemoveSeconds);
+                WriteRoom();
                 Net.ToActor(sender, Msg.HackTaken, itemView);
                 Log.Info("PvP: " + NameOf(sender) + " started hacking an airlock of " + FleetShips.Describe(ship) + ".");
                 Notice.ShowAll(NameOf(sender) + " (" + PvpTeams.TeamName(FleetShips.TeamOfActor(sender)) + ") is hacking " + FleetShips.Describe(ship) +
@@ -1138,9 +1317,8 @@ namespace VoidCrewFleet
             Net.On(Msg.HackTaken, (sender, data) =>
             {
                 if (!Net.FromHost(sender)) return;
-                PhotonView view = PhotonView.Find(Net.Get(data, 0, -1));
-                var item = view != null ? view.GetComponent<CarryableObject>() : null;
-                if (HackTerminal.Is(item)) HackTerminal.Consume(item);
+                CarryableObject item = HackTerminal.Find(Net.Get(data, 0, -1));
+                if (item != null) HackTerminal.Consume(item);
             });
 
             Net.On(Msg.HackPull, (sender, data) =>
@@ -1182,20 +1360,29 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// Host: a plugged-in terminal still there a few seconds after its holder's game was told to destroy it is destroyed
-        /// with the game's own call (which has its owner's game remove it for everyone).
+        /// Host: a used terminal that is gone leaves the list. One still there when its time is up (its holder's game was
+        /// told to destroy it) is destroyed with the game's own call, which has its owner's game remove it for everyone, and
+        /// again every few seconds while it is still there. True when the list changed.
         /// </summary>
-        private static void RemovePluggedTerminals()
+        private static bool RemoveUsedTerminals()
         {
-            for (int i = PluggedTerminals.Count - 1; i >= 0; i--)
+            bool changed = false;
+            for (int i = UsedTerminals.Count - 1; i >= 0; i--)
             {
-                Plugged plugged = PluggedTerminals[i];
-                if (plugged.Terminal != null && Time.unscaledTime < plugged.CheckAt) continue;
-                PluggedTerminals.RemoveAt(i);
-                if (plugged.Terminal == null) continue;
-                HackTerminal.Destroy(plugged.Terminal);
+                CarryableObject terminal = HackTerminal.Find(UsedTerminals[i]);
+                if (terminal == null)
+                {
+                    UsedTerminals.RemoveAt(i);
+                    UsedRemoveAt.RemoveAt(i);
+                    changed = true;
+                    continue;
+                }
+                if (Time.unscaledTime < UsedRemoveAt[i]) continue;
+                UsedRemoveAt[i] = Time.unscaledTime + RemoveSeconds;
+                HackTerminal.Destroy(terminal);
                 Log.Info("PvP: a plugged-in hacking terminal was still there after " + RemoveSeconds + " s; the host removed it.");
             }
+            return changed;
         }
 
         private static string NameOf(int actor)
@@ -1204,17 +1391,33 @@ namespace VoidCrewFleet
             return player != null && !string.IsNullOrEmpty(player.NickName) ? player.NickName : "A player";
         }
 
-        /// <summary>Host, a few times a second: hacks finish, and door access runs out.</summary>
+        /// <summary>Host, a few times a second: used terminals are made sure of, hacks finish, and door access runs out.</summary>
         public static void Tick()
         {
             if (!PhotonNetwork.IsMasterClient || !Active) return;
             try
             {
-                RemovePluggedTerminals();
                 ReadRoom();
-                if (Entries.Count == 0) return;
-                bool changed = false;
-                foreach (Entry entry in new List<Entry>(Entries.Values))
+                bool changed = RemoveUsedTerminals();
+                if (Entries.Count > 0) changed |= RunHacks();
+                if (changed) WriteRoom();
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Running hacks", e);
+            }
+        }
+
+        /// <summary>Host: hacks that are done give door access, door access that is over ends. True when a hack changed.</summary>
+        private static bool RunHacks()
+        {
+            bool changed = false;
+            // A copy to work through (the hacks change on the way), in a list kept for it: no garbage a few times a second.
+            TickEntries.Clear();
+            foreach (Entry entry in Entries.Values) TickEntries.Add(entry);
+            try
+            {
+                foreach (Entry entry in TickEntries)
                 {
                     PlayerControlledShip ship = ShipOfView(entry.Ship);
                     if (ship == null || AirlockAt(entry.Ship, entry.Index) == null)
@@ -1239,12 +1442,12 @@ namespace VoidCrewFleet
                     }
                     changed = true;
                 }
-                if (changed) WriteRoom();
             }
-            catch (Exception e)
+            finally
             {
-                Log.Failure("Running hacks", e);
+                TickEntries.Clear();
             }
+            return changed;
         }
 
         // ---------------------------------------------------------------- self-test

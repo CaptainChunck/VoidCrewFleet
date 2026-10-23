@@ -10,9 +10,13 @@ namespace VoidCrewFleet
     /// client can't fake it) and calls the RPC method before it returns. That call is watched here: while it runs, the
     /// sender and the network object the RPC is for are known. It is patched only once the game has loaded: patching
     /// PhotonNetwork at start-up set Photon up before the game did, and its connection then never got past the name server.
+    /// It is a feature of its own, used by several others, so one of them being switched off doesn't take it from the rest.
+    /// (Its patches go in after the start-up report, so the report doesn't list it; a patch that is missing logs a warning.)
     /// </summary>
     internal static class RpcSender
     {
+        public const string Feature = "RPC senders";
+
         /// <summary>The RPC event's key for the target's view ID (PUN's own key: the byte 0).</summary>
         private static readonly object ViewKey = (byte)0;
 
@@ -25,7 +29,7 @@ namespace VoidCrewFleet
         private static Running _current;
 
         /// <summary>An RPC starts: remember its sender and view (an RPC run inside another one restores the outer one after).</summary>
-        [GamePatch(PvpBoarding.Feature, "Photon.Pun.PhotonNetwork", "ExecuteRpc", PatchKind.Prefix, Optional = true, AfterGameLoad = true)]
+        [GamePatch(Feature, "Photon.Pun.PhotonNetwork", "ExecuteRpc", PatchKind.Prefix, Optional = true, AfterGameLoad = true)]
         private static void ExecutePrefix(Hashtable rpcData, Photon.Realtime.Player sender, out Running __state)
         {
             __state = _current;
@@ -34,7 +38,7 @@ namespace VoidCrewFleet
             _current = new Running { Sender = sender, View = view is int ? (int)view : 0 };
         }
 
-        [GamePatch(PvpBoarding.Feature, "Photon.Pun.PhotonNetwork", "ExecuteRpc", PatchKind.Finalizer, Optional = true, AfterGameLoad = true)]
+        [GamePatch(Feature, "Photon.Pun.PhotonNetwork", "ExecuteRpc", PatchKind.Finalizer, Optional = true, AfterGameLoad = true)]
         private static void ExecuteFinalizer(Running __state)
         {
             _current = __state;

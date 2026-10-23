@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using CG.GameLoopStateMachine;
 using UnityEngine;
 
@@ -13,9 +14,18 @@ namespace VoidCrewFleet
     {
         private const float PollSeconds = 0.25f;
 
-        private static readonly HandlerList FrameHandlers = new HandlerList();
-        private static readonly HandlerList SlowHandlers = new HandlerList();
-        private static readonly HandlerList LateHandlers = new HandlerList();
+        /// <summary>
+        /// A handler that fails this many times in a row, over at least <see cref="DropAfterSeconds"/>, is switched off for
+        /// the rest of the session: it would only throw again every time. The time keeps a few bad frames while a scene
+        /// changes from switching off per-frame work, which runs many times a second.
+        /// </summary>
+        private const int DropAfterFailures = 30;
+
+        private const float DropAfterSeconds = 10f;
+
+        private static readonly HandlerList FrameHandlers = new HandlerList("per-frame");
+        private static readonly HandlerList SlowHandlers = new HandlerList("periodic");
+        private static readonly HandlerList LateHandlers = new HandlerList("late");
 
         /// <summary>When the current round of slow work began, and the next of its handlers to run.</summary>
         private float _roundStart;
@@ -27,7 +37,9 @@ namespace VoidCrewFleet
         /// <summary>True once the game is past its loading screen; until then the plugin's own work waits.</summary>
         public static bool GameReady { get; private set; }
 
-        /// <summary>Per-frame work registered by features (each is guarded separately).</summary>
+        /// <summary>
+        /// Per-frame work registered by features (each is guarded separately, and one that keeps failing is switched off).
+        /// </summary>
         public static event Action Frame;
 
         /// <summary>
@@ -50,17 +62,20 @@ namespace VoidCrewFleet
             {
                 if (!CheckReady()) return;
                 GameReady = true;
-                Patcher.ApplyLater();
+                // Each on its own: the fleet's messages must still be heard if a late patch or the profiler fails.
+                Plugin.Step("Applying the patches that wait for the game to load", Patcher.ApplyLater);
+                Plugin.Step("Starting the profiler", () => FleetProfiler.Install(Patcher.Instance));
                 Net.StartListening();
                 Log.Info("The game has loaded; Void Crew Fleet is active.");
             }
-            Run(FrameHandlers.Of(Frame), "per-frame");
+            FleetProfiler.Frame();
+            FrameHandlers.RunAll(Frame);
             RunSlow();
         }
 
         private void LateUpdate()
         {
-            if (GameReady) Run(LateHandlers.Of(Late), "late");
+            if (GameReady) LateHandlers.RunAll(Late);
         }
 
         /// <summary>
@@ -89,63 +104,117 @@ namespace VoidCrewFleet
         /// </summary>
         private void RunSlow()
         {
-            Action[] handlers = SlowHandlers.Of(Slow);
-            if (handlers.Length == 0) return;
+            int count = SlowHandlers.Read(Slow);
+            if (count == 0) return;
             float now = Time.unscaledTime;
-            if (_nextSlow >= handlers.Length)
+            if (_nextSlow >= count)
             {
                 float due = _roundStart + PollSeconds;
                 if (now < due) return;
                 _roundStart = now - due < PollSeconds ? due : now;
                 _nextSlow = 0;
             }
-            float share = PollSeconds / handlers.Length;
-            while (_nextSlow < handlers.Length && now >= _roundStart + _nextSlow * share)
-            {
-                Action handler = handlers[_nextSlow++];
-                Run(handler, "periodic");
-            }
-        }
-
-        /// <summary>Runs each handler on its own, so one failing doesn't stop the rest.</summary>
-        private static void Run(Action[] handlers, string what)
-        {
-            foreach (Action handler in handlers) Run(handler, what);
-        }
-
-        private static void Run(Action handler, string what)
-        {
-            try
-            {
-                handler();
-            }
-            catch (Exception e)
-            {
-                Log.Failure("Running " + what + " work (" + handler.Method.DeclaringType.Name + "." + handler.Method.Name + ")", e);
-            }
+            float share = PollSeconds / count;
+            while (_nextSlow < count && now >= _roundStart + _nextSlow * share) SlowHandlers.Run(_nextSlow++);
         }
 
         /// <summary>
-        /// An event's handlers, read again only when its subscriptions changed: subscribing makes a new delegate, so the same
-        /// delegate always has the same handlers.
+        /// An event's handlers, read again only when its subscriptions changed (subscribing makes a new delegate, so the same
+        /// delegate always has the same handlers), and how each has been doing. Each runs on its own, so one failing doesn't
+        /// stop the rest; one that keeps failing is switched off and logged once, and stays off even if the event's
+        /// subscriptions change later.
         /// </summary>
         private sealed class HandlerList
         {
+            /// <summary>A handler's failure count once it is switched off.</summary>
+            private const int Off = -1;
+
             private static readonly Action[] None = new Action[0];
+
+            /// <summary>What the handlers are, for the log: "per-frame", "periodic" or "late".</summary>
+            private readonly string _what;
+
+            private readonly List<Action> _switchedOff = new List<Action>();
 
             private Action _source;
             private Action[] _handlers = None;
 
-            public Action[] Of(Action work)
+            /// <summary>Per handler: its name, its failure log entry, its failures in a row (Off once switched off), and when they began.</summary>
+            private string[] _names = new string[0];
+            private string[] _operations = new string[0];
+            private int[] _failures = new int[0];
+            private float[] _failingSince = new float[0];
+
+            public HandlerList(string what)
             {
-                if (work == null) return None;
-                if (ReferenceEquals(work, _source)) return _handlers;
-                Delegate[] list = work.GetInvocationList();
-                var handlers = new Action[list.Length];
-                for (int i = 0; i < list.Length; i++) handlers[i] = (Action)list[i];
+                _what = what;
+            }
+
+            /// <summary>Brings the list up to date with the event's subscriptions; returns how many handlers it has.</summary>
+            public int Read(Action work)
+            {
+                if (ReferenceEquals(work, _source)) return _handlers.Length;
                 _source = work;
-                _handlers = handlers;
-                return handlers;
+                var handlers = new List<Action>();
+                if (work != null)
+                {
+                    foreach (Delegate entry in work.GetInvocationList())
+                    {
+                        var handler = (Action)entry;
+                        if (!_switchedOff.Contains(handler)) handlers.Add(handler);
+                    }
+                }
+                _handlers = handlers.ToArray();
+                _names = new string[_handlers.Length];
+                _operations = new string[_handlers.Length];
+                _failures = new int[_handlers.Length];
+                _failingSince = new float[_handlers.Length];
+                for (int i = 0; i < _handlers.Length; i++)
+                {
+                    _names[i] = _handlers[i].Method.DeclaringType.Name + "." + _handlers[i].Method.Name;
+                    _operations[i] = "Running " + _what + " work (" + _names[i] + ")";
+                }
+                return _handlers.Length;
+            }
+
+            /// <summary>Runs every handler of the event, each on its own.</summary>
+            public void RunAll(Action work)
+            {
+                int count = Read(work);
+                for (int i = 0; i < count; i++) Run(i);
+            }
+
+            /// <summary>Runs one handler (by its place in the list as last read), unless it has been switched off.</summary>
+            public void Run(int index)
+            {
+                if (_failures[index] == Off) return;
+                Action handler = _handlers[index];
+                try
+                {
+                    if (FleetProfiler.On) FleetProfiler.Measure(handler);
+                    else handler();
+                    _failures[index] = 0;
+                }
+                catch (Exception e)
+                {
+                    Failed(index, e);
+                }
+            }
+
+            /// <summary>A handler failed: logged (Log.Failure keeps repeats short), and switched off once it keeps failing.</summary>
+            private void Failed(int index, Exception e)
+            {
+                Log.Failure(_operations[index], e);
+                float now = Time.unscaledTime;
+                if (_failures[index]++ == 0) _failingSince[index] = now;
+                int failures = _failures[index];
+                float seconds = now - _failingSince[index];
+                if (failures < DropAfterFailures || seconds < DropAfterSeconds) return;
+                _failures[index] = Off;
+                _switchedOff.Add(_handlers[index]);
+                Log.Error(_names[index] + " (" + _what + " work) has failed " + failures + " times in a row, for " + seconds.ToString("0") +
+                          " s, so it is switched off for the rest of the session; the rest of the plugin keeps running. " +
+                          "Please send BepInEx\\LogOutput.log with a bug report.");
             }
         }
     }

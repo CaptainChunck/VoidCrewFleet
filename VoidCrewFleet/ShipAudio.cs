@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using CG.Client.Audio;
 using CG.Client.Quests.SectorTwists;
 using CG.Game.Player;
@@ -22,8 +21,8 @@ namespace VoidCrewFleet
     /// while doing so; many of those events, and many sound and effect listeners, react to events that don't say which
     /// ship they come from. With two ships:
     /// - each copy of the status events belongs to the ship it was set up for, and speaks only when that ship is the one
-    ///   the local player belongs to (co-op: aboard, else crew; PvP: their team's), and only for that ship's own events;
-    ///   a lost ship's copies go with it;
+    ///   the local player belongs to (co-op: aboard, else crew; PvP: their team's), and only for that ship's own events
+    ///   (the other ships' copies return at once); a lost ship's copies go with it;
     /// - a picked-up or dropped item speaks on the ship its carrier is aboard (else the item's ship, else the carrier's
     ///   crew's);
     /// - a ship's alarms, engine parts, diodes, lights and storm sounds react only to their own ship;
@@ -35,8 +34,12 @@ namespace VoidCrewFleet
     {
         public const string Feature = "Ship voice and sounds per ship";
 
-        private static readonly ConditionalWeakTable<AbstractShipStatusEvent, PlayerControlledShip> EventShip =
-            new ConditionalWeakTable<AbstractShipStatusEvent, PlayerControlledShip>();
+        /// <summary>
+        /// The ship each copy of a status event belongs to, by the copy's instance ID (the copies are the game's own
+        /// ScriptableObjects; an ID stays readable once one is destroyed). An entry goes when its lost ship's copies are
+        /// removed, or, once its ship is gone, when the next ship's copies are set up (the next mission's at the latest).
+        /// </summary>
+        private static readonly Dictionary<int, PlayerControlledShip> EventShip = new Dictionary<int, PlayerControlledShip>();
 
         private static readonly List<PlayerControlledShip> StartingShips = new List<PlayerControlledShip>();
         private static readonly List<int> SetupCounts = new List<int>();
@@ -60,6 +63,28 @@ namespace VoidCrewFleet
 
         private static int _viewFrame = -1;
         private static PlayerControlledShip _viewShip;
+
+        /// <summary>The thing ShipOf was last asked about this frame, and its answer (see ShipOfThisFrame).</summary>
+        private static int _thingFrame = -1;
+        private static object _thing;
+        private static PlayerControlledShip _thingShip;
+
+        /// <summary>The item pick-up or drop CarrierShip was last asked about this frame, and its answer.</summary>
+        private static int _carryFrame = -1;
+        private static ICarrier _carrier;
+        private static CarryableObject _carried;
+        private static PlayerControlledShip _carryShip;
+
+        /// <summary>What a ship's storm ambience last set its sound groups to (CalamityPrefix), by the controller's instance ID.</summary>
+        private sealed class StormSounds
+        {
+            public PlayerControlledShip Own;
+            public bool Set;
+            public SectorTwist Twist;
+            public bool Mine;
+        }
+
+        private static readonly Dictionary<int, StormSounds> Storms = new Dictionary<int, StormSounds>();
 
         private static PlayerControlledShip StartingShip
         {
@@ -120,6 +145,20 @@ namespace VoidCrewFleet
             return component != null ? FleetShips.OwnerOf(component) : null;
         }
 
+        /// <summary>
+        /// ShipOf, remembered for the thing last asked about this frame: every ship's copy of a status event asks about the
+        /// same thing in turn (a death runs every ship's lifeform events).
+        /// </summary>
+        private static PlayerControlledShip ShipOfThisFrame(object thing)
+        {
+            int frame = Time.frameCount;
+            if (frame == _thingFrame && ReferenceEquals(thing, _thing)) return _thingShip;
+            _thingShip = ShipOf(thing);
+            _thing = thing;
+            _thingFrame = frame;
+            return _thingShip;
+        }
+
         // ---------------------------------------------------------------- one set of voice-line events per ship
 
         [GamePatch(Feature, "CG.Space.PlayerControlledShip", "Start", PatchKind.Prefix)]
@@ -169,8 +208,7 @@ namespace VoidCrewFleet
                 {
                     AbstractShipStatusEvent statusEvent = ___activeEvents[i];
                     if (statusEvent == null) continue;
-                    EventShip.Remove(statusEvent);
-                    EventShip.Add(statusEvent, ship);
+                    EventShip[statusEvent.GetInstanceID()] = ship;
                     copies.Events.Add(statusEvent);
                 }
             }
@@ -180,7 +218,10 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>Lists of the copies of a mission that is over (the controller went with it, and the events too).</summary>
+        /// <summary>
+        /// The copies of a mission that is over (the controller went with it, and the events too), and the copies tied to
+        /// ships that are gone.
+        /// </summary>
         private static void ForgetGoneCopies()
         {
             List<int> gone = null;
@@ -190,8 +231,31 @@ namespace VoidCrewFleet
                 if (gone == null) gone = new List<int>();
                 gone.Add(entry.Key);
             }
+            if (gone != null)
+            {
+                foreach (int ship in gone)
+                {
+                    ForgetEvents(CopiesByShip[ship]);
+                    CopiesByShip.Remove(ship);
+                }
+                gone.Clear();
+            }
+            foreach (KeyValuePair<int, PlayerControlledShip> entry in EventShip)
+            {
+                if (entry.Value != null) continue;
+                if (gone == null) gone = new List<int>();
+                gone.Add(entry.Key);
+            }
             if (gone == null) return;
-            foreach (int ship in gone) CopiesByShip.Remove(ship);
+            foreach (int statusEvent in gone) EventShip.Remove(statusEvent);
+        }
+
+        private static void ForgetEvents(EventCopies copies)
+        {
+            foreach (AbstractShipStatusEvent statusEvent in copies.Events)
+            {
+                if ((object)statusEvent != null) EventShip.Remove(statusEvent.GetInstanceID());
+            }
         }
 
         /// <summary>
@@ -206,6 +270,7 @@ namespace VoidCrewFleet
             EventCopies copies;
             if (__instance == null || !CopiesByShip.TryGetValue(__instance.GetInstanceID(), out copies)) return;
             CopiesByShip.Remove(__instance.GetInstanceID());
+            // Otherwise the copies stay tied to the lost ship, which keeps them silent until the game removes them.
             if (copies.Controller == null || DestroyEvent == null || !AnotherShipLeft(__instance)) return;
             int removed = 0;
             try
@@ -222,6 +287,7 @@ namespace VoidCrewFleet
             {
                 Log.Failure("Removing a lost ship's voice-line events", e);
             }
+            ForgetEvents(copies);
             Log.Verbose(removed + " voice-line events of " + FleetShips.Describe(__instance) + " went with it.");
         }
 
@@ -234,20 +300,25 @@ namespace VoidCrewFleet
             return false;
         }
 
-        /// <summary>Whether a status event may speak: its own ship's events only, and only to that ship's players.</summary>
+        /// <summary>
+        /// Whether a status event may speak: its own ship's events only, and only to that ship's players. The copies of
+        /// another ship than the event's own return at once.
+        /// </summary>
         private static bool StatusEventAllowed(AbstractShipStatusEvent statusEvent, PlayerControlledShip source)
         {
             PlayerControlledShip own;
-            if (statusEvent == null || !EventShip.TryGetValue(statusEvent, out own)) return !ShipEvents.ForeignToLocal(source);
-            if ((object)own != null && own == null) return false;
-            if (source != null && source != own) return false;
+            if ((object)statusEvent == null || !EventShip.TryGetValue(statusEvent.GetInstanceID(), out own)) return !ShipEvents.ForeignToLocal(source);
+            if (source != null && !ReferenceEquals(source, own)) return false;
+            // A lost ship's copies stay silent.
+            if (own == null) return false;
             return !ShipEvents.ForeignToLocal(own);
         }
 
+        /// <summary>The live ship a copy of a status event belongs to, or null.</summary>
         private static PlayerControlledShip EventShipOf(AbstractShipStatusEvent statusEvent)
         {
             PlayerControlledShip own;
-            return statusEvent != null && EventShip.TryGetValue(statusEvent, out own) && own != null ? own : null;
+            return (object)statusEvent != null && EventShip.TryGetValue(statusEvent.GetInstanceID(), out own) && own != null ? own : null;
         }
 
         /// <summary>Every voice line and log line goes through here.</summary>
@@ -321,7 +392,16 @@ namespace VoidCrewFleet
             try
             {
                 if (!FleetShips.Active) return true;
-                return StatusEventAllowed(__instance, CarrierShip(carrier, carryable));
+                // Every ship's copy of the event asks in turn: worked out once.
+                int frame = Time.frameCount;
+                if (frame != _carryFrame || !ReferenceEquals(carrier, _carrier) || !ReferenceEquals(carryable, _carried))
+                {
+                    _carryShip = CarrierShip(carrier, carryable);
+                    _carrier = carrier;
+                    _carried = carryable;
+                    _carryFrame = frame;
+                }
+                return StatusEventAllowed(__instance, _carryShip);
             }
             catch (Exception e)
             {
@@ -392,7 +472,7 @@ namespace VoidCrewFleet
             try
             {
                 if (!FleetShips.Active) return true;
-                return StatusEventAllowed(statusEvent, ShipOf(thing));
+                return StatusEventAllowed(statusEvent, ShipOfThisFrame(thing));
             }
             catch (Exception e)
             {
@@ -403,24 +483,61 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- status events that read "the player ship" when they fire
 
+        /// <summary>
+        /// A ship's hull warnings react to that ship's hit points only. Every hit point change of anything reaches every
+        /// ship's copies of these events: those of the other ships, and all of them for anything but a player ship, return at
+        /// once (the game's handler does nothing either then); the ship's own copy compares against its own ship.
+        /// </summary>
         [GamePatch(Feature, "CG.Ship.Status.ShipHullEvent", "OnHitpointsChanged", PatchKind.Prefix)]
+        private static bool HullPrefix(AbstractShipStatusEvent __instance, IDamageable affectedObject, out bool __state)
+        {
+            __state = false;
+            try
+            {
+                if (!FleetShips.Active) return true;
+                var ship = affectedObject as PlayerControlledShip;
+                if (ship == null) return false;
+                PlayerControlledShip own;
+                if ((object)__instance == null || !EventShip.TryGetValue(__instance.GetInstanceID(), out own))
+                {
+                    // A copy tied to no ship: the game's own comparison, with "the player ship" this screen's.
+                    ShipRedirect.BeginOverride(null);
+                    __state = true;
+                    return true;
+                }
+                if (!ReferenceEquals(own, ship) || own == null) return false;
+                ShipRedirect.BeginOverride(own);
+                __state = true;
+                return true;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking whose hull a voice line is about", e);
+                return true;
+            }
+        }
+
         [GamePatch(Feature, "CG.Ship.Status.PowerBreakerEvent", "BreakerFlipDown", PatchKind.Prefix)]
         [GamePatch(Feature, "CG.Ship.Status.PowerBreakerEvent", "OnPowerDrainChanged", PatchKind.Prefix)]
         [GamePatch(Feature, "CG.Ship.Status.PowerBreakerEvent", "SystemForcedShutdown", PatchKind.Prefix)]
         [GamePatch(Feature, "CG.Ship.Status.PowerBreakerEvent", "OnDisable", PatchKind.Prefix)]
-        private static void OwnShipPrefix(AbstractShipStatusEvent __instance)
+        private static void OwnShipPrefix(AbstractShipStatusEvent __instance, out bool __state)
         {
-            ShipRedirect.BeginOverride(FleetShips.Active ? EventShipOf(__instance) : null);
+            __state = false;
+            if (!FleetShips.Active) return;
+            ShipRedirect.BeginOverride(EventShipOf(__instance));
+            __state = true;
         }
 
+        /// <summary>Ends the "player ship" a prefix above set, only when it set one.</summary>
         [GamePatch(Feature, "CG.Ship.Status.ShipHullEvent", "OnHitpointsChanged", PatchKind.Finalizer)]
         [GamePatch(Feature, "CG.Ship.Status.PowerBreakerEvent", "BreakerFlipDown", PatchKind.Finalizer)]
         [GamePatch(Feature, "CG.Ship.Status.PowerBreakerEvent", "OnPowerDrainChanged", PatchKind.Finalizer)]
         [GamePatch(Feature, "CG.Ship.Status.PowerBreakerEvent", "SystemForcedShutdown", PatchKind.Finalizer)]
         [GamePatch(Feature, "CG.Ship.Status.PowerBreakerEvent", "OnDisable", PatchKind.Finalizer)]
-        private static void OwnShipFinalizer()
+        private static void OwnShipFinalizer(bool __state)
         {
-            ShipRedirect.EndOverride();
+            if (__state) ShipRedirect.EndOverride();
         }
 
         // ---------------------------------------------------------------- a ship's own listeners react to their own ship only
@@ -531,21 +648,35 @@ namespace VoidCrewFleet
             try
             {
                 // Every frame for every ship: the game's fields are read through direct readers, the local player's ship
-                // once a frame.
+                // once a frame, and the sound groups are only set again when the storm or the player's ship changed.
                 if (!FleetShips.Active || ___ConfigsPerSectorTwist == null || ActiveTwist == null || TimeChanged == null) return true;
-                PlayerControlledShip own = FleetShips.OwnerOf(__instance);
-                if (own == null) return true;
+                StormSounds sounds;
+                int id = __instance.GetInstanceID();
+                if (!Storms.TryGetValue(id, out sounds))
+                {
+                    PlayerControlledShip owner = FleetShips.OwnerOf(__instance);
+                    if (owner == null) return true;
+                    // Those of missions that are over.
+                    if (Storms.Count >= 32) Storms.Clear();
+                    sounds = new StormSounds { Own = owner };
+                    Storms[id] = sounds;
+                }
+                PlayerControlledShip own = sounds.Own;
                 SectorTwist twist = ActiveTwist();
-                if (twist == null && Time.time - TimeChanged() < 2f) return false;
                 PlayerControlledShip view = ViewShipThisFrame;
-                bool mine = view == null || view == own;
+                bool mine = twist != null && (view == null || ReferenceEquals(view, own));
+                if (sounds.Set && ReferenceEquals(twist, sounds.Twist) && mine == sounds.Mine) return false;
+                if (twist == null && Time.time - TimeChanged() < 2f) return false;
                 foreach (CalamityAudioConfig config in ___ConfigsPerSectorTwist)
                 {
                     if (config == null) continue;
-                    bool on = mine && twist != null && config.SectorTwist != null && config.SectorTwist.AssetGuid == twist.ContainerGuid;
+                    bool on = mine && config.SectorTwist != null && config.SectorTwist.AssetGuid == twist.ContainerGuid;
                     SetActive(config.TransmitterGroups, on);
                     SetActive(config.ReceiverGroups, on);
                 }
+                sounds.Set = true;
+                sounds.Twist = twist;
+                sounds.Mine = mine;
                 return false;
             }
             catch (Exception e)

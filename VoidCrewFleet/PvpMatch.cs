@@ -14,10 +14,13 @@ namespace VoidCrewFleet
 {
     /// <summary>
     /// How a PvP match ends: a team that has lost all its ships loses the match, and the other team wins. While a team still
-    /// has ships, losing one only sends its crew to watch (ShipDeath). The host ends the game a few seconds after the last
+    /// has ships, losing one only sends its crew to watch (ShipDeath). A team that has lost all its players forfeits after
+    /// 30 seconds. The host decides the match and tells everyone (Msg.MatchResult): players can see the last ships of both
+    /// teams start dying in a different order, so the winner they are told and their end screen always follow the host. A
+    /// room property keeps a copy for players who join later, and for a player who takes over as host while the match ends
+    /// (only when it checks out: any player can write a room property). The host ends the game a few seconds after the last
     /// ship starts to explode, and each player's end screen says Victory or Defeat for their own team (the game sends one
-    /// result for everyone; a player who was never on a team gets Defeat). A team that has lost all its players forfeits
-    /// after 30 seconds.
+    /// result for everyone; a player who was never on a team gets Defeat).
     /// </summary>
     internal static class PvpMatch
     {
@@ -28,8 +31,35 @@ namespace VoidCrewFleet
         private const float ForfeitSeconds = 30f;
 
         private static object _session;
+
+        /// <summary>
+        /// The losing team once the match is decided, else -1: on the host its own decision, on every other player the host's
+        /// (Msg.MatchResult).
+        /// </summary>
         private static int _loserTeam = -1;
+
+        /// <summary>Whether that team lost by forfeit (all its players left) rather than by losing its ships.</summary>
+        private static bool _forfeit;
+
+        /// <summary>
+        /// The first team this player saw lose its last ship while not the host (-1 for none): a player who takes over as host
+        /// before the last host's decision reached them decides from it.
+        /// </summary>
+        private static int _seenLoser = -1;
+
+        /// <summary>The losing team of the result this player has announced (-1 for none), so each result is announced once.</summary>
+        private static int _shownLoser = -1;
+
         private static bool _ending;
+
+        /// <summary>
+        /// Whether this player was host at the last tick, and whether it has been a guest at any time this match: together,
+        /// whether it has just taken over as host (TakeOver).
+        /// </summary>
+        private static bool _hosting;
+
+        private static bool _wasGuest;
+
         private static readonly bool[] TeamHadPlayers = new bool[2];
         private static readonly int[] Presence = new int[2];
         private static int _emptyTeam = -1;
@@ -38,36 +68,54 @@ namespace VoidCrewFleet
         public static void Listen()
         {
             ShipDeath.ShipLost += OnShipLost;
+            Net.On(Msg.MatchResult, OnResult);
         }
 
-        /// <summary>The losing team: from the host's room property, else from the ships this client saw explode.</summary>
+        /// <summary>
+        /// The losing team as this player knows it (-1 until decided): on the host its own decision; on every other player
+        /// the host's message, else (a player who joined after it was sent) the room's copy.
+        /// </summary>
         public static int LoserTeam
         {
             get
             {
-                object value;
-                if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null && PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeyLoser, out value) && value is int)
-                    return (int)value;
-                return _loserTeam;
+                SyncSession();
+                if (_loserTeam >= 0 || PhotonNetwork.IsMasterClient) return _loserTeam;
+                return RoomLoser();
             }
         }
 
         /// <summary>
+        /// The losing team in the room's copy of the result, or -1. Any player can write a room property, so it only stands
+        /// in for the host's word on the end screen of a player who joined after the host sent it, and for a player who takes
+        /// over as host while the match ends, once it checks out (TakeOver).
+        /// </summary>
+        private static int RoomLoser()
+        {
+            Photon.Realtime.Room room = PhotonNetwork.InRoom ? PhotonNetwork.CurrentRoom : null;
+            object value;
+            if (room == null || !room.CustomProperties.TryGetValue(KeyLoser, out value) || !(value is int)) return -1;
+            int team = (int)value;
+            return team == 0 || team == 1 ? team : -1;
+        }
+
+        /// <summary>
         /// A ship starts dying. A team with another living ship fights on; the first team to lose its last ship (or forfeit)
-        /// decides the match. The host announces every ship's death in turn, so every client sees the same order; a ship that
-        /// starts dying after the match is decided changes nothing.
+        /// loses the match. The host decides which team that is and tells the others (OnResult), who may have seen the last
+        /// ships of both teams start dying in another order. A ship that starts dying after the match is decided changes
+        /// nothing.
         /// </summary>
         private static void OnShipLost(PlayerControlledShip ship)
         {
             if (!FleetSession.IsPvP) return;
+            SyncSession();
             int slot = FleetShips.Slot(ship);
             if (slot < 0) return;
             int team = FleetShips.TeamOfSlot(slot);
-            int decided = LoserTeam;
-            if (decided >= 0)
+            if (_loserTeam >= 0)
             {
-                if (decided != team)
-                    Log.Info("PvP: " + FleetSlots.Name(slot, true) + " is destroyed too, after the match was decided; the " + PvpTeams.TeamName(1 - decided) +
+                if (_loserTeam != team)
+                    Log.Info("PvP: " + FleetSlots.Name(slot, true) + " is destroyed too, after the match was decided; the " + PvpTeams.TeamName(1 - _loserTeam) +
                              " team still wins.");
                 return;
             }
@@ -77,17 +125,47 @@ namespace VoidCrewFleet
                 Notice.Show(FleetSlots.Name(slot, true) + " is destroyed! The " + PvpTeams.TeamName(team) + " team fights on with " + left + (left == 1 ? " ship." : " ships."));
                 return;
             }
-            _loserTeam = team;
-            Notice.Show("The " + PvpTeams.TeamName(team) + " team has no ships left: the " + PvpTeams.TeamName(1 - team) + " team wins!");
-            if (PhotonNetwork.IsMasterClient) EndSoon(team, EndDelaySeconds);
+            if (PhotonNetwork.IsMasterClient)
+            {
+                EndSoon(team, false, EndDelaySeconds);
+                return;
+            }
+            // The host's decision follows in a moment (OnResult); a player who takes over as host before it arrives goes by this.
+            if (_seenLoser < 0) _seenLoser = team;
+            Log.Info("PvP: the " + PvpTeams.TeamName(team) + " team has no ships left here; the host announces the result.");
         }
 
-        /// <summary>Host: record the loser for everyone, then end the game once the explosion has played.</summary>
-        private static void EndSoon(int loser, float delay)
+        /// <summary>Every player but the host: the host has decided the match. Kept for the end screen, and announced once.</summary>
+        private static void OnResult(int sender, object[] data)
+        {
+            if (!Net.FromHost(sender) || !FleetSession.IsPvP) return;
+            int loser = Net.Get(data, 0, -1);
+            if (loser != 0 && loser != 1) return;
+            SyncSession();
+            _loserTeam = loser;
+            _forfeit = Net.Get(data, 1, false);
+            Announce(loser, _forfeit);
+        }
+
+        /// <summary>The result as a notice, once per result.</summary>
+        private static void Announce(int loser, bool forfeit)
+        {
+            if (_shownLoser == loser) return;
+            _shownLoser = loser;
+            Notice.Show("The " + PvpTeams.TeamName(loser) + (forfeit ? " team forfeits" : " team has no ships left") + ": the " + PvpTeams.TeamName(1 - loser) +
+                        " team wins!");
+        }
+
+        /// <summary>
+        /// Host: the match is decided. Everyone is told (a message, and the room's copy for players who join later or take over
+        /// as host), and the game ends once the explosion has played.
+        /// </summary>
+        private static void EndSoon(int loser, bool forfeit, float delay)
         {
             if (_ending || FleetRuntime.Instance == null) return;
             _ending = true;
             _loserTeam = loser;
+            _forfeit = forfeit;
             try
             {
                 PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyLoser, loser } });
@@ -96,6 +174,8 @@ namespace VoidCrewFleet
             {
                 Log.Failure("Recording the PvP result", e);
             }
+            Net.ToOthers(Msg.MatchResult, loser, forfeit);
+            Announce(loser, forfeit);
             FleetRuntime.Instance.StartCoroutine(EndAfter(delay));
         }
 
@@ -106,7 +186,7 @@ namespace VoidCrewFleet
             {
                 ClientGame game = ClientGame.Current;
                 if (game == null || !PhotonNetwork.IsMasterClient || !FleetSession.IsPvP || game.GameState == ClientGameState.Ended) yield break;
-                Log.Info("PvP: the match is over; the " + PvpTeams.TeamName(1 - LoserTeam) + " team won.");
+                Log.Info("PvP: the match is over; the " + PvpTeams.TeamName(1 - _loserTeam) + " team won.");
                 game.EndGame((byte)QuestResult.Victory);
             }
             catch (Exception e)
@@ -115,21 +195,35 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>A new match (session) forgets the last one: its result, who was host, and which teams had players.</summary>
+        private static void SyncSession()
+        {
+            object session = GameSessionManager.ActiveSession;
+            if (ReferenceEquals(session, _session)) return;
+            _session = session;
+            _loserTeam = -1;
+            _forfeit = false;
+            _seenLoser = -1;
+            _shownLoser = -1;
+            _ending = false;
+            _hosting = false;
+            _wasGuest = false;
+            TeamHadPlayers[0] = TeamHadPlayers[1] = false;
+            _emptyTeam = -1;
+        }
+
         /// <summary>
-        /// A few times a second: a new match forgets the last one; every client notes which teams have had players; the host
-        /// finishes a match a previous host had decided, and makes a team that has lost all its players forfeit.
+        /// A few times a second: every client notes which teams have had players; the host makes a team that has lost all its
+        /// players forfeit, and a player who takes over as host finishes the match the last host had decided.
         /// </summary>
         public static void Tick()
         {
-            object session = GameSessionManager.ActiveSession;
-            if (!ReferenceEquals(session, _session))
-            {
-                _session = session;
-                _loserTeam = -1;
-                _ending = false;
-                TeamHadPlayers[0] = TeamHadPlayers[1] = false;
-                _emptyTeam = -1;
-            }
+            SyncSession();
+            bool host = PhotonNetwork.IsMasterClient;
+            // Just taken over as host: the match may be ending on the last host's word (TakeOver, below).
+            bool tookOver = host && !_hosting && _wasGuest;
+            _hosting = host;
+            if (!host) _wasGuest = true;
             if (!FleetSession.IsPvP || !PvpTeams.Locked || GameSessionManager.InHub) return;
 
             // Every client keeps this, not only the host: when the host leaves, the player who takes over still knows that a
@@ -143,14 +237,15 @@ namespace VoidCrewFleet
                 else if (TeamHadPlayers[team]) empty = team;
             }
 
-            if (!PhotonNetwork.IsMasterClient) return;
+            if (!host) return;
             ClientGame game = ClientGame.Current;
             if (game == null || game.GameState == ClientGameState.Ended || _ending) return;
 
-            int decided = LoserTeam;
-            if (decided >= 0)
+            if (tookOver && _loserTeam < 0) TakeOver();
+            if (_loserTeam >= 0)
             {
-                EndSoon(decided, 3f);
+                // The last host's result (heard from it, or taken over): this host finishes the match.
+                EndSoon(_loserTeam, _forfeit, 3f);
                 return;
             }
 
@@ -168,8 +263,43 @@ namespace VoidCrewFleet
                 return;
             }
             if (Time.unscaledTime - _emptySince < ForfeitSeconds) return;
-            Notice.ShowAll("The " + PvpTeams.TeamName(empty) + " team forfeits: the " + PvpTeams.TeamName(1 - empty) + " team wins!");
-            EndSoon(empty, 3f);
+            EndSoon(empty, true, 3f);
+        }
+
+        /// <summary>
+        /// A player who has just taken over as host, without the last host's result: the room's copy of it when it checks out
+        /// (that team has no living ship, or it had players and has none now), else the team this player saw lose its last
+        /// ship. Nothing else ever takes the room's copy: any player can write it.
+        /// </summary>
+        private static void TakeOver()
+        {
+            int loser = RoomLoser();
+            bool forfeit;
+            if (loser >= 0 && HasLost(loser, out forfeit))
+            {
+                Log.Info("PvP: taking over as host while the match ends; the last host's result stands: the " + PvpTeams.TeamName(loser) + " team lost.");
+            }
+            else
+            {
+                if (loser >= 0) Log.Warn("PvP: the room says the " + PvpTeams.TeamName(loser) + " team lost, but it hasn't; the new host ignores it.");
+                loser = _seenLoser;
+                if (loser < 0 || !HasLost(loser, out forfeit)) return;
+                Log.Info("PvP: taking over as host; the " + PvpTeams.TeamName(loser) + " team has no ships left, so it loses.");
+            }
+            _loserTeam = loser;
+            _forfeit = forfeit;
+        }
+
+        /// <summary>
+        /// Whether a team has lost the match as this player sees it: it has no living ship (while this player has the
+        /// match's ships), or (a forfeit) it had players and has none now.
+        /// </summary>
+        private static bool HasLost(int team, out bool forfeit)
+        {
+            forfeit = false;
+            if (FleetShips.All.Count > 0 && FleetShips.AliveSlotsOfTeam(team).Count == 0) return true;
+            forfeit = TeamHadPlayers[team] && Presence[team] == 0;
+            return forfeit;
         }
 
         /// <summary>
@@ -201,14 +331,15 @@ namespace VoidCrewFleet
             return mine < 0 || mine == loser ? QuestResult.Defeat : QuestResult.Victory;
         }
 
-        /// <summary>The host's own end screen shows its own team's result.</summary>
+        /// <summary>The host's own end screen shows its own team's result (from its own decision, never the room's copy).</summary>
         [GamePatch(Feature, "CG.Game.ClientGame", "EndGame", PatchKind.Prefix)]
         private static void EndGamePrefix(ref byte playerQuestResult)
         {
             try
             {
+                if (!FleetSession.IsPvP) return;
                 int loser = LoserTeam;
-                if (FleetSession.IsPvP && loser >= 0) playerQuestResult = (byte)LocalResult(loser);
+                if (loser >= 0) playerQuestResult = (byte)LocalResult(loser);
             }
             catch (Exception e)
             {
@@ -216,7 +347,10 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>Every other player's end screen shows their own team's result, whatever result the host sent.</summary>
+        /// <summary>
+        /// Every other player's end screen shows their own team's result, whatever result the host sent: by the host's
+        /// decision (its message, or the room's copy for a player who joined after it).
+        /// </summary>
         [GamePatch(Feature, "CG.Game.ClientGame", "OnEvent", PatchKind.Prefix)]
         private static void GameEventPrefix(EventData photonEvent)
         {

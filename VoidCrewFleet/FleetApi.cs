@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Text;
 using Photon.Pun;
+using Photon.Realtime;
 using ResourceAssets;
 using UnityEngine;
 
@@ -23,9 +24,30 @@ namespace VoidCrewFleet
         private static readonly Color Blue = new Color(0.24f, 0.55f, 1f, 1f);
         private static readonly Color Red = new Color(1f, 0.33f, 0.27f, 1f);
 
+        /// <summary>The room property FleetShips keeps the crew list in (each player's team, ship and state).</summary>
+        private const string CrewKey = "VCF_Crew";
+
+        // What the change checks last saw. Each compares a few cheap inputs first, and builds and compares its signature
+        // only when one of them changed.
+
+        /// <summary>TeamsChanged: the team match, the teams' lock, the room's crew list (by reference), and the teams' signature.</summary>
+        private static bool _teamsRead;
+        private static bool _teamMatch;
+        private static bool _teamsLocked;
+        private static object _crew;
         private static string _signature;
-        private static string _rulesSignature;
+
+        /// <summary>ShipsChanged: in the hub, its fleet choices (HubFleet.Revision); in a mission, its plan; and the ships' signature.</summary>
+        private static bool _shipsRead;
+        private static bool _shipsInHub;
+        private static int _shipsRevision;
+        private static FleetPlan _shipsPlan;
         private static string _shipsSignature;
+
+        /// <summary>ShipRulesChanged: whether the rules apply, and the room's rules as it holds them.</summary>
+        private static bool _rulesRead;
+        private static bool _rulesActive;
+        private static string _rulesJson;
 
         /// <summary>
         /// Raised on every client when the room's ship count or any ship's forced type changes (checked a few times a second).
@@ -272,61 +294,114 @@ namespace VoidCrewFleet
         /// <summary>
         /// A few times a second: raise TeamsChanged, ShipsChanged and ShipRulesChanged when what they describe changed.
         /// TeamsChanged only looks at the team match, the teams' lock and, in a team match, each player's team: a player
-        /// moving between ships (or any co-op crew change) doesn't change who may edit which ship.
+        /// moving between ships (or any co-op crew change) doesn't change who may edit which ship. Nothing is built while
+        /// the inputs stay the same, which is nearly always.
         /// </summary>
         internal static void Tick()
+        {
+            CheckTeams();
+            CheckShips();
+            CheckRules();
+        }
+
+        /// <summary>
+        /// TeamsChanged. The crew list is the room's: the host publishes a new array for every change, so the same array is
+        /// the same crews. (On the host it arrives back a moment after FleetShips already uses it.)
+        /// </summary>
+        private static void CheckTeams()
         {
             string signature;
             try
             {
-                var text = new StringBuilder();
                 bool teamMatch = IsTeamMatch;
-                text.Append(teamMatch ? '1' : '0').Append(PvpTeams.Locked ? 'L' : '-');
-                if (teamMatch && PhotonNetwork.InRoom)
-                {
-                    foreach (CrewEntry entry in FleetShips.Crews().Values.OrderBy(e => e.Actor)) text.Append(entry.Actor).Append(':').Append(entry.Team).Append(',');
-                }
-                signature = text.ToString();
+                bool locked = PvpTeams.Locked;
+                object crew = teamMatch ? RoomCrew() : null;
+                if (_teamsRead && teamMatch == _teamMatch && locked == _teamsLocked && ReferenceEquals(crew, _crew)) return;
+                signature = TeamsSignature(teamMatch, locked);
+                _teamsRead = true;
+                _teamMatch = teamMatch;
+                _teamsLocked = locked;
+                _crew = crew;
             }
             catch
             {
                 return;
             }
-            if (signature != _signature)
-            {
-                _signature = signature;
-                Raise(TeamsChanged, "the teams changed");
-            }
+            if (signature == _signature) return;
+            _signature = signature;
+            Raise(TeamsChanged, "the teams changed");
+        }
 
+        /// <summary>The team match, the lock and, in a team match, each placed player's team, in actor order.</summary>
+        private static string TeamsSignature(bool teamMatch, bool locked)
+        {
+            var text = new StringBuilder();
+            text.Append(teamMatch ? '1' : '0').Append(locked ? 'L' : '-');
+            if (teamMatch && PhotonNetwork.InRoom)
+            {
+                foreach (CrewEntry entry in FleetShips.Crews().Values.OrderBy(e => e.Actor)) text.Append(entry.Actor).Append(':').Append(entry.Team).Append(',');
+            }
+            return text.ToString();
+        }
+
+        /// <summary>The crew list as the room holds it, or null.</summary>
+        private static object RoomCrew()
+        {
+            Room room = PhotonNetwork.InRoom ? PhotonNetwork.CurrentRoom : null;
+            object value;
+            return room != null && room.CustomProperties != null && room.CustomProperties.TryGetValue(CrewKey, out value) ? value : null;
+        }
+
+        /// <summary>
+        /// ShipsChanged. In the hub, the ship count and forced types come from the room's fleet choices, whose every change
+        /// raises HubFleet.Revision (HubFleet.Poll runs before this each round); in a mission, from its plan, fixed when it
+        /// starts.
+        /// </summary>
+        private static void CheckShips()
+        {
             string ships;
             try
             {
+                bool inHub = GameSessionManager.InHub;
+                int revision = HubFleet.Revision;
+                FleetPlan plan = inHub ? null : FleetSession.Current;
+                if (_shipsRead && inHub == _shipsInHub && (inHub ? revision == _shipsRevision : ReferenceEquals(plan, _shipsPlan))) return;
                 int count = ShipCount;
                 var text = new StringBuilder().Append(count);
                 for (int ship = 1; ship <= count; ship++) text.Append('|').Append(HullOfShip(ship).AsHex());
                 ships = text.ToString();
+                _shipsRead = true;
+                _shipsInHub = inHub;
+                _shipsRevision = revision;
+                _shipsPlan = plan;
             }
             catch
             {
                 return;
             }
-            if (ships != _shipsSignature)
-            {
-                _shipsSignature = ships;
-                Raise(ShipsChanged, "the ships changed");
-            }
+            if (ships == _shipsSignature) return;
+            _shipsSignature = ships;
+            Raise(ShipsChanged, "the ships changed");
+        }
 
-            string rules;
+        /// <summary>ShipRulesChanged. The rules are the room's own string, so unchanged rules are the same string (compared by reference first).</summary>
+        private static void CheckRules()
+        {
+            bool active;
+            string json;
             try
             {
-                rules = (ShipRulesActive ? "1" : "0") + ShipRules.CurrentJson;
+                active = ShipRulesActive;
+                json = ShipRules.CurrentJson;
             }
             catch
             {
                 return;
             }
-            if (rules == _rulesSignature) return;
-            _rulesSignature = rules;
+            if (_rulesRead && active == _rulesActive && json == _rulesJson) return;
+            _rulesRead = true;
+            _rulesActive = active;
+            _rulesJson = json;
             Raise(ShipRulesChanged, "the ship rules changed");
         }
 

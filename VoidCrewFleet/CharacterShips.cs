@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using CG.Game.Player;
 using CG.Space;
 using Gameplay.SpacePlatforms;
@@ -67,14 +68,14 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>Asked several hundred times a second: the zoned platform is compared with the ships' own (no component lookup).</summary>
         [GamePatch(Feature, "CG.Game.Player.LocalPlayer", "IsOnPlayerShip", PatchKind.Prefix)]
         private static bool OnPlayerShipPrefix(LocalPlayer __instance, ref bool __result)
         {
             if (!FleetShips.Active) return true;
             try
             {
-                PlayerControlledShip ship = __instance.ZonedPlatform != null ? __instance.ZonedPlatform.GetComponent<PlayerControlledShip>() : null;
-                __result = ship != null && !__instance.Locomotion.AtmosphereTracker.InInertiaZone;
+                __result = IsShipPlatform(__instance.ZonedPlatform) && !__instance.Locomotion.AtmosphereTracker.InInertiaZone;
                 return false;
             }
             catch (Exception e)
@@ -82,6 +83,19 @@ namespace VoidCrewFleet
                 Log.Failure("Checking whether the local player is aboard a ship", e);
                 return true;
             }
+        }
+
+        /// <summary>Whether a platform is a player ship's own (each ship's platform is on the ship's object).</summary>
+        private static bool IsShipPlatform(SpacePlatform platform)
+        {
+            if (platform == null) return false;
+            List<PlayerControlledShip> ships = FleetShips.All;
+            for (int i = 0; i < ships.Count; i++)
+            {
+                PlayerControlledShip ship = ships[i];
+                if (!ReferenceEquals(ship, null) && ReferenceEquals(ship.Platform, platform)) return true;
+            }
+            return false;
         }
     }
 }
