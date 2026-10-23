@@ -656,7 +656,7 @@ namespace VoidCrewFleet
         /// When the view opens: every ship's hidden parts as from open space, at once. The controllers only update on the
         /// local player's own moves, so a player who died aboard a ship would otherwise watch with that room's walls and plates.
         /// </summary>
-        private static void ShowShipsFromSpace()
+        internal static void ShowShipsFromSpace()
         {
             try
             {

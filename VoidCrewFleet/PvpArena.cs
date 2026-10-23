@@ -360,6 +360,56 @@ namespace VoidCrewFleet
             return false;
         }
 
+        // ---------------------------------------------------------------- the self-test's camera tour
+
+        /// <summary>A salvage spot on the self-test's camera tour.</summary>
+        internal sealed class TourSpot
+        {
+            public string Label;
+            public GUIDUnion Prefab;
+            public Vector3 Position;
+            public int Team;
+        }
+
+        /// <summary>
+        /// For the self-test's camera tour: the arena's name, centre and BLUE-to-RED axis, the supply drop's spot, and both
+        /// sides' salvage spots (into spots, BLUE's then RED's of each kind). Null when the match has no arena.
+        /// </summary>
+        internal static string TourArena(out Vector3 centre, out Vector3 axis, out Vector3 dropSpot, List<TourSpot> spots)
+        {
+            Preset preset = _current;
+            centre = preset != null ? preset.Centre : Vector3.zero;
+            axis = Quaternion.Euler(0f, preset != null ? preset.Yaw : 0f, 0f) * Vector3.forward;
+            dropSpot = preset != null ? preset.DropSpot : Vector3.zero;
+            if (preset == null) return null;
+            foreach (Poi poi in preset.Pois)
+            {
+                spots.Add(new TourSpot { Label = "BLUE " + SalvageName(poi.Prefab), Prefab = poi.Prefab, Position = poi.Position, Team = 0 });
+                spots.Add(new TourSpot { Label = "RED " + SalvageName(poi.Prefab), Prefab = poi.Prefab, Position = Mirror(preset, poi.Position), Team = 1 });
+            }
+            GameSessionSector sector = GameSessionManager.ActiveSector;
+            return preset.Id + " (" + preset.SolarSystem + ", sector " + (sector != null && sector.SectorAsset != null ? sector.SectorAsset.name : "?") + ")";
+        }
+
+        private static string SalvageName(GUIDUnion prefab)
+        {
+            if (prefab == SuppliesContainer) return "supplies container";
+            if (prefab == GenericContainer) return "container";
+            if (prefab == AmmoContainer) return "ammo container";
+            if (prefab == PipeWreck) return "wreck";
+            if (prefab == AsteroidBase) return "asteroid base";
+            if (prefab == VoidFish) return "VoidFish";
+            return prefab.AsHex();
+        }
+
+        /// <summary>Self-test, host: the next supply drop is due now (it arrives through a void jump a few seconds later).</summary>
+        internal static void DropNowForTest()
+        {
+            GameSession session = GameSessionManager.ActiveSession;
+            if (!PhotonNetwork.IsMasterClient || session == null || _current == null) return;
+            SetNextDrop(unchecked(PhotonNetwork.ServerTimestamp - 1), session.GameSessionID);
+        }
+
         /// <summary>For the self-test.</summary>
         public static string Describe()
         {

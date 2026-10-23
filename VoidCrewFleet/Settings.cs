@@ -28,6 +28,7 @@ namespace VoidCrewFleet
         public static ConfigEntry<bool> AutoTestRespawn;
         public static ConfigEntry<bool> AutoTestReturn;
         public static ConfigEntry<bool> AutoTestFists;
+        public static ConfigEntry<bool> AutoTestTour;
 
         public static void Bind(ConfigFile config)
         {
@@ -100,6 +101,9 @@ namespace VoidCrewFleet
                 "With AutoTest on: after destroying ships, the host uses RETURN TO HUB and the test waits to be back in the hub.");
             AutoTestFists = config.Bind("Diagnostics", "AutoTestFists", false,
                 "With AutoTest = PvP: the test player raises their fists and punches, with screenshots.");
+            AutoTestTour = config.Bind("Diagnostics", "AutoTestTour", false,
+                "With AutoTest = PvP: a free camera tours the arena (above it, behind each team, its centre, every ship, every salvage spot and a " +
+                "supply drop called in for the tour), with a screenshot at each and the game's screens hidden.");
         }
     }
 }
