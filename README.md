@@ -24,6 +24,9 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
   with no loadout chosen copies ship 1 (AS SHIP 1) when its type allows it, or else gets its type's standard loadout.
 - From the moment you have a ship in the lobby until the mission ends, **your ship** shows as one more row of the
   ship panel in the top left corner, in the HUD's own style: SHIP 2 with its type, or LOST once it is destroyed.
+- **The crew list** under the ship panel shows only **your own crew** (7 players at most), and under them a row for
+  each other ship with its type and crew, or LOST. Before you have a ship it shows the first 7 players. The escape
+  menu's player list has everyone, with mute and kick.
 - The ships start side by side, fly freely, and **void-jump together**:
   - the escape vector set on any ship's astral map counts for every ship;
   - each crew charges its own ship's void drive;
@@ -72,7 +75,8 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
      - Teams and crews stay even (an odd count allows one extra), and every ship needs a crew. The host can move
        players, auto-balance and confirms.
   2. Everyone on a team wears a **BLUE TEAM / RED TEAM** badge above their head, and sees their own team and ship
-     as a row of the ship panel in the top left corner (BLUE TEAM  BLUE 1, DESTROYER).
+     as a row of the ship panel in the top left corner (BLUE TEAM  BLUE 1, DESTROYER). The crew list under it shows
+     their own crew and a row for each other ship of their team, and nobody from the other team.
   3. At the loadout terminal the FLEET panel lists every ship in team colours. Only a ship's own team can change its
      loadout, Ship Customizer's CUSTOM included. A ship nobody set up starts with its type's standard loadout.
   4. The host starts the match by **sitting in a ready-room seat**, and everyone spawns aboard their ship.

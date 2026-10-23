@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.3
+**The crew list in big rooms.** The game's list of players under the ship panel has a row for every other player, so
+with more than about 10 players it ran off the screen.
+- With a ship (picked in the lobby, or in a mission), it lists only **your own crew**: 7 players at most.
+- Under them, a row for **each other ship on your side** (every other ship in co-op, your team's in Fleet Battle), in
+  the ship panel's style: its type and how many crew it has, or LOST.
+- In Fleet Battle it no longer lists the other team, whose health and whereabouts (at the helm, out in space, seated)
+  it gave away.
+- Before you have a ship (the hub before picking), it lists the first 7 players.
+- Everyone stays in the escape menu's player list, with mute, kick, block and report.
+
+Works with 0.4.2 in the same room (no network change).
+
 ## 0.4.2
 Fixes from a second full code review (of 0.4.1), and Fleet's own work per frame cut down. Everyone in a room needs
 0.4.2: the network protocol changed.
