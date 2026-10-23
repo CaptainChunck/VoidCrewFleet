@@ -310,19 +310,61 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- the Steam lobby
 
-        /// <summary>The Steam lobby behind invites and join-by-friend is created for 6; the owner raises it.</summary>
+        /// <summary>
+        /// The Steam lobby behind invites and join-by-friend is created for 6 (SteamMatchmakingHandler.CreateLobby), by the
+        /// first Steam player in the room; its creator raises it to the room's size (outside a room, to their own limit).
+        /// </summary>
         [GamePatch(Feature, "PlatformAbstractionLayer.Steam.SteamMatchmakingHandler", "OnLobbyCreatedInternal", PatchKind.Postfix, Optional = true)]
         private static void SteamLobbyCreatedPostfix(LobbyCreated_t param)
         {
             try
             {
                 if (param.m_eResult != EResult.k_EResultOK) return;
-                SteamMatchmaking.SetLobbyMemberLimit(new CSteamID(param.m_ulSteamIDLobby), Limit);
+                Room room = PhotonNetwork.InRoom ? PhotonNetwork.CurrentRoom : null;
+                RaiseSteamLobby(new CSteamID(param.m_ulSteamIDLobby), room != null ? room.MaxPlayers : Limit);
             }
             catch (Exception e)
             {
                 Log.Failure("Raising the Steam lobby's member limit", e);
             }
+        }
+
+        /// <summary>
+        /// The game tells the platform's lobby about every change of the room's properties, its size included
+        /// (PhotonService.OnRoomPropertiesUpdate), and Steam's handler does nothing with it: the lobby would keep the size it
+        /// was created with, even after a later host made the room bigger. Whoever owns the Steam lobby now (Steam hands it
+        /// on when its owner leaves) raises it to the room's size.
+        /// </summary>
+        [GamePatch(Feature, "PlatformAbstractionLayer.Steam.SteamMatchmakingHandler", "OnLobbyUpdated", PatchKind.Postfix, Optional = true)]
+        private static void SteamLobbyUpdatedPostfix(PlatformAbstractionLayer.IMatchmakingHandler __instance, int maxPlayers)
+        {
+            try
+            {
+                if (maxPlayers <= GameLimit || __instance == null) return;
+                ulong lobby;
+                // The handler's Steam lobby, or 0 outside one (then Steam isn't asked anything).
+                if (!ulong.TryParse(__instance.GetSessionID(), out lobby) || lobby == 0) return;
+                RaiseSteamLobby(new CSteamID(lobby), maxPlayers);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Raising the Steam lobby's member limit to the room's size", e);
+            }
+        }
+
+        /// <summary>
+        /// Raises a Steam lobby's member limit to a room size (never under the game's own 6) when this player owns the lobby
+        /// (only its owner can) and the limit is lower. It never lowers it: the room itself turns away players beyond its size.
+        /// Steam calls throw when Steam isn't running; the callers catch that.
+        /// </summary>
+        private static void RaiseSteamLobby(CSteamID lobby, int roomSize)
+        {
+            int size = Mathf.Max(GameLimit, roomSize);
+            if (lobby.m_SteamID == 0 || SteamMatchmaking.GetLobbyOwner(lobby) != SteamUser.GetSteamID()) return;
+            int limit = SteamMatchmaking.GetLobbyMemberLimit(lobby);
+            if (limit >= size) return;
+            if (SteamMatchmaking.SetLobbyMemberLimit(lobby, size)) Log.Info("The Steam lobby for invites and joining friends holds up to " + size + " players.");
+            else Log.WarnOnce("steam lobby limit", "Steam didn't let its lobby for invites grow from " + limit + " to " + size + " players; Steam invites may not work for everyone.");
         }
 
         /// <summary>

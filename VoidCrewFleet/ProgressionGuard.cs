@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using CG.Game;
 using ExitGames.Client.Photon;
 using Photon.Pun;
 using Photon.Realtime;
@@ -12,7 +14,10 @@ namespace VoidCrewFleet
     /// missions give no XP, rewards, quest progress, codex entries or achievements, from mission start until everyone is
     /// back in the hub. One-ship missions of up to six players are the game as it is and keep their progression. Everyone in
     /// such a room has this plugin (the session requires it), so everyone's progression is covered.
-    /// The host decides as the mission starts, and again whenever a player joins (a seventh player pauses it), and publishes
+    /// A player counts towards the six once they really play: once their character has spawned in this room, in the hub or
+    /// the mission. Someone the game sends back a moment after they enter (its missing-mods check, or the host's block list)
+    /// or who quits while loading never had one, so they can't pause anyone's mission.
+    /// The host decides as the mission starts, and again a few times a second (a seventh player pauses it), and publishes
     /// the pause in the room keyed by the mission's session ID, so late joiners and a later host agree with it. Once paused,
     /// a mission stays paused until the hub, even if players leave.
     /// The patch targets are the ones the Ship Customizer pauses; both plugins can be installed together.
@@ -24,6 +29,9 @@ namespace VoidCrewFleet
         /// <summary>Room property: the GameSessionID of the mission without progression (written by the host only).</summary>
         private const string PausedKey = "VCF_NoProg";
 
+        /// <summary>The most players a mission with progression can have (the game's own room size).</summary>
+        private const int MaxPlayersWithProgression = 6;
+
         private static GameSession _pausedSession;
         private static GameSession _publishedSession;
 
@@ -32,10 +40,17 @@ namespace VoidCrewFleet
         private static bool _trackersOff;
 
         /// <summary>
+        /// The players (actor numbers) whose character has spawned in this room, in the hub or a mission, and the room they
+        /// are for. Actor numbers aren't reused within a room, so a player who left and came back is a new entry.
+        /// </summary>
+        private static readonly HashSet<int> Played = new HashSet<int>();
+        private static string _playedRoom;
+
+        /// <summary>
         /// Whether this mission gives no progression: the host published so, or this client sees it by the rules (fleet and
-        /// PvP missions, more than six players). Once a mission is paused it stays paused until the hub, so players leaving
-        /// before the end (a 7-player run dropping to 6) don't turn its end-of-run rewards back on. On the host, a pause is
-        /// published as soon as it is known.
+        /// PvP missions, more than six players who really play). Once a mission is paused it stays paused until the hub, so
+        /// players leaving before the end (a 7-player run dropping to 6) don't turn its end-of-run rewards back on. On the
+        /// host, a pause is published as soon as it is known.
         /// </summary>
         public static bool Paused
         {
@@ -60,10 +75,47 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>Fleet and PvP missions, and missions of more than six players, give no progression.</summary>
+        /// <summary>Fleet and PvP missions, and missions of more than six players who really play, give no progression.</summary>
         private static bool ByTheRules()
         {
-            return FleetSession.Mode != FleetMode.OneShip || PhotonNetwork.PlayerList.Length > 6;
+            return FleetSession.Mode != FleetMode.OneShip || MoreThanSixPlay();
+        }
+
+        /// <summary>
+        /// Whether more than six of the players in the room have had a character in it. At mission start the mission has no
+        /// characters yet, so this counts the players who played in the hub; a player still loading counts once they spawn.
+        /// </summary>
+        private static bool MoreThanSixPlay()
+        {
+            Room room = PhotonNetwork.CurrentRoom;
+            if (room == null || room.Players == null) return false;
+            NotePlayers();
+            int playing = 0;
+            foreach (Player player in room.Players.Values)
+            {
+                if (player != null && Played.Contains(player.ActorNumber) && ++playing > MaxPlayersWithProgression) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Notes the players whose character is in the game now (the hub's or the mission's). Leaving the room forgets them:
+        /// actor numbers start over in the next one.
+        /// </summary>
+        private static void NotePlayers()
+        {
+            Room room = PhotonNetwork.InRoom ? PhotonNetwork.CurrentRoom : null;
+            string name = room != null ? room.Name : null;
+            if (name != _playedRoom)
+            {
+                Played.Clear();
+                _playedRoom = name;
+            }
+            if (room == null) return;
+            ClientGame game = ClientGame.Current;
+            List<int> actors = game != null ? game.PlayerID : null;
+            if (actors == null) return;
+            for (int i = 0; i < actors.Count; i++) Played.Add(actors[i]);
         }
 
         /// <summary>Whether the room says this mission gives no progression.</summary>
@@ -100,7 +152,8 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// Host, as a mission starts (before its session data goes out to the other players): decide whether it gives
-        /// progression, so the pause reaches the room before anyone starts tracking.
+        /// progression, so the pause reaches the room before anyone starts tracking. Its players are the ones who played in
+        /// the hub.
         /// </summary>
         [GamePatch(Feature, "GameSessionManager", "DistributeSessionData", PatchKind.Prefix, Optional = true)]
         private static void SessionStartPrefix()
@@ -117,19 +170,23 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// A player joined: a seventh player pauses the mission. Every client checks: the host publishes the pause, and a
-        /// client that was tracking quests and achievements stops them, so nothing more is counted or saved.
+        /// A few times a second, on every client: notes who has a character, and checks the mission again, so a seventh
+        /// player pauses it once their character spawns. The host publishes the pause; a client whose quest and achievement
+        /// trackers run for this mission stops them, so nothing more is counted or saved.
         /// </summary>
-        [GamePatch(Feature, "PhotonService", "OnPlayerEnteredRoom", PatchKind.Postfix, Optional = true)]
-        private static void PlayerJoinedPostfix()
+        public static void Tick()
         {
             try
             {
-                if (Paused && !_trackersOff) StopTrackers();
+                if (!Patcher.IsReady(Feature)) return;
+                NotePlayers();
+                if (!Paused || _trackersOff) return;
+                GameSession tracked = _trackedSession;
+                if (tracked != null && ReferenceEquals(tracked, GameSessionManager.ActiveSession)) StopTrackers();
             }
             catch (Exception e)
             {
-                Log.Failure("Pausing progression when a player joined", e);
+                Log.Failure("Checking whether the mission still gives progression", e);
             }
         }
 
