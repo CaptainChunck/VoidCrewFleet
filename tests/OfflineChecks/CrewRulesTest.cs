@@ -158,6 +158,83 @@ internal static class CrewRulesTest
         Dictionary<int, CrewEntry> teamSpread = CrewRules.PlaceEveryone(teamPicks, ten, new List<int> { 0, 1, 2, 3 }, true);
         Equal(2, teamSpread[9].Slot, "PvP: to its team's other ship");
         Equal(0, teamSpread[9].Team, "PvP: and stays BLUE");
+
+        TeamCapChecks();
+    }
+
+    /// <summary>Players numbered first, first + 1, ... on a ship (team match: the team is the slot's).</summary>
+    private static void Put(Dictionary<int, CrewEntry> crews, int slot, int count, int first)
+    {
+        for (int actor = first; actor < first + count; actor++) crews[actor] = CrewEntry.Play(actor, CrewRules.TeamOf(slot, true), slot);
+    }
+
+    /// <summary>Team matches: nobody is put on a full crew (8), and a team with two ships uses the one with room.</summary>
+    private static void TeamCapChecks()
+    {
+        var twoPerTeam = new List<int> { 0, 1, 2, 3 };
+
+        // Two living ships on BLUE: the smaller crew, and a full ship is passed over while the other has room.
+        var crews = new Dictionary<int, CrewEntry>();
+        Put(crews, 0, 2, 1);
+        Put(crews, 2, 1, 3);
+        Put(crews, 1, 2, 4);
+        Put(crews, 3, 2, 6);
+        List<int> players = Players(8);
+        Equal(2, CrewRules.PlaceFor(crews, players, twoPerTeam, true), "two BLUE ships: the smaller crew (BLUE 2)");
+        crews = new Dictionary<int, CrewEntry>();
+        Put(crews, 0, 8, 1);
+        Put(crews, 2, 5, 9);
+        Put(crews, 1, 7, 14);
+        Put(crews, 3, 7, 21);
+        players = Players(28);
+        Equal(2, CrewRules.PlaceFor(crews, players, twoPerTeam, true), "a full BLUE 1 is passed over for BLUE 2");
+        Equal(-1, CrewRules.SmallestCrew(crews, players, new[] { 0 }, CrewRules.MaxCrew), "a full ship has no room under the limit");
+        Equal(0, CrewRules.SmallestCrew(crews, players, new[] { 0 }), "without a limit it is still the smallest");
+
+        // 8 against 8 on one ship each, and two more join: both teams are full, so they stay without a ship.
+        crews = new Dictionary<int, CrewEntry>();
+        Put(crews, 0, 8, 1);
+        Put(crews, 1, 8, 9);
+        List<int> eighteen = Players(18);
+        var oneEach = new List<int> { 0, 1 };
+        Equal(-1, CrewRules.PlaceFor(crews, eighteen, oneEach, true), "PvP: with both crews full there is no place");
+        Dictionary<int, CrewEntry> placed = CrewRules.PlaceEveryone(crews, eighteen, oneEach, true);
+        Check(!placed.ContainsKey(17) && !placed.ContainsKey(18), "PvP: players over the crews' limit stay without a ship");
+        Equal(8, CrewRules.CrewOf(placed, eighteen, 0), "PvP: BLUE 1 keeps 8");
+        Equal(8, CrewRules.CrewOf(placed, eighteen, 1), "PvP: RED 1 keeps 8");
+        string why = CrewRules.CheckTeams(placed, eighteen, 2, Name);
+        Check(why != null && why.Contains("more ships per team"), "PvP: confirming says more ships are needed (" + why + ")");
+
+        // 8 against 7: the next player fills RED, the one after waits.
+        crews = new Dictionary<int, CrewEntry>();
+        Put(crews, 0, 8, 1);
+        Put(crews, 1, 7, 9);
+        List<int> seventeen = Players(17);
+        placed = CrewRules.PlaceEveryone(crews, seventeen, oneEach, true);
+        Equal(1, placed[16].Slot, "PvP: a newcomer fills RED's last place");
+        Check(!placed.ContainsKey(17), "PvP: the next one gets none");
+
+        // A BLUE pick on BLUE 2, which didn't spawn, while BLUE 1 is full: 8 against 8, so RED's ship with room takes them.
+        crews = new Dictionary<int, CrewEntry>();
+        Put(crews, 0, 8, 1);
+        Put(crews, 1, 4, 9);
+        Put(crews, 3, 4, 13);
+        crews[17] = CrewEntry.Play(17, 0, 2);
+        placed = CrewRules.PlaceEveryone(crews, seventeen, new List<int> { 0, 1, 3 }, true);
+        Equal(1, placed[17].Slot, "PvP: a pick on a lost ship of a full team goes to the other team on a tie");
+        Equal(8, CrewRules.CrewOf(placed, seventeen, 0), "PvP: and BLUE 1 isn't overfilled");
+
+        // BLUE (8, its only ship full) is behind RED (9): RED may not take one more, so a newcomer has no place.
+        crews = new Dictionary<int, CrewEntry>();
+        Put(crews, 0, 8, 1);
+        Put(crews, 1, 5, 9);
+        Put(crews, 3, 4, 14);
+        Equal(-1, CrewRules.PlaceFor(crews, Players(18), new List<int> { 0, 1, 3 }, true), "PvP: no place when the smaller team is full");
+
+        // Co-op has no such limit here (a mission adds ships for a big room): a full ship still takes one when all are.
+        crews = new Dictionary<int, CrewEntry>();
+        Put(crews, 0, 8, 1);
+        Equal(0, CrewRules.PlaceFor(crews, Players(9), new List<int> { 0 }, false), "co-op: the only ship, full or not");
     }
 
     // ---------------------------------------------------------------- RosterRules
@@ -409,5 +486,82 @@ internal static class CrewRulesTest
         Check(gone.Any(s => s.Id == "V"), "one who left later is kept");
         Check(gone.Any(s => s.Id == "D"), "a dead player is kept (they come back dead)");
         Check(gone.Any(s => s.Id == "P") && Seat(gone, "P").Expired, "an expired hold is kept");
+
+        ReturnChecks(now);
+    }
+
+    /// <summary>Two ships per team, players coming back late, and a waiting player who was forgotten.</summary>
+    private static void ReturnChecks(int now)
+    {
+        var alive = new List<int> { 0, 1, 2, 3 };
+
+        // Two living ships on BLUE: a newcomer joins the smaller crew, and a full ship is passed over.
+        var two = new List<RosterSeat>();
+        two.AddRange(Crew("b", 0, 0, 2, 100));
+        two.AddRange(Crew("c", 0, 2, 1, 110));
+        two.AddRange(Crew("r", 1, 1, 2, 200));
+        two.AddRange(Crew("s", 1, 3, 2, 210));
+        RosterSeat n = RosterRules.Arrive(two, "N", 1, "N", alive, true, now);
+        Equal(0, n.Team, "two ships a team: a newcomer joins BLUE (3 against 4)");
+        Equal(2, n.Slot, "on BLUE 2, the smaller crew");
+        var fullFirst = new List<RosterSeat>();
+        fullFirst.AddRange(Crew("b", 0, 0, 8, 100));
+        fullFirst.AddRange(Crew("c", 0, 2, 5, 110));
+        fullFirst.AddRange(Crew("r", 1, 1, 7, 200));
+        fullFirst.AddRange(Crew("s", 1, 3, 7, 210));
+        n = RosterRules.Arrive(fullFirst, "N", 1, "N", alive, true, now);
+        Equal(2, n.Slot, "BLUE 1 is full (8): the newcomer goes to BLUE 2");
+
+        // Back too late, and their own ship is full by now: their team's other ship, not a ninth on their own.
+        var full = new List<RosterSeat> { Playing("A", 1, 0, 0) };
+        full.AddRange(Crew("b", 0, 0, 7, 100));
+        full.AddRange(Crew("c", 0, 2, 2, 110));
+        full.AddRange(Crew("r", 1, 1, 6, 200));
+        full.AddRange(Crew("s", 1, 3, 6, 210));
+        RosterRules.Leave(full, "A", now);
+        RosterRules.ExpireHolds(full, now + Hold, Hold);
+        full.Add(Playing("late", 2, 0, 0));
+        RosterSeat a = RosterRules.Arrive(full, "A", 3, "A", alive, true, now + Hold + 1000);
+        Equal(CrewState.Playing, a.State, "back too late with a free place on their team: plays");
+        Equal(2, a.Slot, "on BLUE 2: BLUE 1 is full");
+        Equal(8, full.Count(s => s.Slot == 0 && s.State == CrewState.Playing && !s.Expired), "BLUE 1 keeps 8");
+        // Back too late while their own ship has room: their own ship.
+        var room = new List<RosterSeat> { Playing("A", 1, 0, 0) };
+        room.AddRange(Crew("b", 0, 0, 6, 100));
+        room.AddRange(Crew("r", 1, 1, 7, 200));
+        RosterRules.Leave(room, "A", now);
+        RosterRules.ExpireHolds(room, now + Hold, Hold);
+        Equal(0, RosterRules.Arrive(room, "A", 3, "A", new List<int> { 0, 1 }, true, now + Hold + 1000).Slot, "back too late, own ship with room: their own");
+        // Back in time: their own ship, whose place was kept for them.
+        var held = new List<RosterSeat> { Playing("A", 1, 0, 0) };
+        held.AddRange(Crew("b", 0, 0, 7, 100));
+        held.AddRange(Crew("c", 0, 2, 1, 110));
+        held.AddRange(Crew("r", 1, 1, 8, 200));
+        RosterRules.Leave(held, "A", now);
+        Equal(0, RosterRules.Arrive(held, "A", 3, "A", alive, true, now + 1000).Slot, "back within the hold: their own ship");
+
+        // A held player whose team has no living ship left (the match is ending) watches.
+        var ending = new List<RosterSeat> { Playing("A", 1, 0, 0), Playing("R", 2, 1, 1) };
+        RosterRules.Leave(ending, "A", now);
+        RosterSeat end = RosterRules.Arrive(ending, "A", 3, "A", new List<int> { 1 }, true, now + 1000);
+        Equal(CrewState.Dead, end.State, "held, but no living ship on their team: they watch");
+        Check(!end.Expired, "and hold nothing");
+
+        // A waiting player forgotten after the hold time is new when they come back: at the back of the line.
+        var line = new List<RosterSeat>();
+        line.AddRange(Crew("b", 0, 0, 8, 100));
+        line.AddRange(Crew("r", 1, 1, 8, 200));
+        line.Add(Waiting("W1", 1, -1, now));
+        line.Add(Waiting("W2", 2, -1, now + 100));
+        RosterRules.Leave(line, "W1", now + 200);
+        Check(RosterRules.DropGone(line, now + 200 + Hold, Hold), "the waiting player who left is forgotten");
+        RosterSeat w1 = RosterRules.Arrive(line, "W1", 3, "W1", new List<int> { 0, 1 }, true, now + 300 + Hold);
+        Equal(CrewState.Waiting, w1.State, "back after being forgotten: waits");
+        Equal(now + 300 + Hold, w1.WaitingSince, "from the time they came back");
+        RosterRules.Leave(line, "r0", now + 400 + Hold);
+        RosterRules.ExpireHolds(line, now + 400 + 2 * Hold, Hold);
+        RosterRules.FillSeats(line, new List<int> { 0, 1 }, now + 400 + 2 * Hold);
+        Equal(CrewState.Playing, Seat(line, "W2").State, "the free place goes to who waited longer");
+        Equal(CrewState.Waiting, Seat(line, "W1").State, "the forgotten one waits behind them");
     }
 }
