@@ -16,6 +16,10 @@ namespace VoidCrewFleet
     /// the bytes allocated, with the frame rate and garbage collections for context. A patch method is timed by a Harmony
     /// prefix and finalizer of its own, so its figures include a little of that wrapper: they are an upper bound. A call made
     /// inside another timed call counts in both.
+    /// Allocations are how much the managed heap grew during each call (GC.GetTotalMemory: the game's Mono has no working
+    /// per-thread allocation counter). The heap grows in blocks, so one call's figure is coarse; the totals over 10 s are an
+    /// estimate, low for a while after a garbage collection, when new objects first reuse the space it freed. A call during
+    /// which a garbage collection ran adds nothing (the heap shrank in it).
     /// </summary>
     internal static class FleetProfiler
     {
@@ -31,12 +35,18 @@ namespace VoidCrewFleet
             public int Calls;
         }
 
+        /// <summary>Where a timed call began: the clock, the heap's size and the garbage collections so far.</summary>
+        private struct Start
+        {
+            public long Ticks;
+            public long Heap;
+            public int Collections;
+        }
+
         private static readonly object Gate = new object();
         private static readonly Dictionary<MethodBase, Stat> Stats = new Dictionary<MethodBase, Stat>();
-        private static readonly Func<long> AllocatedBytes = BindAllocatedBytes();
 
-        [ThreadStatic] private static Stack<long> _starts;
-        [ThreadStatic] private static Stack<long> _startBytes;
+        [ThreadStatic] private static Stack<Start> _starts;
 
         private static bool _on;
         private static float _windowStart;
@@ -72,8 +82,8 @@ namespace VoidCrewFleet
             _on = true;
             StartWindow();
             Log.Info("Profiler on: timing " + wrapped + " patch methods and every periodic handler; the timer's own cost of " +
-                     (_overheadTicks * 1000000.0 / Stopwatch.Frequency).ToString("0.000") + " µs per patch call is taken off; allocation counts " +
-                     (AllocatedBytes != null ? "on" : "unavailable") + ".");
+                     (_overheadTicks * 1000000.0 / Stopwatch.Frequency).ToString("0.000") + " µs per patch call is taken off; allocations are the heap's growth " +
+                     "during each call.");
         }
 
         /// <summary>What the timer itself adds to each timed patch call, measured on an empty method: taken off in the reports.</summary>
@@ -118,37 +128,52 @@ namespace VoidCrewFleet
 
         private static void Begin()
         {
-            if (_starts == null)
-            {
-                _starts = new Stack<long>();
-                _startBytes = new Stack<long>();
-            }
-            _startBytes.Push(AllocatedBytes != null ? AllocatedBytes() : 0L);
-            _starts.Push(Stopwatch.GetTimestamp());
+            if (_starts == null) _starts = new Stack<Start>();
+            _starts.Push(Mark());
         }
 
         private static Exception End(MethodBase __originalMethod, Exception __exception)
         {
             long now = Stopwatch.GetTimestamp();
-            long bytes = AllocatedBytes != null ? AllocatedBytes() : 0L;
-            if (_starts != null && _starts.Count > 0) Add(__originalMethod, true, now - _starts.Pop(), bytes - _startBytes.Pop());
+            if (_starts != null && _starts.Count > 0)
+            {
+                Start start = _starts.Pop();
+                Add(__originalMethod, true, now - start.Ticks, Allocated(start));
+            }
             return __exception;
         }
 
         /// <summary>Runs one periodic handler (FleetRuntime), timed.</summary>
         public static void Measure(Action handler)
         {
-            long bytes = AllocatedBytes != null ? AllocatedBytes() : 0L;
-            long start = Stopwatch.GetTimestamp();
+            Start start = Mark();
             try
             {
                 handler();
             }
             finally
             {
-                long ticks = Stopwatch.GetTimestamp() - start;
-                Add(handler.Method, false, ticks, (AllocatedBytes != null ? AllocatedBytes() : 0L) - bytes);
+                long ticks = Stopwatch.GetTimestamp() - start.Ticks;
+                Add(handler.Method, false, ticks, Allocated(start));
             }
+        }
+
+        /// <summary>
+        /// Where a call begins. The clock is read last here, and first when the call ends, so reading the heap stays out of
+        /// the call's time (and out of the timer's own cost that Calibrate measures).
+        /// </summary>
+        private static Start Mark()
+        {
+            var start = new Start { Collections = GC.CollectionCount(0), Heap = GC.GetTotalMemory(false) };
+            start.Ticks = Stopwatch.GetTimestamp();
+            return start;
+        }
+
+        /// <summary>How much the heap grew since the call began; 0 when a garbage collection ran in between (unknown then).</summary>
+        private static long Allocated(Start start)
+        {
+            long grown = GC.GetTotalMemory(false) - start.Heap;
+            return GC.CollectionCount(0) == start.Collections ? grown : 0L;
         }
 
         private static void Add(MethodBase method, bool patch, long ticks, long bytes)
@@ -221,7 +246,8 @@ namespace VoidCrewFleet
             text.AppendLine("Profiler, last " + seconds.ToString("0") + " s: " + fps.ToString("0") + " fps (worst frame " + (_worstFrame * 1000f).ToString("0") +
                             " ms), " + (GC.CollectionCount(0) - _collections) + " garbage collections. Fleet code: " + total.ToString("0.00") + " ms per second, " +
                             (fps > 0 ? (total / fps).ToString("0.000") : "?") + " ms per frame, " + kilobytes.ToString("0.0") + " KB allocated per second. " +
-                            (GameSessionManager.InHub ? "Hub" : "Mission") + ", " + FleetShips.All.Count + " ships, " + PhotonNetwork.PlayerList.Length + " players.");
+                            (GameSessionManager.InHub ? "Hub" : "Mission") + ", " + FleetShips.All.Count + " ships, " +
+                            (PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.PlayerCount : 0) + " players.");
             foreach (Stat stat in stats.OrderByDescending(s => s.Ticks).Take(25))
             {
                 text.AppendLine("  " + (stat.Ticks * msPerTick / seconds).ToString("0.000") + " ms/s  " + (stat.Calls / seconds).ToString("0") + " calls/s  max " +
@@ -229,19 +255,6 @@ namespace VoidCrewFleet
                                 (stat.Name.StartsWith("AutoTest.", StringComparison.Ordinal) ? " (self-test, not counted)" : ""));
             }
             Log.Info(text.ToString());
-        }
-
-        private static Func<long> BindAllocatedBytes()
-        {
-            try
-            {
-                MethodInfo method = typeof(GC).GetMethod("GetAllocatedBytesForCurrentThread", BindingFlags.Static | BindingFlags.Public);
-                return method != null ? (Func<long>)Delegate.CreateDelegate(typeof(Func<long>), method) : null;
-            }
-            catch
-            {
-                return null;
-            }
         }
     }
 }

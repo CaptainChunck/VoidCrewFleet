@@ -9,7 +9,9 @@ namespace VoidCrewFleet
     /// the offline checker finds these calls in the built DLL and verifies each name against the game's assemblies.
     /// A missing member returns null (and logs once), so callers must handle that. A lookup that fails (for example a
     /// method a game update gave an overload, which makes the name ambiguous) counts as missing: it never throws, because
-    /// most lookups run in static initialisers, where an exception would break every hook of the class.
+    /// most lookups run in static initialisers, where an exception would break every hook of the class. Only the game's
+    /// members belong here: the checker looks every name up in the game, so the plugin's own methods (transpiler helpers)
+    /// are found with typeof and nameof instead.
     /// </summary>
     internal static class GameMember
     {

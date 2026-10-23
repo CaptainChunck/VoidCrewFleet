@@ -47,7 +47,8 @@ namespace VoidCrewFleet
         /// <summary>
         /// Patched once the game has loaded (Patcher.ApplyLater) instead of at start-up: for a class whose first use starts
         /// one of the game's systems, which must not start before the game starts it itself (Photon's PhotonNetwork). Such a
-        /// patch should also be Optional: it goes in after the start-up report.
+        /// patch should also be Optional: it goes in after the start-up report, so a required one that fails switches its
+        /// feature off only then (with a report line of its own).
         /// </summary>
         public bool AfterGameLoad { get; set; }
     }
@@ -138,12 +139,30 @@ namespace VoidCrewFleet
             foreach (string feature in Missing.Keys.ToList()) Withdraw(harmony, feature);
         }
 
-        /// <summary>Once the game has loaded (FleetRuntime): the patches marked AfterGameLoad.</summary>
+        /// <summary>
+        /// Once the game has loaded (FleetRuntime): the patches marked AfterGameLoad, except those of a feature that is off. A
+        /// required one that fails switches its feature off as at start-up: the patches it got are taken out again, and the
+        /// log says so in a report line of its own (the start-up report has been written by then).
+        /// </summary>
         public static void ApplyLater()
         {
             if (_harmony == null || Later.Count == 0) return;
-            foreach (KeyValuePair<GamePatchAttribute, MethodInfo> pair in Later) Apply(_harmony, pair.Key, pair.Value);
+            var offBefore = new HashSet<string>(Missing.Keys);
+            foreach (KeyValuePair<GamePatchAttribute, MethodInfo> pair in Later)
+            {
+                GamePatchAttribute patch = pair.Key;
+                // Off at start-up, or one of its required late patches just failed: it gets no more patches.
+                if (Missing.ContainsKey(patch.Feature))
+                {
+                    Log.Verbose("Did not patch " + patch.Type + "." + patch.Method + " (" + patch.Feature + "): the feature is off.");
+                    continue;
+                }
+                Apply(_harmony, patch, pair.Value);
+            }
             Later.Clear();
+            List<string> nowOff = Missing.Keys.Where(feature => !offBefore.Contains(feature)).ToList();
+            foreach (string feature in nowOff) Withdraw(_harmony, feature);
+            Report(nowOff);
         }
 
         private static void Apply(Harmony harmony, GamePatchAttribute patch, MethodInfo hook)

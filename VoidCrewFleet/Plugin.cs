@@ -62,7 +62,7 @@ namespace VoidCrewFleet
         }
 
         /// <summary>Runs one start-up step; a failure is logged in full and the next steps still run.</summary>
-        private static bool Step(string what, Action step)
+        internal static bool Step(string what, Action step)
         {
             try
             {
