@@ -22,6 +22,8 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
   the crews are confirmed it lets the host reopen picking. A player who joins after that goes to the smallest crew.
 - On the lobby screen the host can **force each ship's type** (Destroyer, Frigate or Striker) or leave it free. A ship
   with no loadout chosen copies ship 1 (AS SHIP 1) when its type allows it, or else gets its type's standard loadout.
+- From the moment you have a ship in the lobby until the mission ends, **your ship** shows as one more row of the
+  ship panel in the top left corner, in the HUD's own style: SHIP 2 with its type, or LOST once it is destroyed.
 - The ships start side by side, fly freely, and **void-jump together**:
   - the escape vector set on any ship's astral map counts for every ship;
   - each crew charges its own ship's void drive;
@@ -68,7 +70,8 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
      - Players **pick a ship**, and with it their team: BLUE has ships 1, 3 and 5, RED has 2, 4 and 6.
      - Teams and crews stay even (an odd count allows one extra), and every ship needs a crew. The host can move
        players, auto-balance and confirms.
-  2. Everyone on a team wears a **BLUE TEAM / RED TEAM** badge above their head.
+  2. Everyone on a team wears a **BLUE TEAM / RED TEAM** badge above their head, and sees their own team and ship
+     as a row of the ship panel in the top left corner (BLUE TEAM  BLUE 1, DESTROYER).
   3. At the loadout terminal the FLEET panel lists every ship in team colours. Only a ship's own team can change its
      loadout, Ship Customizer's CUSTOM included. A ship nobody set up starts with its type's standard loadout.
   4. The host starts the match by **sitting in a ready-room seat**, and everyone spawns aboard their ship.
@@ -104,9 +107,12 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
 - **Destroy every enemy ship to win.** A team with no players left forfeits.
 - **Spectators:** while your team has ships left, losing yours doesn't end your match: you watch the rest of it (see
   Losing a ship). Spectators talk among themselves: nobody still fighting hears them, by voice or text chat.
+- **Joining a match under way:** while there is room, you play at once: you join the team with fewer active players,
+  on its ship with the smallest crew (8 at most), so the teams stay at most one apart. Players reconnecting within their
+  3 minutes count as active; the crews of lost ships don't. Players already waiting for a place go first.
 - **Lost connection:** your place is held for **3 minutes**. Come back in time and you return to your team and ship.
-  After that your place goes to a player waiting for one (your own team's first), then to anyone joining. If you come
-  back to a full team, you wait for the next free place, watching your team's ships.
+  Come back later and you play again on your team when it isn't ahead, else you wait for its next free place, watching
+  your team's ships.
 - **Boarding:**
   - Enemy players can come aboard through an airlock its crew left open, or one their team hacked (below).
   - Aboard the enemy ship you can always use its **System Enhancement panels** and its systems' **power switches**

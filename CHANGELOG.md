@@ -23,6 +23,10 @@ Fixes from a full code review of 0.4.0. Everyone in a room needs 0.4.1: the netw
 - Relic and weapon bonuses that depend on the ship (alloys, power, breakers, speed) read their own ship.
 
 **Lobby**
+- **Your team and ship** show as one more row of the ship panel in the top left corner, built from the HUD's own art
+  (the diamond with the ship icon in your team's colour, the bar plate and the value plate): BLUE TEAM  BLUE 2 with the
+  ship's type, or SHIP 2 in co-op, and LOST once it is destroyed. It shows from the moment you have a ship in the lobby
+  until the mission ends, and hides with the HUD.
 - Only the host can change the ship count. Saved runs (one ship) don't open the crew screen or hold the start.
 - Back in the hub, the host no longer places everyone "as already confirmed" for a moment.
 - A hidden lobby screen comes back when the host switches between co-op and Fleet Battle.
@@ -32,9 +36,13 @@ Fixes from a full code review of 0.4.0. Everyone in a room needs 0.4.1: the netw
 - When a mission adds ships for a big room, the crews are evened out and no ship takes more than 8.
 
 **Fleet Battle**
+- **Players who join a match under way play at once while there is room**, on the team with fewer active players and
+  its ship with the smallest crew (8 at most), so the teams stay at most one apart. Players reconnecting within their 3
+  minutes count as active; the crews of lost ships don't. Before, a match only had as many places per team as its
+  larger team had at the start.
 - After a host change, ships aren't moved mid-match and supply drops keep their schedule.
-- Free places go to waiting players fairly: their own team first, then one at a time to the team with more free
-  places. A newcomer can't take a place ahead of players already waiting. A waiting player without a team sees and
+- Free places go to waiting players fairly: their own team first, then one at a time to the team with fewer active
+  players. A newcomer can't take a place ahead of players already waiting. A waiting player without a team sees and
   hears no team's ships, talks only with other waiting players without a team, and gets Defeat on the end screen.
 - Twin and quad auto-turrets hit players as hard as intended, and a piercing round hits an enemy ship once.
 - Punches, enemy power switches, panel sabotage and the hacking terminal are checked properly by the host (or the
