@@ -15,6 +15,8 @@ namespace VoidCrewFleet
     /// avatar's own "fingers closed" pose, read once). Only the arms move, never the head (the first-person camera hangs
     /// on it). The local player, who sees no body in first person, sees their own arms while their fists are up. A
     /// character whose arms can't be posed (no rig, or posing failed) is left alone for a moment before the next try.
+    /// Building a character's rig takes a while (the first one, which reads the fist, a few milliseconds), so at most one
+    /// is built a frame, and the local player's as soon as they are in a match rather than on their first raise.
     /// </summary>
     internal static class FistPose
     {
@@ -74,12 +76,25 @@ namespace VoidCrewFleet
             public float Weight;
             public ThirdPersonObject ArmsMesh;
             public bool ArmsShown;
+
+            /// <summary>The last frame (Time.frameCount) its character was among the game's players.</summary>
+            public int Seen;
+        }
+
+        /// <summary>A character whose rig couldn't be built or whose pose failed: when to try again (unscaled time).</summary>
+        private sealed class Retry
+        {
+            public float At;
+
+            /// <summary>The last frame (Time.frameCount) its character was among the game's players.</summary>
+            public int Seen;
         }
 
         private static readonly Dictionary<Player, Rig> Rigs = new Dictionary<Player, Rig>();
+        private static readonly Dictionary<Player, Retry> RetryAt = new Dictionary<Player, Retry>();
 
-        /// <summary>Characters whose rig couldn't be built or whose pose failed, with when to try again (unscaled time).</summary>
-        private static readonly Dictionary<Player, float> RetryAt = new Dictionary<Player, float>();
+        /// <summary>The frame (Time.frameCount) a rig was last built in: one a frame.</summary>
+        private static int _builtFrame = -1;
 
         private static Quaternion[] _fistLeft;
         private static Quaternion[] _fistRight;
@@ -122,29 +137,55 @@ namespace VoidCrewFleet
             ClientGame game = ClientGame.Current;
             if (game == null || game.Players == null)
             {
-                Clear();
+                if (Rigs.Count > 0 || RetryAt.Count > 0) Clear();
                 return;
             }
             bool active = PvpCombat.Active;
+            // Outside PvP no fists go up: once every rig is gone there is nothing to do.
+            if (!active && Rigs.Count == 0)
+            {
+                if (RetryAt.Count > 0) RetryAt.Clear();
+                return;
+            }
+            int frame = Time.frameCount;
+            LocalPlayer me = LocalPlayer.Instance;
             Camera camera = Camera.main;
+            int seenRigs = 0;
+            int seenRetries = 0;
+            bool anyUp = false;
             foreach (Player player in game.Players)
             {
                 if (player == null) continue;
                 Rig rig;
-                Rigs.TryGetValue(player, out rig);
+                if (Rigs.TryGetValue(player, out rig))
+                {
+                    rig.Seen = frame;
+                    seenRigs++;
+                }
+                else if (RetryAt.Count > 0)
+                {
+                    Retry retry;
+                    if (RetryAt.TryGetValue(player, out retry))
+                    {
+                        retry.Seen = frame;
+                        seenRetries++;
+                    }
+                }
                 bool alive = !PlayerLife.IsDead(player);
                 bool raised = active && alive && PvpPunch.StanceOf(player);
                 bool punching = rig != null && alive && (Punching(rig.Left) || Punching(rig.Right));
-                if (rig == null && !raised && !punching) continue;
+                bool local = player == me;
+                // The local player's rig is built as soon as they are in a match, the others' when they raise their fists.
+                if (rig == null && !raised && !punching && !(local && active)) continue;
                 if (rig == null && (rig = RigOf(player)) == null) continue;
                 rig.Weight = Mathf.MoveTowards(rig.Weight, raised || punching ? 1f : 0f, Time.deltaTime * RaiseRate);
-                bool local = player == LocalPlayer.Instance;
                 ShowArms(rig, local && rig.Weight > 0.001f && alive);
                 if (rig.Weight <= 0.001f || !alive)
                 {
                     rig.Left.Written = rig.Right.Written = false;
                     continue;
                 }
+                anyUp = true;
                 if (!local && camera != null && (player.transform.position - camera.transform.position).sqrMagnitude > PoseDistance * PoseDistance) continue;
                 try
                 {
@@ -154,11 +195,15 @@ namespace VoidCrewFleet
                 {
                     Log.Failure("Posing a fighting stance", e);
                     ShowArms(rig, false);
-                    Rigs.Remove(player);
-                    RetryAt[player] = Time.unscaledTime + RetrySeconds;
+                    if (Rigs.Remove(player)) seenRigs--;
+                    RetryAt[player] = new Retry { At = Time.unscaledTime + RetrySeconds, Seen = frame };
                 }
             }
-            Prune(game);
+            // Fewer marked than there are: some character is gone. (A rig or retry made in the loop is marked but not counted,
+            // which only costs a look.)
+            if (seenRigs < Rigs.Count || seenRetries < RetryAt.Count) DropUnseen(frame);
+            // The match is over and every fist is down: the rigs go (the next match builds them again).
+            if (!active && !anyUp) Clear();
         }
 
         private static void Pose(Rig rig, bool local)
@@ -258,22 +303,28 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- the rig
 
-        /// <summary>A character's rig, built the first time; null while it can't be (tried again every RetrySeconds).</summary>
+        /// <summary>
+        /// A character's rig, built the first time; null while it can't be (tried again every RetrySeconds), and while another
+        /// rig was built this frame (tried again the next).
+        /// </summary>
         private static Rig RigOf(Player character)
         {
             if (character == null) return null;
             Rig rig;
             if (Rigs.TryGetValue(character, out rig)) return rig;
-            float retry;
+            Retry retry;
             if (RetryAt.TryGetValue(character, out retry))
             {
-                if (Time.unscaledTime < retry) return null;
+                if (Time.unscaledTime < retry.At) return null;
                 RetryAt.Remove(character);
             }
+            int frame = Time.frameCount;
+            if (frame == _builtFrame) return null;
+            _builtFrame = frame;
             Animator animator = ModelAnimator(character);
             if (animator == null)
             {
-                RetryAt[character] = Time.unscaledTime + RetrySeconds;
+                RetryAt[character] = new Retry { At = Time.unscaledTime + RetrySeconds, Seen = frame };
                 return null;
             }
             Transform chest = animator.GetBoneTransform(HumanBodyBones.UpperChest) ?? animator.GetBoneTransform(HumanBodyBones.Chest);
@@ -282,11 +333,11 @@ namespace VoidCrewFleet
             if (chest == null || left == null || right == null)
             {
                 Log.WarnOnce("fist rig", "A character model has no humanoid arms to raise the fists with (a game update?).");
-                RetryAt[character] = Time.unscaledTime + RetrySeconds;
+                RetryAt[character] = new Retry { At = Time.unscaledTime + RetrySeconds, Seen = frame };
                 return null;
             }
             CaptureFist(animator);
-            rig = new Rig { Character = character, Animator = animator, Chest = chest, Left = left, Right = right };
+            rig = new Rig { Character = character, Animator = animator, Chest = chest, Left = left, Right = right, Seen = frame };
             if (character == LocalPlayer.Instance)
             {
                 Transform arms = animator.transform.Find("Arms");
@@ -403,19 +454,25 @@ namespace VoidCrewFleet
 
         private static readonly List<Player> Gone = new List<Player>();
 
-        private static void Prune(ClientGame game)
+        /// <summary>Drops the rigs and retries of characters that weren't among the game's players this frame (they left or were destroyed).</summary>
+        private static void DropUnseen(int frame)
         {
             Gone.Clear();
-            foreach (Player player in Rigs.Keys)
+            foreach (KeyValuePair<Player, Rig> entry in Rigs)
             {
-                if (player == null || !game.Players.Contains(player)) Gone.Add(player);
+                if (entry.Value.Seen != frame) Gone.Add(entry.Key);
             }
-            foreach (Player player in Gone) Rigs.Remove(player);
+            foreach (Player player in Gone)
+            {
+                Rig rig = Rigs[player];
+                if (rig.Character != null) ShowArms(rig, false);
+                Rigs.Remove(player);
+            }
             if (RetryAt.Count == 0) return;
             Gone.Clear();
-            foreach (Player player in RetryAt.Keys)
+            foreach (KeyValuePair<Player, Retry> entry in RetryAt)
             {
-                if (player == null || !game.Players.Contains(player)) Gone.Add(player);
+                if (entry.Value.Seen != frame) Gone.Add(entry.Key);
             }
             foreach (Player player in Gone) RetryAt.Remove(player);
         }

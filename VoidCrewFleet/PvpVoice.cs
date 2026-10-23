@@ -5,6 +5,8 @@ using CG.Game;
 using CG.Game.Player;
 using CG.Space;
 using FMOD.Studio;
+using Gameplay.Atmosphere;
+using Gameplay.SpacePlatforms;
 using Photon.Pun;
 using Unity.Services.Vivox;
 using UnityEngine;
@@ -53,12 +55,20 @@ namespace VoidCrewFleet
             public int Team;
             public CrewState Out;
             public bool Locked;
+
+            /// <summary>The crews are set, so players can be spectators (Spectator.CrewsSet).</summary>
+            public bool CrewsSet;
         }
 
         private static readonly Dictionary<string, VoiceVolume> Volumes = new Dictionary<string, VoiceVolume>();
         private static readonly Dictionary<string, bool> Audibility = new Dictionary<string, bool>();
         private static readonly Dictionary<string, int> ActorOfVoice = new Dictionary<string, int>();
         private static readonly HashSet<string> LoweredInVivox = new HashSet<string>();
+
+        // Each player's crew entry and character by actor number, from one look at the room per update.
+        private static readonly Dictionary<int, CrewEntry> Entries = new Dictionary<int, CrewEntry>();
+        private static readonly Dictionary<int, Player> Characters = new Dictionary<int, Player>();
+
         private static bool _on;
         private static float _nextAudibility;
 
@@ -161,16 +171,19 @@ namespace VoidCrewFleet
         /// <summary>A few times a second: who the local player can hear, for every remote voice (played at a body or by Vivox).</summary>
         private static void UpdateAudibility(VivoxTapManager manager)
         {
-            // Whose voice is whose, from one look at the room. (The game's own lookup sorts the player list on every call, and
-            // warns in the log about a voice whose player has left.) A player who lost connection has no voice: one who came
-            // back has a new actor number and the same voice.
+            // Whose voice is whose, and each player's place, from one look at the room. (The game's own lookup sorts the player
+            // list on every call, and warns in the log about a voice whose player has left.) A player who lost connection has no
+            // voice: one who came back has a new actor number and the same voice.
             ActorOfVoice.Clear();
+            Entries.Clear();
             Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
             if (room != null)
             {
                 foreach (Photon.Realtime.Player player in room.Players.Values)
                 {
                     if (player == null || player.IsInactive) continue;
+                    CrewEntry entry;
+                    if (FleetShips.TryGetEntry(player.ActorNumber, out entry)) Entries[player.ActorNumber] = entry;
                     string cloudId;
                     try
                     {
@@ -183,23 +196,87 @@ namespace VoidCrewFleet
                     if (!string.IsNullOrEmpty(cloudId) && !ActorOfVoice.ContainsKey(cloudId)) ActorOfVoice[cloudId] = player.ActorNumber;
                 }
             }
+            FindCharacters();
             Listener me = CurrentListener();
             foreach (string cloudId in manager.FmodEvents.Keys) Audibility[cloudId] = Audible(cloudId, me);
             GateUntapped(manager, me);
+        }
+
+        /// <summary>Each player's character, found the way FleetShips.CharacterOf finds it (by its owner or its creator), in one pass.</summary>
+        private static void FindCharacters()
+        {
+            Characters.Clear();
+            ClientGame game = ClientGame.Current;
+            if (game == null || game.Players == null) return;
+            foreach (Player player in game.Players)
+            {
+                PhotonView view = player != null ? player.photonView : null;
+                if (view == null) continue;
+                int owner = view.OwnerActorNr;
+                int creator = view.CreatorActorNr;
+                if (!Characters.ContainsKey(owner)) Characters[owner] = player;
+                if (!Characters.ContainsKey(creator)) Characters[creator] = player;
+            }
+        }
+
+        private static Player CharacterOf(int actor)
+        {
+            Player character;
+            return Characters.TryGetValue(actor, out character) ? character : null;
+        }
+
+        private static int TeamOf(int actor)
+        {
+            CrewEntry entry;
+            return Entries.TryGetValue(actor, out entry) ? entry.Team : -1;
+        }
+
+        /// <summary>Spectator.WatchState, from this update's look at the room: playing while their character lives, else their spectator state.</summary>
+        private static CrewState WatchState(int actor, bool crewsSet)
+        {
+            CrewEntry entry;
+            if (!crewsSet || !Entries.TryGetValue(actor, out entry) || !entry.IsSpectator) return CrewState.Playing;
+            Player character = actor == FleetShips.LocalActor ? LocalPlayer.Instance : CharacterOf(actor);
+            return character != null && !PlayerLife.IsDead(character) ? CrewState.Playing : entry.State;
         }
 
         private static Listener CurrentListener()
         {
             Player body = LocalPlayer.Instance;
             if (body != null && PlayerLife.IsDead(body)) body = null;
+            int actor = FleetShips.LocalActor;
+            bool crewsSet = Spectator.CrewsSet;
             return new Listener
             {
                 Body = body,
-                Ship = body != null ? FleetShips.InteriorAt(body.transform.position) : null,
-                Team = FleetShips.TeamOfActor(FleetShips.LocalActor),
-                Out = Spectator.WatchState(FleetShips.LocalActor),
-                Locked = PvpTeams.Locked
+                Ship = body != null ? ShipOfRoom(body) : null,
+                Team = TeamOf(actor),
+                Out = WatchState(actor, crewsSet),
+                Locked = PvpTeams.Locked,
+                CrewsSet = crewsSet
             };
+        }
+
+        /// <summary>
+        /// The player ship whose rooms a character is in, or null in open space: the game's own room tracking, which every
+        /// client keeps for every character (the room of its atmosphere tracker, looked up a few times a second).
+        /// </summary>
+        private static PlayerControlledShip ShipOfRoom(Player character)
+        {
+            CustomCharacterLocomotion locomotion = character.Locomotion;
+            CharacterAtmosphericDataTracker tracker = locomotion != null ? locomotion.AtmosphereTracker : null;
+            Room room = tracker != null ? tracker.Room : null;
+            if (room == null || room.InSpace) return null;
+            RoomCollection rooms = room.RoomCollection;
+            SpacePlatform platform = rooms != null ? rooms.ConnectedSpacePlatform : null;
+            if (platform == null) return null;
+            var ships = FleetShips.All;
+            for (int i = 0; i < ships.Count; i++)
+            {
+                PlayerControlledShip ship = ships[i];
+                if (ship != null && ReferenceEquals(ship.Platform, platform)) return ship;
+            }
+            return null;
         }
 
         private static bool Audible(string cloudId, Listener me)
@@ -222,15 +299,15 @@ namespace VoidCrewFleet
         /// </summary>
         private static bool Hears(int actor, Listener me)
         {
-            int speakerTeam = FleetShips.TeamOfActor(actor);
+            int speakerTeam = TeamOf(actor);
             bool teammate = me.Team >= 0 && speakerTeam == me.Team;
-            CrewState speakerOut = Spectator.WatchState(actor);
+            CrewState speakerOut = WatchState(actor, me.CrewsSet);
             if (speakerOut == CrewState.Dead) return me.Out == CrewState.Dead;
             if (speakerOut == CrewState.Waiting) return me.Out == CrewState.Dead || (me.Out == CrewState.Waiting && speakerTeam == me.Team);
             if (me.Out != CrewState.Playing) return teammate;
-            Player speaker = FleetShips.CharacterOf(actor);
+            Player speaker = CharacterOf(actor);
             if (speaker == null || PlayerLife.IsDead(speaker) || me.Body == null) return teammate;
-            PlayerControlledShip speakerShip = FleetShips.InteriorAt(speaker.transform.position);
+            PlayerControlledShip speakerShip = ShipOfRoom(speaker);
             if (speakerShip != null || me.Ship != null) return speakerShip == me.Ship;
             return Vector3.Distance(speaker.transform.position, me.Body.transform.position) <= OpenSpaceRange;
         }
@@ -299,6 +376,8 @@ namespace VoidCrewFleet
             Volumes.Clear();
             Audibility.Clear();
             ActorOfVoice.Clear();
+            Entries.Clear();
+            Characters.Clear();
             _nextAudibility = 0f;
             EnforceTaps();
             Log.Info("PvP: proximity voice is off.");

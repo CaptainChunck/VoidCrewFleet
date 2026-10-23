@@ -21,9 +21,9 @@ namespace VoidCrewFleet
     /// punches from full health knock one out) and pushes them back. Everyone around sees the stance (a player property)
     /// and every punch (a message to the players nearby; FistPose poses the arms). The punched player's own client applies
     /// the damage, the way the game applies all damage to a character, so the hit shows on their screen like any other.
-    /// It first checks the puncher, so a modified game can't punch from afar or faster: an enemy whose character is alive,
-    /// not seated or in a clone tube, close by where this client sees them, and punching no faster than the real rate (a
-    /// burst of two allowed for network jitter). Nobody can be punched inside a clone tube.
+    /// It first checks the puncher, so a modified game can't punch from afar, through a wall or faster: an enemy whose
+    /// character is alive, not seated or in a clone tube, close by and in sight where this client sees them, and punching no
+    /// faster than the real rate (a burst of two allowed for network jitter). Nobody can be punched inside a clone tube.
     /// </summary>
     internal static class PvpPunch
     {
@@ -43,6 +43,9 @@ namespace VoidCrewFleet
 
         private const int SightMask = (1 << 10) | (1 << 12) | (1 << 27);
 
+        /// <summary>The height of the chest (from the feet), between which the punched player's game checks the line of sight.</summary>
+        private const float ChestHeight = 1.2f;
+
         /// <summary>The heights on a body (from the feet) a punch can be aimed at.</summary>
         private static readonly float[] TargetHeights = { 0.6f, 1.1f, 1.6f };
 
@@ -54,7 +57,6 @@ namespace VoidCrewFleet
         /// <summary>Weightless: the gamepad's triggers move the player up and down, so they don't fight with them there.</summary>
         private const InteractionMode WeightlessModes = InteractionMode.InSpace | InteractionMode.SwimZeroGrav | InteractionMode.FlyingJetpack;
 
-        private static readonly FieldInfo ChatOpenField = GameMember.Field(typeof(TextChat), "_chatOpened");
         private static readonly FieldInfo CloneTubesField = GameMember.Field(typeof(SpawnSystem), "clonetubes");
 
         /// <summary>The victim's count of each puncher's punches in hand (it grows back by one per cooldown, up to the burst).</summary>
@@ -74,6 +76,10 @@ namespace VoidCrewFleet
         private static InputAction _padStance;
         private static InputAction _padPunch;
         private static bool _testHold;
+
+        /// <summary>CanPunch as worked out this frame (Time.frameCount; the hacking terminal asks too).</summary>
+        private static int _canPunchFrame = -1;
+        private static bool _canPunch;
 
         /// <summary>The local player's fists are raised.</summary>
         public static bool LocalStanceUp
@@ -142,13 +148,27 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>The local player is alive, on foot and not in a menu, chat or seat (also used by the hacking terminal).</summary>
+        /// <summary>
+        /// The local player is alive, on foot and not in a menu, chat or seat (also used by the hacking terminal): worked out
+        /// once a frame.
+        /// </summary>
         internal static bool CanPunch()
+        {
+            int frame = Time.frameCount;
+            if (frame == _canPunchFrame) return _canPunch;
+            _canPunch = CanPunchNow();
+            _canPunchFrame = frame;
+            return _canPunch;
+        }
+
+        private static bool CanPunchNow()
         {
             LocalPlayer me = LocalPlayer.Instance;
             if (me == null || PlayerLife.IsDead(me)) return false;
             if ((me.InteractionState.ActiveModes & Busy) != 0 || MenuScreenController.IsOpen()) return false;
-            if (TextChat.Instance != null && GameMember.Read(ChatOpenField, TextChat.Instance, false)) return false;
+            // Typing in the chat. (Its "opened" flag stays set after a message is sent, until Escape: not that one.)
+            TextChat chat = TextChat.Instance;
+            if (chat != null && chat.TextingEnabled) return false;
             return Camera.main != null;
         }
 
@@ -209,8 +229,7 @@ namespace VoidCrewFleet
             if (_padStance == null)
             {
                 if (!on) return;
-                _padStance = new InputAction("Fleet fist stance", InputActionType.Button, "<Gamepad>/leftTrigger");
-                _padPunch = new InputAction("Fleet fist punch", InputActionType.Button, "<Gamepad>/rightTrigger");
+                MakePadActions();
             }
             if (on == _padStance.enabled) return;
             if (on)
@@ -222,6 +241,32 @@ namespace VoidCrewFleet
             {
                 _padStance.Disable();
                 _padPunch.Disable();
+            }
+        }
+
+        /// <summary>
+        /// Makes the gamepad's actions and switches them on, which binds them to the controls: that takes long enough to
+        /// stutter a frame, so it is done once, as a match starts (switching them off and on again afterwards is cheap).
+        /// </summary>
+        private static void MakePadActions()
+        {
+            _padStance = new InputAction("Fleet fist stance", InputActionType.Button, "<Gamepad>/leftTrigger");
+            _padPunch = new InputAction("Fleet fist punch", InputActionType.Button, "<Gamepad>/rightTrigger");
+            _padStance.Enable();
+            _padPunch.Enable();
+        }
+
+        /// <summary>A mission starts (every client): in PvP, the gamepad's actions are made while it loads, not in the match's first frame.</summary>
+        [GamePatch(PvpCombat.Feature, "CG.GameLoopStateMachine.GameStates.GSIngame", "OnEnter", PatchKind.Postfix, Optional = true)]
+        private static void MatchStartPostfix()
+        {
+            try
+            {
+                if (FleetSession.IsPvP && _padStance == null) MakePadActions();
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Making the gamepad's fist actions", e);
             }
         }
 
@@ -428,6 +473,13 @@ namespace VoidCrewFleet
                 if (distance > Reach + 3f)
                 {
                     Log.Warn("PvP: ignored a punch from " + distance.ToString("0.0") + " m away.");
+                    return;
+                }
+                // In sight: the puncher's chest to this player's chest, against the same walls as the puncher's own check.
+                if (Physics.Linecast(from + attacker.transform.up * ChestHeight, me.transform.position + me.transform.up * ChestHeight, SightMask,
+                        QueryTriggerInteraction.Ignore))
+                {
+                    Log.Warn("PvP: ignored a punch from " + NameOf(attacker) + ", who is behind a wall.");
                     return;
                 }
                 if (!TakeFromBudget(sender))
