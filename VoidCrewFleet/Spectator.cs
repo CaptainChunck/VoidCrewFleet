@@ -15,6 +15,7 @@ using CG.Ship.Modules;
 using CG.Space;
 using Cinemachine;
 using Gameplay.Atmosphere;
+using Gameplay.Chat;
 using HarmonyLib;
 using Photon.Pun;
 using ToolClasses;
@@ -32,15 +33,17 @@ namespace VoidCrewFleet
     /// mission: once their character dies they watch; a player who came back to a match whose team has no free seat
     /// (WAITING, PvP) spawns when one opens. Both watch from a third-person camera around a ship:
     /// - Q / E (also the left and right mouse buttons, the arrow keys or a gamepad's shoulder buttons) switch ships; the
-    ///   mouse (or the right stick) looks around; the wheel zooms.
+    ///   mouse (or the right stick) looks around; the wheel zooms. None of them while the player types in the text chat.
     /// - A dead player watches every remaining ship, their own team's first; a waiting player only their own team's ships,
     ///   and one not on a team yet (they could still end up on either) none: they look out into space far above the fleet
     ///   until they get a seat. So nothing they see helps the enemy once they play.
     /// - A dead player first sees their ship's end as the game shows it (its death camera and fade); then the view opens.
     /// The camera is a Cinemachine virtual camera on the game's own camera rig (as the game's own debug camera is), above
-    /// the character's and the pilot's cameras and below a ship's death camera. The game's HUD stays hidden while they watch
-    /// (closing a menu doesn't bring it back), and a waiting player's loading screen is lifted; a label in the game's HUD
-    /// style says who is watched. A waiting player who gets a seat has the HUD back once their character is there.
+    /// the character's and the pilot's cameras and below a ship's death camera. The game's HUD and markers stay hidden while
+    /// they watch (closing a menu doesn't bring them back), but not its text chat: spectators talk among themselves. A
+    /// waiting player's loading screen is lifted. A label in the game's HUD style says who is watched; for a spectator
+    /// without a character, who has no chat, it also shows Fleet's notices. A waiting player who gets a seat has the HUD
+    /// back once their character is there.
     /// </summary>
     internal static class Spectator
     {
@@ -51,6 +54,14 @@ namespace VoidCrewFleet
 
         /// <summary>How far above the middle of the fleet a waiting player without a team looks out from (no ship to make out).</summary>
         private const float NeutralHeight = 20000f;
+
+        /// <summary>How often the view reads the living ships again (FleetShips makes a new list for each read).</summary>
+        private const float ShipReadSeconds = 0.25f;
+
+        /// <summary>How long a notice stays over the label (the last NoticeFadeSeconds of it fading out), and how many show at once.</summary>
+        private const float NoticeSeconds = 10f;
+        private const float NoticeFadeSeconds = 2f;
+        private const int NoticeLines = 3;
 
         private static readonly MethodInfo GsIngameEnded = GameMember.Method(typeof(GSIngame), "OnGameEnded");
         private static readonly FieldInfo ForceRespawnButton = GameMember.Field(typeof(MainMenu), "_forceRespawnButton");
@@ -71,14 +82,24 @@ namespace VoidCrewFleet
         private static Label _hint;
         private static bool _labelUnderMenu;
 
-        /// <summary>The game's HUD canvas the view switched off, for a waiting player who gets a seat.</summary>
+        /// <summary>The game's HUD canvas the view switched off, switched on again with the rest of the HUD (RestoreHudWhenPlaying).</summary>
         private static Canvas _hiddenCanvas;
 
-        /// <summary>A waiting player got a seat: the game's HUD comes back once their character is there.</summary>
+        /// <summary>The view has ended: the game's HUD comes back once a living character is there (a waiting player who got a seat).</summary>
         private static bool _restoreHud;
 
-        /// <summary>The ships the local player may watch, found once a frame (FindShips).</summary>
+        /// <summary>The living ships' slots, lowest first, as last read (ReadShips).</summary>
+        private static readonly List<int> LivingSlots = new List<int>();
+
+        /// <summary>When LivingSlots was last read (Time.unscaledTime).</summary>
+        private static float _shipsReadAt = float.NegativeInfinity;
+
+        /// <summary>The ships the local player may watch, found once a frame from LivingSlots (FindShips).</summary>
         private static readonly List<int> ShipList = new List<int>();
+
+        /// <summary>The point the camera circles (Target), and the ship it was found for.</summary>
+        private static Transform _target;
+        private static PlayerControlledShip _targetShip;
 
         // What the label says, as last written: it is only written again when one of these changes.
         private static bool _labelSet;
@@ -86,6 +107,11 @@ namespace VoidCrewFleet
         private static int _labelTeam;
         private static int _labelSlot;
         private static int _labelShips;
+
+        // Fleet's notices over the label, for a spectator without a text chat: the lines (oldest first) and when each goes.
+        private static readonly Label[] NoticeLabels = new Label[NoticeLines];
+        private static readonly float[] NoticeUntil = new float[NoticeLines];
+        private static bool _noticesShown;
 
         /// <summary>The local player is watching right now.</summary>
         public static bool Active
@@ -135,7 +161,11 @@ namespace VoidCrewFleet
                 bool want = ShouldWatch(out entry);
                 if (want && !_active) Begin(entry);
                 else if (!want && _active) End();
-                if (_active) Follow(entry);
+                if (_active)
+                {
+                    Follow(entry);
+                    FadeNotices();
+                }
                 else if (_restoreHud) RestoreHudWhenPlaying();
                 HandleMatchEnd();
             }
@@ -186,6 +216,7 @@ namespace VoidCrewFleet
             _rig.SetActive(true);
             _camera.Priority = CameraPriority;
             _watching = -1;
+            ReadShips(true);
             FindShips(entry);
             Watch(ShipList.Count > 0 ? ShipList[0] : -1, true);
             try
@@ -222,19 +253,34 @@ namespace VoidCrewFleet
                 _rig.SetActive(false);
             }
             FleetShips.Watched = null;
+            _target = null;
+            _targetShip = null;
+            ClearNotices();
             ShowLabel(false);
-            // A waiting player who got a seat plays now.
-            CrewEntry entry;
-            _restoreHud = CrewsSet && !GameSessionManager.InHub && FleetShips.TryGetEntry(LocalActor, out entry) && !entry.IsSpectator;
+            // The HUD comes back once a living character is there: a waiting player who got a seat. A dead player's stays off
+            // to the end of the mission, as after the game's own ship loss.
+            _restoreHud = CrewsSet && !GameSessionManager.InHub;
             Log.Info("Spectating ended.");
         }
 
         /// <summary>
         /// The game's screens over the view: a dead player's HUD and death cover (the HUD canvas stays off, as the ship's
-        /// death sequence left it), or a waiting player's loading screen and queue panel.
+        /// death sequence left it), or a waiting player's loading screen and queue panel. The HUD is hidden without the game's
+        /// UI toggle, which goes back on (the ship's death sequence switched it off): the text chat follows it, and the game
+        /// lets nobody open the chat while it is off. KeepHudHidden and the patches below keep the toggle's other screens off.
         /// </summary>
         private static void HideGameScreens(CrewState state)
         {
+            try
+            {
+                // With a menu open, the game publishes the toggle itself as the menu closes, if the toggle is on.
+                if (MenuScreenController.IsOpen()) MainHUDUI.UIToggleState = true;
+                else if (ViewEventBus.Instance != null) ViewEventBus.Instance.OnUIToggle.Publish(true);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Switching the game's text chat back on for the spectator view", e);
+            }
             try
             {
                 HUD_LayoutContainer layout = UnityEngine.Object.FindObjectOfType<HUD_LayoutContainer>();
@@ -244,11 +290,9 @@ namespace VoidCrewFleet
                     canvas.enabled = false;
                     _hiddenCanvas = canvas;
                 }
-                if (ViewEventBus.Instance != null)
-                {
-                    ViewEventBus.Instance.OnUIToggle.Publish(false);
-                    ViewEventBus.Instance.OnLocalPlayerSpawnQueueChanged.Publish(false);
-                }
+                MainHUDUI hud = MainHUDUI.Instance;
+                KeepHudHidden(hud != null ? hud.GetComponent<UIDocument>() : null);
+                if (ViewEventBus.Instance != null) ViewEventBus.Instance.OnLocalPlayerSpawnQueueChanged.Publish(false);
                 Scene loading = SceneManager.GetSceneByBuildIndex(CloneStarConstants.LoadingScreenSceneIndex);
                 if (loading.IsValid() && loading.isLoaded)
                 {
@@ -262,8 +306,22 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// A waiting player who got a seat: once their character is there, the HUD the view hid comes back (nothing in the
-        /// game shows it again by itself, short of closing a menu).
+        /// The HUD's own document hidden (its panels, missions, hints, subtitles and reticle), object outlines off, and the
+        /// voice panel showing who speaks: the game's HUD as with its UI toggle off, though the toggle is on.
+        /// </summary>
+        private static void KeepHudHidden(UIDocument hud)
+        {
+            VisualElement root = hud != null ? hud.rootVisualElement : null;
+            if (root != null) root.style.display = DisplayStyle.None;
+            Knife.HDRPOutline.Core.OutlineObject.ForceAllDisabled = true;
+            // The game shows the voice panel whenever its HUD (with its own speaking marks) is off.
+            if (ViewEventBus.Instance != null) ViewEventBus.Instance.VoipPanelConditionsChanged.Publish(VoipPanelController.VoipPanelShowStates.MainHUDDisabled, true);
+        }
+
+        /// <summary>
+        /// After the view: once a living character's HUD is up (past its boot sequence, after which the game switches it on
+        /// itself), what the view kept off comes back: the HUD canvas, and the HUD, the markers and the rest through the game's
+        /// UI toggle. A dead player's character stays dead, so their HUD stays off until they leave the mission.
         /// </summary>
         private static void RestoreHudWhenPlaying()
         {
@@ -275,6 +333,9 @@ namespace VoidCrewFleet
             }
             LocalPlayer me = LocalPlayer.Instance;
             if (me == null || me.IsDead) return;
+            // A new character's HUD is off until its boot sequence ends.
+            MainHUDUI hud = MainHUDUI.Instance;
+            if (hud != null && !hud.enabled) return;
             _restoreHud = false;
             try
             {
@@ -289,13 +350,38 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// The game shows its HUD again when the last menu closes (its handler turns it back on when its toggle state says
-        /// so, and opening a menu sets that state). While the view is open, closing a menu leaves the HUD hidden.
+        /// The game switches its HUD back on with its UI toggle: when a menu closes, with the toggle-UI key, and as the view
+        /// opens. While the view is open the HUD stays hidden, and the toggle stays on for the text chat.
         /// </summary>
-        [GamePatch(Feature, "UI.MainHUD.MainHUDUI", "OnMenuVisibilityChanged", PatchKind.Prefix, Optional = true)]
-        private static void MenuVisibilityPrefix(bool menuVisible)
+        [GamePatch(Feature, "UI.MainHUD.MainHUDUI", "EnableUI", PatchKind.Postfix, Optional = true)]
+        private static void HudEnablePostfix(UIDocument ___doc)
         {
-            if (_active && !menuVisible) MainHUDUI.UIToggleState = false;
+            if (!_active) return;
+            try
+            {
+                KeepHudHidden(___doc);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Keeping the game's HUD hidden for the spectator view", e);
+            }
+        }
+
+        /// <summary>
+        /// The game's other screens that follow its UI toggle stay off while the view is open, as they were with the toggle
+        /// off: the HUD's context info (which shows and hides the HUD's whole document, also as menus open and close), the
+        /// markers, the turret's and the pilot's screens, and the HUD's toggled objects. The text chat, which follows the
+        /// toggle too, is left to it.
+        /// </summary>
+        [GamePatch(Feature, "ContextInfoDisplay", "EnableUI", PatchKind.Prefix, Optional = true)]
+        [GamePatch(Feature, "UI.ObjectMarker.ObjectMarkerViewer", "EnableUI", PatchKind.Prefix, Optional = true)]
+        [GamePatch(Feature, "UI.PilotHUD.WeaponHUD", "EnableUI", PatchKind.Prefix, Optional = true)]
+        [GamePatch(Feature, "UI.PilotHUD.PilotHUD", "EnableUI", PatchKind.Prefix, Optional = true)]
+        [GamePatch(Feature, "Code.Gameplay.Player.HUD.HUD_ToggleBehavior", "EnableUI", PatchKind.Prefix, Optional = true)]
+        private static void ScreenTogglePrefix(ref bool enable)
+        {
+            // Nothing here can throw: it only reads the view's state.
+            if (_active) enable = false;
         }
 
         // ---------------------------------------------------------------- the camera
@@ -319,6 +405,20 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
+        /// Reads the living ships into LivingSlots when the last read is ShipReadSeconds old, or at once: FleetShips makes a new
+        /// list for each read, which the view would otherwise do every frame. A ship that starts dying leaves the view within
+        /// that time.
+        /// </summary>
+        private static void ReadShips(bool now)
+        {
+            float time = Time.unscaledTime;
+            if (!now && time - _shipsReadAt < ShipReadSeconds) return;
+            _shipsReadAt = time;
+            LivingSlots.Clear();
+            foreach (int slot in FleetShips.AliveSlots()) LivingSlots.Add(slot);
+        }
+
+        /// <summary>
         /// The ships this player may watch, into ShipList: living ones, their own team's first. A waiting player only watches
         /// their own team's, and one not on a team yet none.
         /// </summary>
@@ -326,13 +426,12 @@ namespace VoidCrewFleet
         {
             ShipList.Clear();
             if (entry.State == CrewState.Waiting && entry.Team < 0) return;
-            List<int> alive = FleetShips.AliveSlots();
-            foreach (int slot in alive)
+            foreach (int slot in LivingSlots)
             {
                 if (FleetShips.TeamOfSlot(slot) == entry.Team) ShipList.Add(slot);
             }
             if (entry.State == CrewState.Waiting) return;
-            foreach (int slot in alive)
+            foreach (int slot in LivingSlots)
             {
                 if (FleetShips.TeamOfSlot(slot) != entry.Team) ShipList.Add(slot);
             }
@@ -346,12 +445,33 @@ namespace VoidCrewFleet
             if (ship != null && turnBehind) _yaw = ship.transform.eulerAngles.y;
         }
 
+        /// <summary>
+        /// The point the camera circles around a ship: its helm's outside camera (where the pilot's third-person view turns),
+        /// else the ship's own centre. Looked up once for each ship watched.
+        /// </summary>
+        private static Transform Target(PlayerControlledShip ship)
+        {
+            if (ship == _targetShip && _target != null) return _target;
+            _targetShip = ship;
+            _target = ship.transform;
+            try
+            {
+                Helm helm = ship.GetModule<Helm>();
+                if (helm != null && helm.ExternalCamera != null) _target = helm.ExternalCamera.transform;
+            }
+            catch
+            {
+                // the ship's own centre then
+            }
+            return _target;
+        }
+
         /// <summary>The middle of the living ships; false when there are none.</summary>
         private static bool FleetMiddle(out Vector3 middle)
         {
             middle = Vector3.zero;
             int count = 0;
-            foreach (int slot in FleetShips.AliveSlots())
+            foreach (int slot in LivingSlots)
             {
                 PlayerControlledShip ship = FleetShips.BySlot(slot);
                 if (ship == null) continue;
@@ -363,8 +483,22 @@ namespace VoidCrewFleet
             return true;
         }
 
+        /// <summary>
+        /// The player is typing in the game's text chat. The chat's TextingEnabled is set and cleared with its input line; its
+        /// _chatOpened is not cleared when a message is sent (only by Escape), so it would keep the view's controls off.
+        /// </summary>
+        private static bool Typing
+        {
+            get
+            {
+                TextChat chat = TextChat.Instance;
+                return chat != null && chat.TextingEnabled;
+            }
+        }
+
         private static void Follow(CrewEntry entry)
         {
+            ReadShips(false);
             FindShips(entry);
             if (ShipList.Count == 0)
             {
@@ -374,7 +508,8 @@ namespace VoidCrewFleet
             }
             else if (!ShipList.Contains(_watching)) Watch(ShipList[0], true);
 
-            // Switching ships and looking around (not while a menu is open: its clicks are for its buttons).
+            // Switching ships and looking around: not while a menu is open (its clicks are for its buttons), nor while the
+            // player types in the text chat (the keys and the mouse are for their message).
             int step = 0;
             bool menu = MenuScreenController.IsOpen();
             // The label steps aside for the game's menus (it is drawn above them).
@@ -383,9 +518,10 @@ namespace VoidCrewFleet
                 _labelUnderMenu = menu;
                 ShowLabel(!menu);
             }
-            Keyboard keyboard = menu ? null : Keyboard.current;
-            Mouse mouse = menu ? null : Mouse.current;
-            Gamepad pad = menu ? null : Gamepad.current;
+            bool busy = menu || Typing;
+            Keyboard keyboard = busy ? null : Keyboard.current;
+            Mouse mouse = busy ? null : Mouse.current;
+            Gamepad pad = busy ? null : Gamepad.current;
             if (keyboard != null && (keyboard.eKey.wasPressedThisFrame || keyboard.rightArrowKey.wasPressedThisFrame)) step = 1;
             if (keyboard != null && (keyboard.qKey.wasPressedThisFrame || keyboard.leftArrowKey.wasPressedThisFrame)) step = -1;
             if (mouse != null && mouse.leftButton.wasPressedThisFrame) step = 1;
@@ -413,18 +549,15 @@ namespace VoidCrewFleet
             PlayerControlledShip ship = FleetShips.BySlot(_watching);
             if (ship != null)
             {
-                Transform target = ship.transform;
-                try
-                {
-                    Helm helm = ship.GetModule<Helm>();
-                    if (helm != null && helm.ExternalCamera != null) target = helm.ExternalCamera.transform;
-                }
-                catch
-                {
-                    // the ship's own centre then
-                }
                 Quaternion rotation = Quaternion.Euler(_pitch, _yaw, 0f);
-                _rig.transform.SetPositionAndRotation(target.position - rotation * Vector3.forward * _distance, rotation);
+                _rig.transform.SetPositionAndRotation(Target(ship).position - rotation * Vector3.forward * _distance, rotation);
+            }
+            else if (_watching >= 0)
+            {
+                // The watched ship is gone since the ships were last read: they are read again next frame, and the view stays
+                // where it is meanwhile.
+                _shipsReadAt = float.NegativeInfinity;
+                return;
             }
             else
             {
@@ -454,6 +587,19 @@ namespace VoidCrewFleet
                     box.style.right = 0;
                     box.style.bottom = 70;
                     box.style.alignItems = Align.Center;
+                    // Fleet's notices for a spectator without a text chat (ShowNotice), above the label. Player names in them
+                    // show as typed, not as markup.
+                    for (int i = 0; i < NoticeLines; i++)
+                    {
+                        Label line = Ui.HudLabel("", 20, Color.white);
+                        line.enableRichText = false;
+                        line.style.maxWidth = 1100;
+                        line.style.unityTextAlign = TextAnchor.UpperCenter;
+                        line.style.marginBottom = 6;
+                        line.style.display = DisplayStyle.None;
+                        NoticeLabels[i] = line;
+                        box.Add(line);
+                    }
                     _title = Ui.HudLabel("", 30, Ui.GameOrange);
                     _title.style.unityFontStyleAndWeight = FontStyle.Bold;
                     _hint = Ui.HudLabel("", 20, Ui.GameBrightGrey);
@@ -492,6 +638,63 @@ namespace VoidCrewFleet
                 ? "YOUR SHIP IS LOST · WATCHING " + watched
                 : "WAITING FOR A PLACE" + (entry.Team >= 0 ? " ON THE " + PvpTeams.TeamName(entry.Team) + " TEAM" : "") + " · WATCHING " + watched;
             _hint.text = ships > 1 ? "Q / E: OTHER SHIP     MOUSE: LOOK AROUND     WHEEL: ZOOM" : "MOUSE: LOOK AROUND     WHEEL: ZOOM";
+        }
+
+        // ---------------------------------------------------------------- notices without a chat
+
+        /// <summary>
+        /// One of Fleet's notices for a spectator without a text chat (the chat is part of the character: a waiting player, or
+        /// one back after their ship was lost, has none): a line over the label for NoticeSeconds, the newest at the bottom.
+        /// Nothing while the view is closed.
+        /// </summary>
+        public static void ShowNotice(string message)
+        {
+            if (!_active || string.IsNullOrEmpty(message) || NoticeLabels[NoticeLines - 1] == null) return;
+            try
+            {
+                for (int i = 0; i < NoticeLines - 1; i++)
+                {
+                    NoticeLabels[i].text = NoticeLabels[i + 1].text;
+                    NoticeUntil[i] = NoticeUntil[i + 1];
+                }
+                NoticeLabels[NoticeLines - 1].text = message.ToUpperInvariant();
+                NoticeUntil[NoticeLines - 1] = Time.unscaledTime + NoticeSeconds;
+                _noticesShown = true;
+                FadeNotices();
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Showing a notice to a spectator", e);
+            }
+        }
+
+        /// <summary>Every frame while notices show: each fades out at the end of its time, then goes.</summary>
+        private static void FadeNotices()
+        {
+            if (!_noticesShown) return;
+            float now = Time.unscaledTime;
+            bool any = false;
+            for (int i = 0; i < NoticeLines; i++)
+            {
+                Label line = NoticeLabels[i];
+                if (line == null) continue;
+                float left = NoticeUntil[i] - now;
+                line.style.display = left > 0f ? DisplayStyle.Flex : DisplayStyle.None;
+                line.style.opacity = Mathf.Clamp01(left / NoticeFadeSeconds);
+                if (left > 0f) any = true;
+            }
+            _noticesShown = any;
+        }
+
+        /// <summary>No notices left over for the next time the view opens.</summary>
+        private static void ClearNotices()
+        {
+            for (int i = 0; i < NoticeLines; i++)
+            {
+                NoticeUntil[i] = 0f;
+                if (NoticeLabels[i] != null) NoticeLabels[i].style.display = DisplayStyle.None;
+            }
+            _noticesShown = false;
         }
 
         // ---------------------------------------------------------------- staying a spectator
@@ -640,15 +843,56 @@ namespace VoidCrewFleet
 
         private static readonly FieldInfo OcclusionNodesField = GameMember.Field(typeof(LocalPlayerOcclusionController), "_occlusionNodes");
 
+        /// <summary>An occlusion controller's hull parts, read without a reflection call; null when the field is missing.</summary>
+        private static readonly AccessTools.FieldRef<LocalPlayerOcclusionController, List<IOcclusionNode>> OcclusionNodes =
+            FieldRef<LocalPlayerOcclusionController, List<IOcclusionNode>>(OcclusionNodesField);
+
+        /// <summary>
+        /// The occlusion controllers whose hull parts are shown as from open space, by instance ID, with how many parts each
+        /// had then: a controller is done again only when it is new or its parts have changed.
+        /// </summary>
+        private static readonly Dictionary<int, int> ShownFromSpace = new Dictionary<int, int>();
+
+        /// <summary>A reader for a field of a game object (no reflection call per read); null when the field is missing.</summary>
+        private static AccessTools.FieldRef<T, F> FieldRef<T, F>(FieldInfo field) where T : class
+        {
+            if (field == null) return null;
+            try
+            {
+                return AccessTools.FieldRefAccess<T, F>(field);
+            }
+            catch (Exception e)
+            {
+                Log.Warn("Game field " + field.DeclaringType.Name + "." + field.Name + " can't be read directly (" + e.Message + "); the game may have changed.");
+                return null;
+            }
+        }
+
         /// <summary>
         /// The ships' hidden parts (interior walls, exterior plates) are shown or hidden for where the local player is. A
         /// spectator is in open space as far as that goes (and may have no character, which the game's code would trip on).
+        /// Their parts are set for that once, as the view opens (ShowShipsFromSpace) or when a controller is new to it; after
+        /// that the game's calls are just skipped.
         /// </summary>
         [GamePatch(Feature, "CG.Graphics.LocalPlayerOcclusionController", "UpdateOcclusion", PatchKind.Prefix)]
         private static bool OcclusionPrefix(LocalPlayerOcclusionController __instance)
         {
-            if (!_active && LocalPlayer.Instance != null) return true;
-            ShowFromSpace(__instance);
+            if (!_active && LocalPlayer.Instance != null)
+            {
+                // The game's own rules again: the next time, the parts are set afresh.
+                if (ShownFromSpace.Count > 0) ShownFromSpace.Clear();
+                return true;
+            }
+            try
+            {
+                List<IOcclusionNode> nodes = OcclusionNodes != null ? OcclusionNodes(__instance) : null;
+                int shown;
+                if (nodes != null && (!ShownFromSpace.TryGetValue(__instance.GetInstanceID(), out shown) || shown != nodes.Count)) ShowFromSpace(__instance);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Showing the ships to a spectator", e);
+            }
             return false;
         }
 
@@ -660,6 +904,7 @@ namespace VoidCrewFleet
         {
             try
             {
+                ShownFromSpace.Clear();
                 foreach (LocalPlayerOcclusionController controller in UnityEngine.Object.FindObjectsOfType<LocalPlayerOcclusionController>()) ShowFromSpace(controller);
             }
             catch (Exception e)
@@ -668,14 +913,15 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>One occlusion controller's hidden parts as the game shows them to a player in open space.</summary>
+        /// <summary>One occlusion controller's hidden parts as the game shows them to a player in open space (remembered in ShownFromSpace).</summary>
         private static void ShowFromSpace(LocalPlayerOcclusionController controller)
         {
             try
             {
-                var nodes = OcclusionNodesField != null ? OcclusionNodesField.GetValue(controller) as List<IOcclusionNode> : null;
+                List<IOcclusionNode> nodes = OcclusionNodes != null && controller != null ? OcclusionNodes(controller) : null;
                 if (nodes == null) return;
                 foreach (IOcclusionNode node in nodes) node.ToggleRenderers(!node.HideOnLocalPlayerIsInSpace);
+                ShownFromSpace[controller.GetInstanceID()] = nodes.Count;
             }
             catch (Exception e)
             {
@@ -692,7 +938,7 @@ namespace VoidCrewFleet
             try
             {
                 LocalPlayerOcclusionController current = LocalPlayerOcclusionController.Instance;
-                if (current == null || FleetShips.OwnerOf(current) != dying || OcclusionNodesField == null) return;
+                if (current == null || FleetShips.OwnerOf(current) != dying || OcclusionNodes == null) return;
                 PropertyInfo instance = typeof(LocalPlayerOcclusionController).GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
                 MethodInfo setter = instance != null ? instance.GetSetMethod(true) : null;
                 if (setter == null) return;
@@ -702,7 +948,7 @@ namespace VoidCrewFleet
                     LocalPlayerOcclusionController controller = ship.GetComponentInChildren<LocalPlayerOcclusionController>(true);
                     if (controller == null) continue;
                     setter.Invoke(null, new object[] { controller });
-                    var nodes = OcclusionNodesField.GetValue(current) as List<IOcclusionNode>;
+                    List<IOcclusionNode> nodes = OcclusionNodes(current);
                     int moved = 0;
                     if (nodes != null)
                     {
