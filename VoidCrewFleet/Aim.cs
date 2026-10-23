@@ -19,9 +19,16 @@ namespace VoidCrewFleet
         private static void FindInteractablePostfix(Transform ___cameraTransform)
         {
             if (___cameraTransform == null) return;
-            _eye = ___cameraTransform.position;
-            _forward = ___cameraTransform.forward;
-            _time = Time.unscaledTime;
+            try
+            {
+                _eye = ___cameraTransform.position;
+                _forward = ___cameraTransform.forward;
+                _time = Time.unscaledTime;
+            }
+            catch (System.Exception e)
+            {
+                Log.Failure("Reading where the local player looks", e);
+            }
         }
 
         public static bool Get(out Vector3 eye, out Vector3 forward)
