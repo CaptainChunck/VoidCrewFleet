@@ -76,6 +76,7 @@ namespace VoidCrewFleet
             Register("PvpTeams.KeepHubTeamsComplete", () => FleetRuntime.Slow += PvpTeams.KeepHubTeamsComplete);
             Register("PvpTeamScreen.Tick", () => FleetRuntime.Slow += PvpTeamScreen.Tick);
             Register("CrewBadge.Tick", () => FleetRuntime.Slow += CrewBadge.Tick);
+            Register("CrewList.Tick", () => FleetRuntime.Slow += CrewList.Tick);
             Register("PvpCombat.KeepFactions", () => FleetRuntime.Slow += PvpCombat.KeepFactions);
             Register("PvpCombat.KeepHostility", () => FleetRuntime.Slow += PvpCombat.KeepHostility);
             Register("PvpMatch.Tick", () => FleetRuntime.Slow += PvpMatch.Tick);

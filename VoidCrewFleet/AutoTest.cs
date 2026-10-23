@@ -17,6 +17,7 @@ using PlatformAbstractionLayer;
 using Photon.Pun;
 using ResourceAssets;
 using ToolClasses;
+using UI.MainHUD;
 using UnityEngine;
 using UnityEngine.UIElements;
 
@@ -135,7 +136,9 @@ namespace VoidCrewFleet
                     if (Time.unscaledTime - _lastReport < 5f) return;
                     _lastReport = Time.unscaledTime;
                     Report("mission");
-                    Screenshot("mission");
+                    // The first shot: the crew list with a full crew's stand-in rows over the ship rows; then the real list.
+                    CrewListPreview(_reports == 0);
+                    Screenshot(_reports == 0 ? "crew-list" : "mission");
                     if (FleetSession.IsPvP && _reports == 0) StartHackTest();
                     if (++_reports < (FleetSession.IsPvP ? 10 : 3)) return;
                     if (Settings.AutoTestTour.Value && FleetSession.IsPvP && Step.Tour > _done)
@@ -887,6 +890,7 @@ namespace VoidCrewFleet
             text.AppendLine("  active sector " + (GameSessionManager.ActiveSector != null ? GameSessionManager.ActiveSector.Id.ToString() : "none") +
                             ", room players " + PhotonNetwork.PlayerList.Length + "/" + (PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.MaxPlayers : 0));
             text.AppendLine("  crew row: " + CrewBadge.Describe());
+            text.AppendLine("  crew list: " + CrewList.Describe());
             text.AppendLine("  chat: " + DescribeChat());
             Log.Info(text.ToString());
         }
@@ -922,6 +926,58 @@ namespace VoidCrewFleet
             catch (Exception e)
             {
                 return "unknown (" + e.Message + ")";
+            }
+        }
+
+        private static readonly List<VisualElement> PreviewRows = new List<VisualElement>();
+
+        /// <summary>
+        /// Self-test, alone in the room: 7 stand-in rows (a full crew's other players) made from the game's own row template,
+        /// above the ship rows, to see a big room's crew list; taken out again with show false.
+        /// </summary>
+        private static void CrewListPreview(bool show)
+        {
+            try
+            {
+                foreach (VisualElement row in PreviewRows) row.RemoveFromHierarchy();
+                PreviewRows.Clear();
+                if (!show) return;
+                MainHUDUI hud = MainHUDUI.Instance;
+                CoopBuddiesPanel panel = hud != null ? hud.GetComponent<CoopBuddiesPanel>() : null;
+                UIDocument document = hud != null ? hud.GetComponent<UIDocument>() : null;
+                VisualElement list = document != null && document.rootVisualElement != null ? document.rootVisualElement.Q("CoopBuddiesContainer") : null;
+                if (panel == null || panel.CoopBuddyPrefab == null || list == null)
+                {
+                    Log.Info("[autotest] Crew list preview: the HUD has no crew list.");
+                    return;
+                }
+                VisualElement ships = list.Q("FleetShipRows");
+                int at = ships != null && ships.parent == list ? list.IndexOf(ships) : list.childCount;
+                for (int i = 0; i < CrewRules.MaxCrew - 1; i++)
+                {
+                    TemplateContainer row = panel.CoopBuddyPrefab.Instantiate();
+                    Label name = row.Q<Label>("PlayerName");
+                    if (name != null) name.text = "Crewmate " + (i + 2);
+                    Label rank = row.Q<Label>("RankLabel");
+                    if (rank != null) rank.text = (10 + i * 7).ToString();
+                    // As the game sets a row up (CoopBuddyView): its menu and mute marks hidden, a healthy player.
+                    foreach (string part in new[] { "ActionPanel", "ChatMuteState", "VoiceMuteState", "MicrophoneMutedState" })
+                    {
+                        VisualElement hidden = row.Q(part);
+                        if (hidden != null) hidden.style.display = DisplayStyle.None;
+                    }
+                    StateVE state = row.Q<StateVE>();
+                    if (state != null) state.SetClassState("player-hud-health", "high");
+                    VisualElement health = row.Q("HealthBarProgress");
+                    if (health != null) health.style.width = Length.Percent(100 - i * 9);
+                    list.Insert(at + i, row);
+                    PreviewRows.Add(row);
+                }
+                Log.Info("[autotest] Crew list preview: " + PreviewRows.Count + " stand-in rows above the ship rows.");
+            }
+            catch (Exception e)
+            {
+                Log.Failure("[autotest] crew list preview", e);
             }
         }
 

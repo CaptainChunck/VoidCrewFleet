@@ -72,6 +72,36 @@ namespace VoidCrewFleet
             return slots;
         }
 
+        /// <summary>
+        /// The other players the HUD's crew list shows, in the list's order (rows): for a player with a ship (picked in the
+        /// hub, or theirs in a mission, lost or not), the players on that ship; for one without (the hub before picking, a
+        /// one-ship game, a waiting player), the first ones. Never more than maxRows.
+        /// </summary>
+        public static List<int> Listed(IList<int> rows, IDictionary<int, CrewEntry> crews, int local, int maxRows)
+        {
+            var listed = new List<int>();
+            CrewEntry me = default(CrewEntry);
+            bool ship = crews != null && crews.TryGetValue(local, out me) && me.Slot >= 0;
+            foreach (int actor in rows)
+            {
+                if (listed.Count >= maxRows) break;
+                if (actor == local) continue;
+                CrewEntry entry;
+                if (ship && (!crews.TryGetValue(actor, out entry) || entry.Slot != me.Slot)) continue;
+                listed.Add(actor);
+            }
+            return listed;
+        }
+
+        /// <summary>The other ships on a ship's side, lowest slot first: every other ship, or its team's in a team match.</summary>
+        public static List<int> OtherShipsOfSide(int slot, int ships, bool teamMatch)
+        {
+            if (slot < 0) return new List<int>();
+            List<int> side = SlotsOfTeam(TeamOf(slot, teamMatch), ships, teamMatch);
+            side.Remove(slot);
+            return side;
+        }
+
         /// <summary>Players crewing a ship (spectators not counted).</summary>
         public static int CrewOf(IDictionary<int, CrewEntry> crews, ICollection<int> players, int slot, int except = int.MinValue)
         {
