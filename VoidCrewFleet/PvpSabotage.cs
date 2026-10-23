@@ -46,6 +46,10 @@ namespace VoidCrewFleet
         private static bool _contextIsSwitch;
         private static readonly Dictionary<long, Applied> Active = new Dictionary<long, Applied>();
 
+        /// <summary>Apply's working sets, reused every tick: the panels the list still holds, and those to switch back on.</summary>
+        private static readonly HashSet<long> Listed = new HashSet<long>();
+        private static readonly List<long> Ended = new List<long>();
+
         /// <summary>
         /// The host's own latest list. A room property only changes on the host itself once the server sends the change
         /// back (the game broadcasts property changes to everyone), so right after a write the room still holds the old
@@ -218,20 +222,22 @@ namespace VoidCrewFleet
             return false;
         }
 
+        /// <summary>The list as it stands (the host's own, or the room's), not copied: null or empty when nothing is sabotaged.</summary>
+        private static int[] RoomEntries()
+        {
+            if (HostHasLatest()) return _hostEntries;
+            object value;
+            if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null && PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeySabotage, out value))
+                return value as int[];
+            return null;
+        }
+
+        /// <summary>A copy of the list, to add to.</summary>
         private static List<int> ReadRoom()
         {
             var entries = new List<int>();
-            if (HostHasLatest())
-            {
-                entries.AddRange(_hostEntries);
-                return entries;
-            }
-            object value;
-            if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null && PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeySabotage, out value))
-            {
-                var array = value as int[];
-                if (array != null) entries.AddRange(array);
-            }
+            int[] current = RoomEntries();
+            if (current != null) entries.AddRange(current);
             return entries;
         }
 
@@ -258,16 +264,21 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- every client
 
-        /// <summary>A few times a second: what is sabotaged stays off, and comes back on when its time is up.</summary>
+        /// <summary>
+        /// A few times a second: what is sabotaged stays off, and comes back on when its time is up. With nothing sabotaged
+        /// and nothing to switch back on (most of the time) it stops at once; the working sets are reused.
+        /// </summary>
         public static void Apply()
         {
             // Notices a new room or host between matches too.
             HostHasLatest();
             if (Active.Count == 0 && (!PvpCombat.Active || !PhotonNetwork.InRoom)) return;
-            List<int> entries = PvpCombat.Active ? ReadRoom() : new List<int>();
-            var current = new HashSet<long>();
+            int[] entries = PvpCombat.Active ? RoomEntries() : null;
+            int count = entries != null ? entries.Length : 0;
+            if (count < 4 && Active.Count == 0) return;
+            Listed.Clear();
             bool expiredAny = false;
-            for (int i = 0; i + 3 < entries.Count; i += 4)
+            for (int i = 0; i + 3 < count; i += 4)
             {
                 if (Expired(entries[i + 2]))
                 {
@@ -275,7 +286,7 @@ namespace VoidCrewFleet
                     continue;
                 }
                 long key = Key(entries[i], entries[i + 1]);
-                current.Add(key);
+                Listed.Add(key);
                 Applied applied;
                 if (!Active.TryGetValue(key, out applied))
                 {
@@ -285,18 +296,29 @@ namespace VoidCrewFleet
                 }
                 Enforce(applied);
             }
-            foreach (long key in new List<long>(Active.Keys))
+            if (Active.Count > 0)
             {
-                if (current.Contains(key)) continue;
-                Restore(Active[key]);
-                Active.Remove(key);
+                Ended.Clear();
+                foreach (KeyValuePair<long, Applied> pair in Active)
+                {
+                    if (!Listed.Contains(pair.Key)) Ended.Add(pair.Key);
+                }
+                for (int i = 0; i < Ended.Count; i++)
+                {
+                    Restore(Active[Ended[i]]);
+                    Active.Remove(Ended[i]);
+                }
             }
             if (expiredAny && PhotonNetwork.IsMasterClient)
             {
                 var kept = new List<int>();
-                for (int i = 0; i + 3 < entries.Count; i += 4)
+                for (int i = 0; i + 3 < count; i += 4)
                 {
-                    if (!Expired(entries[i + 2])) kept.AddRange(new[] { entries[i], entries[i + 1], entries[i + 2], entries[i + 3] });
+                    if (Expired(entries[i + 2])) continue;
+                    kept.Add(entries[i]);
+                    kept.Add(entries[i + 1]);
+                    kept.Add(entries[i + 2]);
+                    kept.Add(entries[i + 3]);
                 }
                 WriteRoom(kept);
             }
