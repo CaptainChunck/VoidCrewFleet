@@ -75,6 +75,7 @@ namespace VoidCrewFleet
             public MethodBase Target;
             public MethodInfo Hook;
             public string Label;
+            public PatchKind Kind;
         }
 
         /// <summary>True when every required patch of the feature is in (and the feature has at least one).</summary>
@@ -85,6 +86,18 @@ namespace VoidCrewFleet
         }
 
         private static Harmony _harmony;
+
+        /// <summary>The plugin's Harmony instance (null before ApplyAll).</summary>
+        public static Harmony Instance
+        {
+            get { return _harmony; }
+        }
+
+        /// <summary>Every patch method that went in, prefixes, postfixes and finalizers, once each (for the developer profiler).</summary>
+        public static List<MethodInfo> AppliedHooks()
+        {
+            return Patched.Values.SelectMany(list => list).Where(p => p.Kind != PatchKind.Transpiler).Select(p => p.Hook).Distinct().ToList();
+        }
         private static readonly List<KeyValuePair<GamePatchAttribute, MethodInfo>> Later = new List<KeyValuePair<GamePatchAttribute, MethodInfo>>();
 
         public static void ApplyAll(Harmony harmony)
@@ -175,7 +188,7 @@ namespace VoidCrewFleet
                 Applied[patch.Feature] = count + 1;
                 List<AppliedPatch> patched;
                 if (!Patched.TryGetValue(patch.Feature, out patched)) Patched[patch.Feature] = patched = new List<AppliedPatch>();
-                patched.Add(new AppliedPatch { Target = target, Hook = hook, Label = label });
+                patched.Add(new AppliedPatch { Target = target, Hook = hook, Label = label, Kind = patch.Kind });
                 Log.Verbose("Patched " + label + " (" + patch.Feature + ", " + hook.DeclaringType.Name + "." + hook.Name + ").");
             }
             catch (Exception e)

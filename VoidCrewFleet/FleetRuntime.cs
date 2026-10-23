@@ -51,9 +51,11 @@ namespace VoidCrewFleet
                 if (!CheckReady()) return;
                 GameReady = true;
                 Patcher.ApplyLater();
+                FleetProfiler.Install(Patcher.Instance);
                 Net.StartListening();
                 Log.Info("The game has loaded; Void Crew Fleet is active.");
             }
+            FleetProfiler.Frame();
             Run(FrameHandlers.Of(Frame), "per-frame");
             RunSlow();
         }
@@ -117,7 +119,8 @@ namespace VoidCrewFleet
         {
             try
             {
-                handler();
+                if (FleetProfiler.On) FleetProfiler.Measure(handler);
+                else handler();
             }
             catch (Exception e)
             {
