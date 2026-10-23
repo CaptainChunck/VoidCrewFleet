@@ -128,11 +128,41 @@ internal static class CrewRulesTest
         Equal(0, CrewRules.EmptyShips(Crews(false, 1, 1), Players(1), 2).Single(), "co-op: the empty ship is ship 1 (slot 0)");
         Check(CrewRules.CheckCrews(Crews(false, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8, 0, 9, 0), Players(9), 2, Name) != null,
             "co-op: nine on one ship is refused");
+
+        // A full ship (8) only takes another player when no ship has room.
+        List<int> fifteen = Players(15);
+        Dictionary<int, CrewEntry> eightSeven = Crews(false, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8, 0, 9, 1, 10, 1, 11, 1, 12, 1, 13, 1, 14, 1, 15, 1);
+        Equal(1, CrewRules.SmallestCrew(eightSeven, fifteen, new[] { 0, 1 }), "the ship with room, not the full one");
+        Equal(1, CrewRules.PlaceFor(eightSeven, fifteen, new List<int> { 0, 1 }, false), "a late joiner goes to the ship with room");
+        eightSeven[16] = CrewEntry.Play(16, 0, 1);
+        Equal(0, CrewRules.SmallestCrew(eightSeven, Players(16), new[] { 0, 1 }), "with every ship full, the lowest");
+
+        // Players who joined when every ship was full: nine picked ship 1, and the mission added ship 3 for them.
+        var picks = new Dictionary<int, CrewEntry>();
+        for (int actor = 1; actor <= 9; actor++) picks[actor] = CrewEntry.Play(actor, 0, 0);
+        for (int actor = 10; actor <= 17; actor++) picks[actor] = CrewEntry.Play(actor, 0, 1);
+        List<int> seventeen = Players(17);
+        Dictionary<int, CrewEntry> spread = CrewRules.PlaceEveryone(picks, seventeen, new List<int> { 0, 1, 2 }, false);
+        Equal(8, CrewRules.CrewOf(spread, seventeen, 0), "an overfull pick keeps a full crew");
+        Equal(2, spread[9].Slot, "its latest joiner goes to the added ship");
+        Equal(1, CrewRules.CrewOf(spread, seventeen, 2), "which doesn't fly empty");
+        Equal(9, CrewRules.CrewOf(CrewRules.PlaceEveryone(picks, seventeen, new List<int> { 0, 1 }, false), seventeen, 0),
+            "with no room anywhere, the picks stay");
+
+        // PvP: an overfull ship hands players only to its own team's ships.
+        var teamPicks = new Dictionary<int, CrewEntry>();
+        for (int actor = 1; actor <= 9; actor++) teamPicks[actor] = CrewEntry.Play(actor, 0, 0);
+        teamPicks[10] = CrewEntry.Play(10, 1, 1);
+        List<int> ten = Players(10);
+        Equal(9, CrewRules.CrewOf(CrewRules.PlaceEveryone(teamPicks, ten, new List<int> { 0, 1 }, true), ten, 0), "PvP: never to the other team");
+        Dictionary<int, CrewEntry> teamSpread = CrewRules.PlaceEveryone(teamPicks, ten, new List<int> { 0, 1, 2, 3 }, true);
+        Equal(2, teamSpread[9].Slot, "PvP: to its team's other ship");
+        Equal(0, teamSpread[9].Team, "PvP: and stays BLUE");
     }
 
     // ---------------------------------------------------------------- RosterRules
 
-    private const long Hold = 180000;
+    private const int Hold = 180000;
 
     private static RosterSeat Seat(List<RosterSeat> seats, string id)
     {
@@ -150,7 +180,7 @@ internal static class CrewRulesTest
             new RosterSeat { Id = "C", Actor = 3, Team = 1, Slot = 1, State = CrewState.Playing },
             new RosterSeat { Id = "D", Actor = 4, Team = 1, Slot = 1, State = CrewState.Playing }
         };
-        long now = 1000;
+        int now = 1000;
 
         RosterRules.Leave(seats, "A", now);
         Equal(1, RosterRules.Held(seats, 0), "A's seat is held");
@@ -166,7 +196,7 @@ internal static class CrewRulesTest
         RosterRules.Leave(seats, "A", now + 70000);
         Check(!RosterRules.ExpireHolds(seats, now + 70000 + Hold - 1, Hold), "the hold holds until three minutes");
         Check(RosterRules.ExpireHolds(seats, now + 70000 + Hold, Hold), "then it runs out");
-        Check(RosterRules.FillSeats(seats, alive, 2), "the free seat is given out");
+        Check(RosterRules.FillSeats(seats, alive, 2, now + 70000 + Hold), "the free seat is given out");
         Equal(CrewState.Playing, Seat(seats, "E").State, "the waiting newcomer gets it");
         Equal(0, Seat(seats, "E").Team, "on BLUE");
         a = RosterRules.Arrive(seats, "A", 7, "A", alive, true, 2, now + 300000);
@@ -178,7 +208,7 @@ internal static class CrewRulesTest
         Equal(CrewState.Waiting, f.State, "another newcomer waits");
         RosterRules.Leave(seats, "B", now + 310000);
         RosterRules.ExpireHolds(seats, now + 310000 + Hold, Hold);
-        RosterRules.FillSeats(seats, alive, 2);
+        RosterRules.FillSeats(seats, alive, 2, now + 310000 + Hold);
         Equal(CrewState.Playing, Seat(seats, "A").State, "BLUE's own waiter gets BLUE's free seat first");
         Equal(CrewState.Waiting, Seat(seats, "F").State, "the team-less waiter still waits");
 
@@ -272,5 +302,109 @@ internal static class CrewRulesTest
         Check(!list.ContainsKey(2), "an away player isn't in the crew list");
         Equal(-1, list[8].Slot, "a waiting player has no ship");
         Equal(CrewState.Waiting, list[8].State, "and is waiting");
+
+        QueueChecks(now);
+    }
+
+    private static void QueueChecks(int now)
+    {
+        var alive = new List<int> { 0, 1 };
+
+        // Free seats on both teams (4 per team, BLUE 2 taken, RED 1): waiters without a team go one at a time to the team
+        // with more free seats, the longest waiting first. 3 against 2, not 4 against 1.
+        var spread = new List<RosterSeat>
+        {
+            new RosterSeat { Id = "A", Actor = 1, Team = 0, Slot = 0, State = CrewState.Playing },
+            new RosterSeat { Id = "B", Actor = 2, Team = 0, Slot = 0, State = CrewState.Playing },
+            new RosterSeat { Id = "C", Actor = 3, Team = 1, Slot = 1, State = CrewState.Playing },
+            new RosterSeat { Id = "W1", Actor = 4, Team = -1, Slot = -1, State = CrewState.Waiting, WaitingSince = now },
+            new RosterSeat { Id = "W2", Actor = 5, Team = -1, Slot = -1, State = CrewState.Waiting, WaitingSince = now + 10 }
+        };
+        Check(RosterRules.FillSeats(spread, alive, 4, now + 20), "both teams' free seats are given out");
+        Equal(1, Seat(spread, "W1").Team, "the longest waiting goes to the team with more free seats (RED)");
+        Equal(0, Seat(spread, "W2").Team, "the next to BLUE (free seats and seats taken tie: BLUE)");
+        Equal(3, spread.Count(s => s.Team == 0 && s.State == CrewState.Playing), "BLUE 3");
+        Equal(2, spread.Count(s => s.Team == 1 && s.State == CrewState.Playing), "RED 2");
+
+        // A hold runs out while a player waits: a newcomer arriving then gets in line behind them.
+        var queue = new List<RosterSeat>
+        {
+            new RosterSeat { Id = "A", Actor = 1, Team = 0, Slot = 0, State = CrewState.Playing },
+            new RosterSeat { Id = "B", Actor = 2, Team = 1, Slot = 1, State = CrewState.Playing },
+            new RosterSeat { Id = "W", Actor = 3, Team = -1, Slot = -1, State = CrewState.Waiting, WaitingSince = now }
+        };
+        RosterRules.Leave(queue, "B", now);
+        RosterRules.ExpireHolds(queue, now + Hold, Hold);
+        RosterSeat n = RosterRules.Arrive(queue, "N", 4, "N", alive, true, 1, now + Hold);
+        Equal(CrewState.Waiting, n.State, "a newcomer doesn't take a free seat someone waits for");
+        RosterRules.FillSeats(queue, alive, 1, now + Hold);
+        Equal(CrewState.Playing, Seat(queue, "W").State, "the waiting player gets it");
+        Equal(1, Seat(queue, "W").Team, "on RED");
+        Equal(CrewState.Waiting, n.State, "the newcomer waits behind them");
+
+        // Back too late while their team's waiter is in line for its free seat: they wait behind them.
+        var late = new List<RosterSeat>
+        {
+            new RosterSeat { Id = "A", Actor = 1, Team = 0, Slot = 0, State = CrewState.Playing },
+            new RosterSeat { Id = "B", Actor = 2, Team = 0, Slot = 0, State = CrewState.Playing },
+            new RosterSeat { Id = "Q", Actor = 3, Team = 0, Slot = -1, State = CrewState.Waiting, WaitingSince = now }
+        };
+        RosterRules.Leave(late, "B", now);
+        RosterRules.ExpireHolds(late, now + Hold, Hold);
+        RosterSeat b = RosterRules.Arrive(late, "B", 4, "B", alive, true, 2, now + Hold + 1);
+        Equal(CrewState.Waiting, b.State, "back too late with a teammate in line: they wait");
+        Equal(0, b.Team, "on their team");
+        RosterRules.FillSeats(late, alive, 2, now + Hold + 1);
+        Equal(CrewState.Playing, Seat(late, "Q").State, "the teammate in line gets the seat");
+        Equal(CrewState.Waiting, b.State, "and they keep waiting");
+
+        // A waiting player who drops out and comes back keeps their place in line.
+        var keep = new List<RosterSeat>
+        {
+            new RosterSeat { Id = "A", Actor = 1, Team = 0, Slot = 0, State = CrewState.Playing },
+            new RosterSeat { Id = "X", Actor = 2, Team = -1, Slot = -1, State = CrewState.Waiting, WaitingSince = now },
+            new RosterSeat { Id = "Y", Actor = 3, Team = -1, Slot = -1, State = CrewState.Waiting, WaitingSince = now + 100 }
+        };
+        RosterRules.Leave(keep, "X", now + 200);
+        RosterSeat x = RosterRules.Arrive(keep, "X", 4, "X", alive, true, 1, now + 300);
+        Equal(CrewState.Waiting, x.State, "a waiting player who comes back waits again");
+        Equal(now, x.WaitingSince, "back within the hold time, their place in line is kept");
+        RosterRules.FillSeats(keep, alive, 1, now + 400);
+        Equal(CrewState.Playing, Seat(keep, "X").State, "and they get the next seat before those who came after them");
+        Equal(CrewState.Waiting, Seat(keep, "Y").State, "who keep waiting");
+
+        // The server's clock wraps around (an int of milliseconds): holds and the queue stay right across the wrap.
+        int edge = int.MaxValue - 5;
+        var hold = new List<RosterSeat> { new RosterSeat { Id = "A", Actor = 1, Team = 0, Slot = 0, State = CrewState.Playing } };
+        RosterRules.Leave(hold, "A", edge);
+        Check(!RosterRules.ExpireHolds(hold, unchecked(edge + Hold - 1), Hold), "across the wrap, a hold holds until three minutes");
+        Check(RosterRules.ExpireHolds(hold, unchecked(edge + Hold), Hold), "and then runs out");
+        var wrap = new List<RosterSeat>
+        {
+            new RosterSeat { Id = "A", Actor = 1, Team = 0, Slot = 0, State = CrewState.Playing },
+            new RosterSeat { Id = "Late", Actor = 2, Team = -1, Slot = -1, State = CrewState.Waiting, WaitingSince = unchecked(edge + 10) },
+            new RosterSeat { Id = "Early", Actor = 3, Team = -1, Slot = -1, State = CrewState.Waiting, WaitingSince = edge }
+        };
+        RosterRules.FillSeats(wrap, alive, 1, unchecked(edge + 20));
+        Equal(CrewState.Playing, Seat(wrap, "Early").State, "across the wrap, who waited longest gets the seat");
+        Equal(CrewState.Waiting, Seat(wrap, "Late").State, "and the later one waits");
+
+        // Waiting players gone for good are forgotten; dead players and expired holds stay (their ship, their team).
+        var gone = new List<RosterSeat>
+        {
+            new RosterSeat { Id = "W", Actor = 1, Team = -1, Slot = -1, State = CrewState.Waiting, WaitingSince = now },
+            new RosterSeat { Id = "V", Actor = 2, Team = 0, Slot = -1, State = CrewState.Waiting, WaitingSince = now },
+            new RosterSeat { Id = "D", Actor = 3, Team = 0, Slot = 0, State = CrewState.Dead },
+            new RosterSeat { Id = "P", Actor = 4, Team = 1, Slot = 1, State = CrewState.Playing }
+        };
+        foreach (string id in new[] { "W", "D", "P" }) RosterRules.Leave(gone, id, now);
+        RosterRules.Leave(gone, "V", now + Hold);
+        Check(!RosterRules.DropGone(gone, now + Hold - 1, Hold), "a waiting player away for less than the hold time is kept");
+        RosterRules.ExpireHolds(gone, now + Hold, Hold);
+        Check(RosterRules.DropGone(gone, now + Hold, Hold), "a waiting player away for the hold time is forgotten");
+        Check(gone.All(s => s.Id != "W"), "W is forgotten");
+        Check(gone.Any(s => s.Id == "V"), "one who left later is kept");
+        Check(gone.Any(s => s.Id == "D"), "a dead player is kept (they come back dead)");
+        Check(gone.Any(s => s.Id == "P") && Seat(gone, "P").Expired, "an expired hold is kept");
     }
 }

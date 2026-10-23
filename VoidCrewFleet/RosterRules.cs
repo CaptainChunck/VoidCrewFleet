@@ -26,14 +26,14 @@ namespace VoidCrewFleet
         /// <summary>Not in the room right now.</summary>
         public bool Away;
 
-        /// <summary>When they left (server milliseconds).</summary>
-        public long AwaySince;
+        /// <summary>When they left (server milliseconds; see RosterRules.Elapsed).</summary>
+        public int AwaySince;
 
         /// <summary>Their seat was given up: they were away too long (a waiting player gives none up).</summary>
         public bool Expired;
 
-        /// <summary>When they started waiting for a seat (server milliseconds): the first waiter gets the next seat.</summary>
-        public long WaitingSince;
+        /// <summary>When they started waiting for a seat (server milliseconds): the longest waiting gets the next seat.</summary>
+        public int WaitingSince;
 
         public RosterSeat Clone()
         {
@@ -57,14 +57,25 @@ namespace VoidCrewFleet
     /// - a seat is taken by a player on a living ship (in the room, or away for less than the hold time), and for good by a
     ///   player whose ship was destroyed (a DEAD spectator);
     /// - a player who leaves keeps their seat for the hold time; back in time, they return to their team and ship;
-    /// - when a hold runs out, the seat is free: a WAITING player of that team gets it first (the longest waiting first), then
-    ///   a waiting player without a team, then anyone joining;
-    /// - a player who comes back too late plays again if their team has a free seat, else waits on their team;
-    /// - a newcomer joins the team with a free seat and fewer players, else waits for any seat.
+    /// - when a hold runs out, the seat is free. Free seats go to the WAITING players in the room: each team's own first,
+    ///   then those without a team, one at a time to the team with more free seats; the longest waiting first;
+    /// - a player who comes back too late plays again if their team has a free seat that none of their team waits for, else
+    ///   waits on their team;
+    /// - a newcomer gets in line behind the players waiting for a free seat; with nobody waiting, they join the team with more
+    ///   free seats, else wait for any seat;
+    /// - a waiting player who leaves keeps their place in line for the hold time; after that they are forgotten.
     /// Co-op: nobody waits; a newcomer joins the living ship with the smallest crew.
+    /// Times are the server's clock in milliseconds, an int that wraps around: they are only ever compared by their
+    /// difference (Elapsed), which stays right across the wrap.
     /// </summary>
     internal static class RosterRules
     {
+        /// <summary>Milliseconds from one server time to a later one, right across the clock's wrap.</summary>
+        public static int Elapsed(int now, int then)
+        {
+            return unchecked(now - then);
+        }
+
         /// <summary>
         /// Seats a team uses: players on a living ship (present or held), and dead spectators (unless the seat was already
         /// given up when the ship was lost).
@@ -80,16 +91,26 @@ namespace VoidCrewFleet
         }
 
         /// <summary>Holds that ran out: those seats are free now. True when anything changed.</summary>
-        public static bool ExpireHolds(List<RosterSeat> seats, long now, long holdMs)
+        public static bool ExpireHolds(List<RosterSeat> seats, int now, int holdMs)
         {
             bool changed = false;
             foreach (RosterSeat seat in seats)
             {
-                if (!seat.Away || seat.Expired || seat.State != CrewState.Playing || now - seat.AwaySince < holdMs) continue;
+                if (!seat.Away || seat.Expired || seat.State != CrewState.Playing || Elapsed(now, seat.AwaySince) < holdMs) continue;
                 seat.Expired = true;
                 changed = true;
             }
             return changed;
+        }
+
+        /// <summary>
+        /// Waiting players who left and stayed away for the hold time hold nothing (no seat, no ship): they are forgotten, so
+        /// the roster doesn't keep everyone who ever passed through. Dead players and expired holds stay: a player who comes
+        /// back must still find their lost ship, or their team. True when anyone was forgotten.
+        /// </summary>
+        public static bool DropGone(List<RosterSeat> seats, int now, int holdMs)
+        {
+            return seats.RemoveAll(s => s.Away && s.State == CrewState.Waiting && Elapsed(now, s.AwaySince) >= holdMs) > 0;
         }
 
         /// <summary>Holds left for a team: players away whose seat is still theirs.</summary>
@@ -129,11 +150,56 @@ namespace VoidCrewFleet
             return true;
         }
 
+        /// <summary>A player in the room waiting for a seat of this team: one of its own, or (with anyTeam) one without a team.</summary>
+        private static bool WaitsFor(RosterSeat seat, int team, bool anyTeam)
+        {
+            return !seat.Away && seat.State == CrewState.Waiting && (seat.Team == team || (anyTeam && seat.Team < 0));
+        }
+
+        /// <summary>
+        /// The team a player without a team gets a seat on: the one with more free seats (on a tie the one with fewer seats
+        /// taken, then BLUE), leaving out the teams marked in skip; -1 when no team has a free seat.
+        /// </summary>
+        private static int RoomierTeam(List<RosterSeat> seats, int seatsPerTeam, bool[] skip)
+        {
+            int best = -1;
+            int bestFree = 0;
+            int bestOccupied = 0;
+            for (int team = 0; team < 2; team++)
+            {
+                if (skip[team]) continue;
+                int free = FreeSeats(seats, team, seatsPerTeam);
+                if (free <= 0) continue;
+                int occupied = Occupied(seats, team);
+                if (best >= 0 && (free < bestFree || (free == bestFree && occupied >= bestOccupied))) continue;
+                best = team;
+                bestFree = free;
+                bestOccupied = occupied;
+            }
+            return best;
+        }
+
+        /// <summary>The player in the room who has waited longest for a seat of this team (-1: those without a team), or null.</summary>
+        private static RosterSeat LongestWaiting(List<RosterSeat> seats, int team, int now)
+        {
+            RosterSeat best = null;
+            int bestWait = 0;
+            foreach (RosterSeat seat in seats)
+            {
+                if (seat.Away || seat.State != CrewState.Waiting || (team < 0 ? seat.Team >= 0 : seat.Team != team)) continue;
+                int wait = Elapsed(now, seat.WaitingSince);
+                if (best != null && wait <= bestWait) continue;
+                best = seat;
+                bestWait = wait;
+            }
+            return best;
+        }
+
         /// <summary>
         /// A player is in the room (joined, came back, or was already there): their seat, created or updated. The changes go into
         /// the list; returns the player's seat.
         /// </summary>
-        public static RosterSeat Arrive(List<RosterSeat> seats, string id, int actor, string name, IList<int> aliveSlots, bool teamMatch, int seatsPerTeam, long now)
+        public static RosterSeat Arrive(List<RosterSeat> seats, string id, int actor, string name, IList<int> aliveSlots, bool teamMatch, int seatsPerTeam, int now)
         {
             RosterSeat seat = seats.FirstOrDefault(s => s.Id == id);
             if (seat != null && !seat.Away)
@@ -152,13 +218,19 @@ namespace VoidCrewFleet
                     if (!Seat(seats, seat, aliveSlots, false)) seat.State = CrewState.Waiting;
                     return seat;
                 }
-                // A newcomer: the team with a free seat and fewer players (BLUE on ties), else wait for any seat.
-                int blueFree = FreeSeats(seats, 0, seatsPerTeam);
-                int redFree = FreeSeats(seats, 1, seatsPerTeam);
-                int team = -1;
-                if (blueFree > 0 && redFree > 0) team = Occupied(seats, 1) < Occupied(seats, 0) ? 1 : 0;
-                else if (blueFree > 0) team = 0;
-                else if (redFree > 0) team = 1;
+                // A newcomer gets in line behind the players waiting for a free seat (FillSeats gives it to them first): a team
+                // whose own waiters, or any waiter without a team, could take its free seat is not open to them.
+                var closed = new bool[2];
+                for (int t = 0; t < 2; t++)
+                {
+                    foreach (RosterSeat other in seats)
+                    {
+                        if (other == seat || !WaitsFor(other, t, true)) continue;
+                        closed[t] = true;
+                        break;
+                    }
+                }
+                int team = RoomierTeam(seats, seatsPerTeam, closed);
                 if (team >= 0)
                 {
                     seat.Team = team;
@@ -179,8 +251,11 @@ namespace VoidCrewFleet
                 if (!Seat(seats, seat, aliveSlots, false)) seat.State = CrewState.Waiting;
                 return seat;
             }
-            bool held = seat.State == CrewState.Playing && !seat.Expired;
-            if (held || (seat.Team >= 0 && FreeSeats(seats.Where(s => s != seat), seat.Team, seatsPerTeam) > 0))
+            // Back in line, where they were: FillSeats gives them a seat in their turn.
+            if (seat.State == CrewState.Waiting) return seat;
+            bool held = !seat.Expired;
+            bool ownWaiting = seats.Any(s => s != seat && WaitsFor(s, seat.Team, false));
+            if (held || (seat.Team >= 0 && FreeSeats(seats.Where(s => s != seat), seat.Team, seatsPerTeam) > 0 && !ownWaiting))
             {
                 if (Seat(seats, seat, aliveSlots, true)) return seat;
                 // Their team has no ship left (the match is ending): they watch.
@@ -188,7 +263,7 @@ namespace VoidCrewFleet
                 seat.Expired = false;
                 return seat;
             }
-            // Their seat went to someone else: they wait on their team for the next one.
+            // Their seat went to someone else (or others of their team wait for the free one): they wait on their team.
             seat.State = CrewState.Waiting;
             seat.Slot = -1;
             seat.Expired = false;
@@ -197,7 +272,7 @@ namespace VoidCrewFleet
         }
 
         /// <summary>A player left the room: their seat is held (PvP) or kept for their return (co-op).</summary>
-        public static void Leave(List<RosterSeat> seats, string id, long now)
+        public static void Leave(List<RosterSeat> seats, string id, int now)
         {
             RosterSeat seat = seats.FirstOrDefault(s => s.Id == id);
             if (seat == null || seat.Away) return;
@@ -218,28 +293,38 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// Free seats go to waiting players in the room: a team's own waiters first (longest waiting first), then waiters
-        /// without a team. True when anyone got a seat.
+        /// Free seats go to the waiting players in the room: each team's own waiters first, then the waiters without a team one
+        /// at a time, each to the team with more free seats (on a tie the one with fewer seats taken, then BLUE); the longest
+        /// waiting first. True when anyone got a seat.
         /// </summary>
-        public static bool FillSeats(List<RosterSeat> seats, IList<int> aliveSlots, int seatsPerTeam)
+        public static bool FillSeats(List<RosterSeat> seats, IList<int> aliveSlots, int seatsPerTeam, int now)
         {
             bool changed = false;
             for (int team = 0; team < 2; team++)
             {
                 while (FreeSeats(seats, team, seatsPerTeam) > 0)
                 {
-                    RosterSeat next = seats.Where(s => !s.Away && s.State == CrewState.Waiting && s.Team == team).OrderBy(s => s.WaitingSince).FirstOrDefault() ??
-                                      seats.Where(s => !s.Away && s.State == CrewState.Waiting && s.Team < 0).OrderBy(s => s.WaitingSince).FirstOrDefault();
-                    if (next == null) break;
-                    int previousTeam = next.Team;
-                    next.Team = team;
-                    if (!Seat(seats, next, aliveSlots, true))
-                    {
-                        next.Team = previousTeam;
-                        break;
-                    }
+                    RosterSeat next = LongestWaiting(seats, team, now);
+                    if (next == null || !Seat(seats, next, aliveSlots, true)) break;
                     changed = true;
                 }
+            }
+            // Teams with no ship left to put anyone on.
+            var noShip = new bool[2];
+            while (true)
+            {
+                RosterSeat next = LongestWaiting(seats, -1, now);
+                if (next == null) break;
+                int team = RoomierTeam(seats, seatsPerTeam, noShip);
+                if (team < 0) break;
+                next.Team = team;
+                if (Seat(seats, next, aliveSlots, true))
+                {
+                    changed = true;
+                    continue;
+                }
+                next.Team = -1;
+                noShip[team] = true;
             }
             return changed;
         }

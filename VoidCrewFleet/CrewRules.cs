@@ -128,8 +128,8 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// The ship with the smallest crew among these slots (lowest slot on ties, ships under the crew limit first); -1 when
-        /// there is none.
+        /// The ship with the smallest crew among these slots (lowest slot on ties), so a ship with a full crew (MaxCrew) is
+        /// only picked when none of the others has room; -1 when there is none.
         /// </summary>
         public static int SmallestCrew(IDictionary<int, CrewEntry> crews, ICollection<int> players, IEnumerable<int> slots)
         {
@@ -170,6 +170,8 @@ namespace VoidCrewFleet
         /// <summary>
         /// Everyone in the room on a ship: picks on living ships stay, the rest (and anyone whose ship isn't there) go to the
         /// smallest crew (in a team match, their team's when they have one, else the smaller team's). Spectators stay as they are.
+        /// A ship picked by more than a full crew (players who joined while every ship was full) hands its latest joiners to
+        /// the smallest crew with room, of their team in a team match: a ship the mission added for them, for example.
         /// </summary>
         public static Dictionary<int, CrewEntry> PlaceEveryone(IDictionary<int, CrewEntry> picks, IList<int> players, ICollection<int> aliveSlots, bool teamMatch)
         {
@@ -179,6 +181,14 @@ namespace VoidCrewFleet
                 CrewEntry entry;
                 if (!picks.TryGetValue(actor, out entry)) continue;
                 if (entry.IsSpectator || (entry.Slot >= 0 && aliveSlots.Contains(entry.Slot))) crews[actor] = entry;
+            }
+            foreach (int slot in aliveSlots)
+            {
+                while (CrewOf(crews, players, slot) > MaxCrew)
+                {
+                    int to = SmallestCrew(crews, players, aliveSlots.Where(s => s != slot && (!teamMatch || s % 2 == slot % 2)));
+                    if (to < 0 || CrewOf(crews, players, to) >= MaxCrew || !MoveLatest(crews, players, slot, to, teamMatch)) break;
+                }
             }
             foreach (int actor in players.OrderBy(a => a))
             {

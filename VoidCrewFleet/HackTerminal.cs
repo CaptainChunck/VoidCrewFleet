@@ -226,7 +226,7 @@ namespace VoidCrewFleet
             else charge.Kill();
         }
 
-        /// <summary>Anyone: destroy a charge, through its owner when it's someone else's.</summary>
+        /// <summary>Anyone (the host, for a plugged-in terminal): destroy a charge, through its owner's game when it's someone else's.</summary>
         public static void Destroy(CarryableObject charge)
         {
             if (charge == null || charge.photonView == null) return;
@@ -305,23 +305,6 @@ namespace VoidCrewFleet
         {
             for (int i = 0; i < 8; i++)
                 yield return b.center + Vector3.Scale(b.extents, new Vector3((i & 1) == 0 ? -1 : 1, (i & 2) == 0 ? -1 : 1, (i & 4) == 0 ? -1 : 1));
-        }
-
-        /// <summary>The model's size, for placing it on a door.</summary>
-        public static Bounds ModelBounds(GameObject model)
-        {
-            var bounds = new Bounds(model.transform.position, Vector3.zero);
-            bool first = true;
-            foreach (Renderer renderer in model.GetComponentsInChildren<Renderer>())
-            {
-                if (first)
-                {
-                    bounds = renderer.bounds;
-                    first = false;
-                }
-                else bounds.Encapsulate(renderer.bounds);
-            }
-            return bounds;
         }
     }
 }
