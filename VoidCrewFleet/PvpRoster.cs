@@ -14,27 +14,40 @@ namespace VoidCrewFleet
     /// turns it into the crew list (FleetShips) a few times a second:
     /// - Both: a player who comes back returns to their ship; everyone given a ship that is destroyed is DEAD for the rest of
     ///   the mission (no respawn; they watch once their character dies), even if they were away when it happened.
-    /// - PvP: a player who leaves keeps their seat for 3 minutes; a waiting player gets the next free seat of their team;
-    ///   one without a seat waits (WAITING).
+    /// - PvP: a player who leaves keeps their seat for 3 minutes. Free seats go to the waiting players (WAITING), each team's
+    ///   own first, before anyone who joins; a player without a seat waits.
     /// - Co-op: a newcomer joins the living ship with the smallest crew.
     /// A player's ID is their PlayFab account ID, which the game itself publishes; without one, their Steam ID or an ID this
     /// plugin keeps in its settings, published as a player property.
     /// </summary>
     internal static class PvpRoster
     {
-        public const string Feature = "PvP reconnects";
-
         private const string KeyRoster = "VCF_Roster";
         private const string KeyId = "VCF_Pid";
 
         /// <summary>How long a seat is held for a player who lost their connection.</summary>
         public const int HoldSeconds = 180;
 
+        private const int HoldMs = HoldSeconds * 1000;
+
         private static List<RosterSeat> _seats;
         private static int _seatsPerTeam;
         private static object _session;
         private static string _published;
         private static string _localId;
+
+        /// <summary>Host, during a tick: the seats by player ID, the IDs in the room, and the waiting players before a fill.</summary>
+        private static readonly Dictionary<string, RosterSeat> ById = new Dictionary<string, RosterSeat>();
+
+        private static readonly HashSet<string> Present = new HashSet<string>();
+        private static readonly List<RosterSeat> WaitingBefore = new List<RosterSeat>();
+
+        // The room's roster as last read: the property's value and the session it was read for (it is parsed again only when
+        // either changes), and what it held. Shared with every reader, so nobody changes it.
+        private static object _readValue;
+        private static object _readSession;
+        private static List<RosterSeat> _readSeats;
+        private static int _readSeatsPerTeam;
 
         // ---------------------------------------------------------------- player IDs
 
@@ -92,9 +105,10 @@ namespace VoidCrewFleet
             return player.IsLocal ? LocalId : null;
         }
 
-        private static long Now
+        /// <summary>The server's clock in milliseconds (it wraps around: the rules compare times by their difference).</summary>
+        private static int Now
         {
-            get { return (uint)PhotonNetwork.ServerTimestamp; }
+            get { return PhotonNetwork.ServerTimestamp; }
         }
 
         // ---------------------------------------------------------------- what others read
@@ -106,7 +120,7 @@ namespace VoidCrewFleet
             return seats != null ? RosterRules.Held(seats, team) : 0;
         }
 
-        /// <summary>The roster as the host last published it (the host's own copy on the host).</summary>
+        /// <summary>The roster as the host last published it (the host's own copy on the host). Only to read.</summary>
         public static List<RosterSeat> Seats()
         {
             if (PhotonNetwork.IsMasterClient && _seats != null && ReferenceEquals(_session, GameSessionManager.ActiveSession)) return _seats;
@@ -138,42 +152,47 @@ namespace VoidCrewFleet
                 if (!Ready(pvp)) return;
 
                 List<int> alive = FleetShips.AliveSlots();
-                long now = Now;
-                bool changed = RosterRules.ExpireHolds(_seats, now, HoldSeconds * 1000L);
-                var present = new HashSet<string>();
-                foreach (Player player in PhotonNetwork.PlayerList.OrderBy(p => p.ActorNumber))
+                int now = Now;
+                bool changed = RosterRules.ExpireHolds(_seats, now, HoldMs);
+                if (RosterRules.DropGone(_seats, now, HoldMs)) changed = true;
+                ById.Clear();
+                foreach (RosterSeat seat in _seats) ById[seat.Id] = seat;
+                // Seats freed since the last look go to the players already waiting, before anyone who arrives now.
+                if (pvp && FillSeats(alive, now)) changed = true;
+
+                Present.Clear();
+                // The player list comes sorted by actor number: of two players with one ID, the later one counts.
+                foreach (Player player in PhotonNetwork.PlayerList)
                 {
                     string id = IdOf(player);
                     if (string.IsNullOrEmpty(id)) continue;
-                    present.Add(id);
-                    RosterSeat before = _seats.FirstOrDefault(s => s.Id == id);
-                    RosterSeat was = before != null ? before.Clone() : null;
-                    RosterSeat seat = RosterRules.Arrive(_seats, id, player.ActorNumber, NameOf(player), alive, pvp, _seatsPerTeam, now);
-                    if (was != null && seat.ToString() == was.ToString()) continue;
+                    Present.Add(id);
+                    string name = NameOf(player);
+                    RosterSeat seat;
+                    if (ById.TryGetValue(id, out seat) && !seat.Away)
+                    {
+                        // Still here: only their actor number or name can change.
+                        if (seat.Actor == player.ActorNumber && seat.Name == name) continue;
+                        seat.Actor = player.ActorNumber;
+                        seat.Name = name;
+                        changed = true;
+                        continue;
+                    }
+                    RosterSeat was = seat != null ? seat.Clone() : null;
+                    seat = RosterRules.Arrive(_seats, id, player.ActorNumber, name, alive, pvp, _seatsPerTeam, now);
+                    ById[id] = seat;
                     changed = true;
                     if (pvp || seat.State == CrewState.Dead) Announce(player.ActorNumber, seat.Name, was, seat);
                 }
                 foreach (RosterSeat seat in _seats)
                 {
-                    if (seat.Away || present.Contains(seat.Id)) continue;
+                    if (seat.Away || Present.Contains(seat.Id)) continue;
                     RosterRules.Leave(_seats, seat.Id, now);
                     changed = true;
                     if (pvp && seat.State == CrewState.Playing)
                         Notice.ShowAll(seat.Name + " lost their connection: their place on the " + PvpTeams.TeamName(seat.Team) + " team is held for " + HoldSeconds / 60 + " minutes.");
                 }
-                if (pvp)
-                {
-                    List<RosterSeat> waiting = _seats.Where(s => !s.Away && s.State == CrewState.Waiting).Select(s => s.Clone()).ToList();
-                    if (RosterRules.FillSeats(_seats, alive, _seatsPerTeam))
-                    {
-                        changed = true;
-                        foreach (RosterSeat was in waiting)
-                        {
-                            RosterSeat seat = _seats.First(s => s.Id == was.Id);
-                            if (seat.State == CrewState.Playing) Announce(seat.Actor, seat.Name, was, seat);
-                        }
-                    }
-                }
+                if (pvp && FillSeats(alive, now)) changed = true;
                 if (changed) Publish();
                 Apply();
             }
@@ -181,6 +200,23 @@ namespace VoidCrewFleet
             {
                 Log.Failure("Keeping the fleet's roster", e);
             }
+        }
+
+        /// <summary>PvP: free seats to the waiting players in the room (RosterRules.FillSeats), with a notice for each who got one.</summary>
+        private static bool FillSeats(List<int> alive, int now)
+        {
+            WaitingBefore.Clear();
+            foreach (RosterSeat seat in _seats)
+            {
+                if (!seat.Away && seat.State == CrewState.Waiting) WaitingBefore.Add(seat.Clone());
+            }
+            if (WaitingBefore.Count == 0 || !RosterRules.FillSeats(_seats, alive, _seatsPerTeam, now)) return false;
+            foreach (RosterSeat was in WaitingBefore)
+            {
+                RosterSeat seat;
+                if (ById.TryGetValue(was.Id, out seat) && seat.State == CrewState.Playing) Announce(seat.Actor, seat.Name, was, seat);
+            }
+            return true;
         }
 
         /// <summary>The roster of this mission exists (inherited, or made from the crews as they are).</summary>
@@ -208,7 +244,8 @@ namespace VoidCrewFleet
             List<RosterSeat> inherited = Read(out perTeam);
             if (inherited != null)
             {
-                _seats = inherited;
+                // Its own copy: the roster as read is shared with every reader.
+                _seats = inherited.Select(s => s.Clone()).ToList();
                 _seatsPerTeam = perTeam;
                 Log.Info("Fleet roster taken over: " + string.Join(", ", _seats.Select(s => s.ToString()).ToArray()) + ".");
                 return true;
@@ -216,7 +253,7 @@ namespace VoidCrewFleet
             Dictionary<int, CrewEntry> crews = FleetShips.Crews();
             if (crews.Count == 0) return false;
             _seats = new List<RosterSeat>();
-            long now = Now;
+            int now = Now;
             foreach (Player player in PhotonNetwork.PlayerList)
             {
                 CrewEntry entry;
@@ -279,7 +316,9 @@ namespace VoidCrewFleet
             foreach (KeyValuePair<int, CrewEntry> pair in a)
             {
                 CrewEntry other;
-                if (!b.TryGetValue(pair.Key, out other) || other.ToString() != pair.Value.ToString()) return false;
+                if (!b.TryGetValue(pair.Key, out other)) return false;
+                CrewEntry mine = pair.Value;
+                if (other.Actor != mine.Actor || other.Team != mine.Team || other.Slot != mine.Slot || other.State != mine.State) return false;
             }
             return true;
         }
@@ -308,29 +347,46 @@ namespace VoidCrewFleet
             PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyRoster, json } });
         }
 
-        /// <summary>The roster in the room for this mission, or null.</summary>
+        /// <summary>
+        /// The roster in the room for this mission, or null. It is parsed again only when the room property or the session
+        /// changes, and the list is shared: only to read.
+        /// </summary>
         private static List<RosterSeat> Read(out int seatsPerTeam)
         {
+            object value = null;
+            if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null) PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeyRoster, out value);
+            GameSession session = GameSessionManager.ActiveSession;
+            if (!ReferenceEquals(value, _readValue) || !ReferenceEquals(session, _readSession))
+            {
+                _readValue = value;
+                _readSession = session;
+                _readSeats = Parse(value as string, session, out _readSeatsPerTeam);
+            }
+            seatsPerTeam = _readSeatsPerTeam;
+            return _readSeats;
+        }
+
+        /// <summary>The roster in a room property's text when it is this session's, or null.</summary>
+        private static List<RosterSeat> Parse(string text, GameSession session, out int seatsPerTeam)
+        {
             seatsPerTeam = 0;
+            if (text == null || session == null) return null;
             try
             {
-                object value;
-                if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null || !PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeyRoster, out value) || !(value is string))
-                    return null;
-                JObject json = JObject.Parse((string)value);
-                GameSession session = GameSessionManager.ActiveSession;
-                if (session == null || (string)json["session"] != session.GameSessionID.ToString()) return null;
-                seatsPerTeam = (int)json["seats"];
+                JObject json = JObject.Parse(text);
+                if ((string)json["session"] != session.GameSessionID.ToString()) return null;
+                int perTeam = (int)json["seats"];
                 var seats = new List<RosterSeat>();
                 foreach (JObject entry in (JArray)json["players"])
                 {
                     seats.Add(new RosterSeat
                     {
                         Id = (string)entry["id"], Name = (string)entry["name"], Actor = (int)entry["actor"], Team = (int)entry["team"], Slot = (int)entry["slot"],
-                        State = (CrewState)(int)entry["state"], Away = (bool)entry["away"], AwaySince = (long)entry["since"], Expired = (bool)entry["expired"],
-                        WaitingSince = (long)entry["waiting"]
+                        State = (CrewState)(int)entry["state"], Away = (bool)entry["away"], AwaySince = ServerTime(entry["since"]), Expired = (bool)entry["expired"],
+                        WaitingSince = ServerTime(entry["waiting"])
                     });
                 }
+                seatsPerTeam = perTeam;
                 return seats;
             }
             catch (Exception e)
@@ -338,6 +394,12 @@ namespace VoidCrewFleet
                 Log.Failure("Reading the fleet's roster", e);
                 return null;
             }
+        }
+
+        /// <summary>A server time in the roster: an int, or (as 0.4.0 wrote it) the same milliseconds as an unsigned number.</summary>
+        private static int ServerTime(JToken token)
+        {
+            return unchecked((int)(long)token);
         }
 
         /// <summary>Host, back in the hub or a one-ship mission: no roster.</summary>
