@@ -178,6 +178,19 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>
+        /// The JSON of the rules Shown returns, without serializing them: the host's pending change, else the room's text ("" for
+        /// none). It stays the same string until the rules change, so screens compare it to redraw only then.
+        /// </summary>
+        public static string ShownJson
+        {
+            get
+            {
+                Rules shown = Shown;
+                return _pending != null && ReferenceEquals(shown, _pending) ? _pendingJson : CurrentJson;
+            }
+        }
+
         /// <summary>The rules can change only on the host, in the hub, while the Fleet Battle teams are being picked.</summary>
         public static bool CanEdit
         {

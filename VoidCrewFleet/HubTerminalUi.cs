@@ -103,6 +103,8 @@ namespace VoidCrewFleet
         /// <summary>
         /// SELECT: in Fleet Battle only a ship's own team may change it, and a ship whose type the host forced only takes a
         /// loadout of that type. While setting up a ship 2-6, it chooses that ship's loadout instead of the game's (ship 1).
+        /// The host checks the team again when the choice reaches it (HubFleet: CheckLoadout for ships 2-6, SelectShipPrefix
+        /// for ship 1).
         /// </summary>
         [GamePatch(Feature, "UI.ShipLoadoutTerminal.ShipLoadoutTerminal", "OnShipChosen", PatchKind.Prefix)]
         private static bool ShipChosenPrefix(ShipLoadoutDataDef shipDef)
@@ -477,9 +479,13 @@ namespace VoidCrewFleet
                 {
                     string team = PvpTeams.TeamName(FleetSlots.TeamOf(_editingSlot, true));
                     int mine = FleetApi.TeamOf(actor);
+                    // Without a team once the teams are confirmed: every crew was full when this player joined.
+                    string noTeam = PvpTeams.Locked
+                        ? "Every crew is full: you wait for a free place."
+                        : "Pick a ship on the lobby screen (TEAMS & RULES) to set up your team's ships.";
                     _hint.text = FleetApi.CanEditShip(actor, _editingSlot + 1)
                         ? label + ": pick its loadout, then SELECT."
-                        : (mine < 0 ? "Pick a ship on the lobby screen (TEAMS & RULES) to set up your team's ships." : label + ": only " + team + " players can change it.");
+                        : (mine < 0 ? noTeam : label + ": only " + team + " players can change it.");
                 }
                 else if (savedRun)
                 {

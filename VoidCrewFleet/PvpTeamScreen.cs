@@ -85,6 +85,15 @@ namespace VoidCrewFleet
         private static Button _hideButton;
         private static Button _changeButton;
 
+        /// <summary>The room HIDE and CLOSE were for: in another room the screen opens as usual.</summary>
+        private static string _room;
+
+        /// <summary>The ship rules the summary shows, as their JSON (the same string until they change).</summary>
+        private static string _rulesJson;
+
+        /// <summary>The room's players in join order, as of the last refresh.</summary>
+        private static readonly List<Player> Players = new List<Player>();
+
         public static bool Visible
         {
             get { return _visible; }
@@ -93,6 +102,7 @@ namespace VoidCrewFleet
         /// <summary>A few times a second, from the runtime.</summary>
         public static void Tick()
         {
+            ForgetOtherRoom();
             if (!ShouldShow())
             {
                 Hide();
@@ -117,9 +127,20 @@ namespace VoidCrewFleet
         /// </summary>
         public static void ShowLocally()
         {
+            ForgetOtherRoom();
             _dismissed = false;
             _viewing = true;
             Tick();
+        }
+
+        /// <summary>HIDE and CLOSE last for one room: when this player is in another room (or none), they are forgotten.</summary>
+        private static void ForgetOtherRoom()
+        {
+            string room = PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : null;
+            if (room == _room) return;
+            _room = room;
+            _dismissed = false;
+            _viewing = false;
         }
 
         /// <summary>A notice for the local player (a full ship, a refused confirm) while the screen hides the chat.</summary>
@@ -342,6 +363,7 @@ namespace VoidCrewFleet
             _rulesView.style.marginTop = 10;
             _rulesView.style.display = DisplayStyle.None;
             body.Add(_rulesView);
+            _rulesJson = null;
 
             // The status on the left; on the right LEAVE, and for the host AUTO-BALANCE and CONFIRM TEAMS, the big hex
             // button where the loadout terminal has SELECT.
@@ -537,9 +559,15 @@ namespace VoidCrewFleet
                 if (_showRules) ShowRules(false);
                 return;
             }
-            ShipRules.Rules rules = ShipRules.Shown;
-            _rulesSummary.text = "SHIP RULES: " + ShipRules.Describe(rules).ToUpperInvariant();
-            _rulesSummary.style.color = rules.Restricts ? Ui.GameOrange : Ui.GameBrightGrey;
+            // The summary is written again only when the rules changed (their JSON is a new string then).
+            string json = ShipRules.ShownJson;
+            if (!ReferenceEquals(json, _rulesJson))
+            {
+                _rulesJson = json;
+                ShipRules.Rules rules = ShipRules.Shown;
+                _rulesSummary.text = "SHIP RULES: " + ShipRules.Describe(rules).ToUpperInvariant();
+                _rulesSummary.style.color = rules.Restricts ? Ui.GameOrange : Ui.GameBrightGrey;
+            }
             _teamsTab.EnableInClassList("metem-button-selected", !_showRules);
             _rulesTab.EnableInClassList("metem-button-selected", _showRules);
             if (_showRules) ShipRulesView.Refresh();
@@ -573,7 +601,8 @@ namespace VoidCrewFleet
             }
 
             Dictionary<int, CrewEntry> crews = FleetShips.Crews();
-            Player[] players = PhotonNetwork.PlayerList.OrderBy(p => p.ActorNumber).ToArray();
+            List<Player> players = Players;
+            PvpTeams.RoomPlayers(players);
             bool host = PhotonNetwork.IsMasterClient;
             bool picking = PvpTeams.PickingTeams;
             // The ships' names, types and the mission come from the room's fleet choices: their revision stands for them.
@@ -698,11 +727,13 @@ namespace VoidCrewFleet
                 }
                 else if (host)
                 {
+                    // More players than the crews take: moving players can't help, more ships per team can (CheckTeams says so).
+                    bool overfull = actors.Count > ships * CrewRules.MaxCrew;
                     _status.text = why == null
                         ? (inHub
                             ? "The teams are even. Press CONFIRM TEAMS, then set up the ships and sit in the ready room to start the match."
                             : "The teams are even. Press CONFIRM TEAMS to start the match.")
-                        : why + " Move players with the ship buttons on their row, or press AUTO-BALANCE.";
+                        : why + (overfull ? "" : " Move players with the ship buttons on their row, or press AUTO-BALANCE.");
                 }
                 else
                 {
@@ -717,7 +748,7 @@ namespace VoidCrewFleet
             }
         }
 
-        private static string Signature(Dictionary<int, CrewEntry> crews, Player[] players, bool host)
+        private static string Signature(Dictionary<int, CrewEntry> crews, List<Player> players, bool host)
         {
             var text = new StringBuilder();
             text.Append(host ? 'H' : 'C').Append(PhotonNetwork.MasterClient != null ? PhotonNetwork.MasterClient.ActorNumber : 0);
