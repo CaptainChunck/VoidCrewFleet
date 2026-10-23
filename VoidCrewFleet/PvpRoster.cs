@@ -51,7 +51,10 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- player IDs
 
-        /// <summary>This player's stable ID: the Steam ID when Steam runs, else one kept in the settings.</summary>
+        /// <summary>
+        /// This player's stable ID: from the Steam ID when Steam runs (a one-way hash of it, so the Steam ID itself is never
+        /// published), else one kept in the settings.
+        /// </summary>
         public static string LocalId
         {
             get
@@ -59,7 +62,7 @@ namespace VoidCrewFleet
                 if (!string.IsNullOrEmpty(_localId)) return _localId;
                 try
                 {
-                    if (Steamworks.SteamAPI.IsSteamRunning()) _localId = "steam:" + Steamworks.SteamUser.GetSteamID().m_SteamID;
+                    if (Steamworks.SteamAPI.IsSteamRunning()) _localId = "steam:" + Hashed(Steamworks.SteamUser.GetSteamID().m_SteamID.ToString());
                 }
                 catch
                 {
@@ -74,13 +77,25 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>A few times a second: the local player's ID is on their Photon player, for the host to read.</summary>
+        /// <summary>The first 16 bytes of a salted SHA-256 of a text, as hex: the same every time, and it can't be turned back.</summary>
+        private static string Hashed(string raw)
+        {
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+            {
+                byte[] hash = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes("VoidCrewFleet|" + raw));
+                var text = new System.Text.StringBuilder(32);
+                for (int i = 0; i < 16; i++) text.Append(hash[i].ToString("x2"));
+                return text.ToString();
+            }
+        }
+
+        /// <summary>A few times a second, in a Fleet room only: the local player's ID is on their Photon player, for the host to read.</summary>
         public static void PublishLocalId()
         {
             try
             {
                 Player local = PhotonNetwork.LocalPlayer;
-                if (local == null || !PhotonNetwork.InRoom) return;
+                if (local == null || !PhotonNetwork.InRoom || !ModRegistration.IsFleetRoom) return;
                 object value;
                 string id = LocalId;
                 if (string.IsNullOrEmpty(id) || (local.CustomProperties.TryGetValue(KeyId, out value) && value as string == id)) return;
