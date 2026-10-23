@@ -47,8 +47,9 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
 
 ### Losing a ship (co-op and Fleet Battle)
 - **You always respawn on your own ship**, the one you picked in the lobby, wherever you died.
-- **When a ship is destroyed, its crew can't be re-cloned for the rest of the mission.** Anyone aboard dies with it. A
-  crew member who was elsewhere (aboard another ship) plays on until they die.
+- **When a ship is destroyed, its crew can't be re-cloned for the rest of the mission.** Anyone aboard dies with it,
+  and anyone out in space within about 150 m of it. A crew member who was elsewhere (aboard another ship, or further out
+  in space) plays on until they die.
 - Then they **watch** from a third-person view around the remaining ships: **Q / E** (or the mouse buttons) switch
   ships, the mouse looks around, the wheel zooms.
 - The mission carries on with the ships that are left, and the **host decides**: carry on, or **RETURN TO HUB** in the
@@ -165,8 +166,9 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
 | Diagnostics | AutoTest | Off | Developer self-test; leave it Off to play. |
 
 ## Progression
-Fleet missions, PvP and rooms of more than 6 players **give no XP, rewards or achievements**, as Void Crew's modding
-rules ask for mods that change the game:
+Fleet missions, PvP and missions with more than 6 players **give no XP, rewards or achievements**, as Void Crew's
+modding rules ask for mods that change the game. A player counts once their character is in the game, not while they
+are only joining (a player the game sends back for missing mods doesn't count):
 - Daily and weekly quests aren't used up there; they stay open for a normal mission. Codex entries from data
   shards aren't unlocked there either.
 - A mission that starts like that stays so even if players leave.
