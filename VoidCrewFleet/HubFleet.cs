@@ -121,8 +121,9 @@ namespace VoidCrewFleet
         {
             get
             {
+                // The progression pause too: without it a fleet mission would earn progression, which Void Crew's modding rules forbid.
                 return Patcher.IsReady(FleetSession.Feature) && Patcher.IsReady(FleetShips.Feature) && Patcher.IsReady(VoidJumpLink.Feature) &&
-                       Patcher.IsReady(ShipIsolation.Feature) && Patcher.IsReady(ShipResources.Feature);
+                       Patcher.IsReady(ShipIsolation.Feature) && Patcher.IsReady(ShipResources.Feature) && Patcher.IsReady(ProgressionGuard.Feature);
             }
         }
 
@@ -793,13 +794,15 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- the hub
 
-        /// <summary>The hub loaded: the host (re)publishes that it runs the plugin, and a fleet mission choice is reset.</summary>
+        /// <summary>The hub loaded: in a Fleet room, the host (re)publishes that it runs the plugin, and a fleet mission choice is reset.</summary>
         [GamePatch(Feature, "HubShipManager", "Start", PatchKind.Postfix)]
         private static void HubStartPostfix()
         {
             try
             {
                 if (!PhotonNetwork.IsMasterClient) return;
+                // A normal room this player only took over as host stays normal: publishing VCF_On would make it need the plugin.
+                if (!ModRegistration.IsFleetRoom) return;
                 if (!FleetReady)
                 {
                     // Clients then treat the room as one without the plugin's fleet features.
