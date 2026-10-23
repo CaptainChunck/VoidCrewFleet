@@ -50,6 +50,7 @@ namespace VoidCrewFleet
             {
                 if (!CheckReady()) return;
                 GameReady = true;
+                Patcher.ApplyLater();
                 Net.StartListening();
                 Log.Info("The game has loaded; Void Crew Fleet is active.");
             }

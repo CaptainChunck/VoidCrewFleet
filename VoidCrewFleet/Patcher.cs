@@ -43,6 +43,13 @@ namespace VoidCrewFleet
         /// missing too).
         /// </summary>
         public bool Optional { get; set; }
+
+        /// <summary>
+        /// Patched once the game has loaded (Patcher.ApplyLater) instead of at start-up: for a class whose first use starts
+        /// one of the game's systems, which must not start before the game starts it itself (Photon's PhotonNetwork). Such a
+        /// patch should also be Optional: it goes in after the start-up report.
+        /// </summary>
+        public bool AfterGameLoad { get; set; }
     }
 
     /// <summary>
@@ -77,8 +84,12 @@ namespace VoidCrewFleet
             return Applied.TryGetValue(feature, out count) && count > 0 && !Missing.ContainsKey(feature);
         }
 
+        private static Harmony _harmony;
+        private static readonly List<KeyValuePair<GamePatchAttribute, MethodInfo>> Later = new List<KeyValuePair<GamePatchAttribute, MethodInfo>>();
+
         public static void ApplyAll(Harmony harmony)
         {
+            _harmony = harmony;
             Type[] types;
             try
             {
@@ -104,10 +115,22 @@ namespace VoidCrewFleet
                         Log.Error("Could not read the patch list of " + host.Name + "." + hook.Name + ": " + e.Message);
                         continue;
                     }
-                    foreach (GamePatchAttribute patch in attributes.Cast<GamePatchAttribute>()) Apply(harmony, patch, hook);
+                    foreach (GamePatchAttribute patch in attributes.Cast<GamePatchAttribute>())
+                    {
+                        if (patch.AfterGameLoad) Later.Add(new KeyValuePair<GamePatchAttribute, MethodInfo>(patch, hook));
+                        else Apply(harmony, patch, hook);
+                    }
                 }
             }
             foreach (string feature in Missing.Keys.ToList()) Withdraw(harmony, feature);
+        }
+
+        /// <summary>Once the game has loaded (FleetRuntime): the patches marked AfterGameLoad.</summary>
+        public static void ApplyLater()
+        {
+            if (_harmony == null || Later.Count == 0) return;
+            foreach (KeyValuePair<GamePatchAttribute, MethodInfo> pair in Later) Apply(_harmony, pair.Key, pair.Value);
+            Later.Clear();
         }
 
         private static void Apply(Harmony harmony, GamePatchAttribute patch, MethodInfo hook)

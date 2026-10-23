@@ -8,7 +8,8 @@ namespace VoidCrewFleet
     /// check inside one can't tell who asked for it. PUN runs every RPC, one from the network or a player's RPC to
     /// themselves, inside PhotonNetwork.ExecuteRpc, which is given the sender (the server stamps it on the event, so a
     /// client can't fake it) and calls the RPC method before it returns. That call is watched here: while it runs, the
-    /// sender and the network object the RPC is for are known.
+    /// sender and the network object the RPC is for are known. It is patched only once the game has loaded: patching
+    /// PhotonNetwork at start-up set Photon up before the game did, and its connection then never got past the name server.
     /// </summary>
     internal static class RpcSender
     {
@@ -24,7 +25,7 @@ namespace VoidCrewFleet
         private static Running _current;
 
         /// <summary>An RPC starts: remember its sender and view (an RPC run inside another one restores the outer one after).</summary>
-        [GamePatch(PvpBoarding.Feature, "Photon.Pun.PhotonNetwork", "ExecuteRpc", PatchKind.Prefix, Optional = true)]
+        [GamePatch(PvpBoarding.Feature, "Photon.Pun.PhotonNetwork", "ExecuteRpc", PatchKind.Prefix, Optional = true, AfterGameLoad = true)]
         private static void ExecutePrefix(Hashtable rpcData, Photon.Realtime.Player sender, out Running __state)
         {
             __state = _current;
@@ -33,7 +34,7 @@ namespace VoidCrewFleet
             _current = new Running { Sender = sender, View = view is int ? (int)view : 0 };
         }
 
-        [GamePatch(PvpBoarding.Feature, "Photon.Pun.PhotonNetwork", "ExecuteRpc", PatchKind.Finalizer, Optional = true)]
+        [GamePatch(PvpBoarding.Feature, "Photon.Pun.PhotonNetwork", "ExecuteRpc", PatchKind.Finalizer, Optional = true, AfterGameLoad = true)]
         private static void ExecuteFinalizer(Running __state)
         {
             _current = __state;
