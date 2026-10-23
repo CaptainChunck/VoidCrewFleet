@@ -269,17 +269,22 @@ namespace VoidCrewFleet
             return team == 0 ? Blue : (team == 1 ? Red : Color.clear);
         }
 
-        /// <summary>A few times a second: raise TeamsChanged when the picture changed.</summary>
+        /// <summary>
+        /// A few times a second: raise TeamsChanged, ShipsChanged and ShipRulesChanged when what they describe changed.
+        /// TeamsChanged only looks at the team match, the teams' lock and, in a team match, each player's team: a player
+        /// moving between ships (or any co-op crew change) doesn't change who may edit which ship.
+        /// </summary>
         internal static void Tick()
         {
             string signature;
             try
             {
                 var text = new StringBuilder();
-                text.Append(IsTeamMatch ? '1' : '0').Append(PvpTeams.Locked ? 'L' : '-');
-                if (PhotonNetwork.InRoom)
+                bool teamMatch = IsTeamMatch;
+                text.Append(teamMatch ? '1' : '0').Append(PvpTeams.Locked ? 'L' : '-');
+                if (teamMatch && PhotonNetwork.InRoom)
                 {
-                    foreach (CrewEntry entry in FleetShips.Crews().Values.OrderBy(e => e.Actor)) text.Append(entry).Append(',');
+                    foreach (CrewEntry entry in FleetShips.Crews().Values.OrderBy(e => e.Actor)) text.Append(entry.Actor).Append(':').Append(entry.Team).Append(',');
                 }
                 signature = text.ToString();
             }

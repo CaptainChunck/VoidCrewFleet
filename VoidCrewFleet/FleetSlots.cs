@@ -133,12 +133,18 @@ namespace VoidCrewFleet
             return "SHIP TYPE";
         }
 
+        /// <summary>Each ship type's default loadout, once settled.</summary>
         private static readonly Dictionary<GUIDUnion, ShipLoadoutDataDef> Defaults = new Dictionary<GUIDUnion, ShipLoadoutDataDef>();
+
+        /// <summary>Each ship type's default loadout by the game's own lists, used until the Customizer answers.</summary>
+        private static readonly Dictionary<GUIDUnion, ShipLoadoutDataDef> GameDefaults = new Dictionary<GUIDUnion, ShipLoadoutDataDef>();
 
         /// <summary>
         /// A ship type's default loadout: the game's default loadout when it is for this type (ROOKIE), otherwise the lowest-rank
         /// loadout the terminal lists for it (never a challenge or test loadout), otherwise its first. Ship Customizer builds
-        /// its CUSTOM loadout on the same one; when it offers GetDefaultLoadout, its answer is used, so both mods agree.
+        /// its CUSTOM loadout on the same one; when it offers GetDefaultLoadout, its answer is used, so both mods agree. While
+        /// it can still answer (its list of ships isn't ready yet), the game's choice is used but not kept, and it is asked
+        /// again next time.
         /// </summary>
         public static ShipLoadoutDataDef DefaultLoadout(GUIDUnion type)
         {
@@ -151,7 +157,19 @@ namespace VoidCrewFleet
                 Defaults[type] = result;
                 return result;
             }
-            result = null;
+            if (!GameDefaults.TryGetValue(type, out result) || result == null)
+            {
+                result = GameDefault(type);
+                if (result != null) GameDefaults[type] = result;
+            }
+            if (result != null && !CustomizerLink.MayGiveDefaultLoadout) Defaults[type] = result;
+            return result;
+        }
+
+        /// <summary>A ship type's default loadout by the game's own lists (see <see cref="DefaultLoadout"/>), or null.</summary>
+        private static ShipLoadoutDataDef GameDefault(GUIDUnion type)
+        {
+            ShipLoadoutDataDef result = null;
             try
             {
                 ShipLoadoutDataContainer container = Container;
@@ -196,7 +214,6 @@ namespace VoidCrewFleet
             {
                 Log.Failure("Finding a ship type's default loadout", e);
             }
-            if (result != null) Defaults[type] = result;
             return result;
         }
 

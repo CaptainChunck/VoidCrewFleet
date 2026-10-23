@@ -1,17 +1,18 @@
 using System;
 using System.Reflection;
 using BepInEx.Bootstrap;
+using BepInEx.Configuration;
 using ResourceAssets;
 
 namespace VoidCrewFleet
 {
     /// <summary>
     /// The optional link to Void Crew Ship Customizer, so ships 2-6 can use its CUSTOM loadout. Everything goes through
-    /// reflection on the Customizer's public ShipCustomizerApi, found only when that plugin is loaded: Fleet never
-    /// references or needs it. Without it (or with a version older than the API) every call answers "not CUSTOM".
-    /// Ships are numbered 1-6 here, as in the API. Ship 1 is the game's own selection (the Customizer handles its CUSTOM by
-    /// itself). Ship 2 works with any Customizer that has the API (its ship-2 members); ships 3-6 need its per-ship members
-    /// (Ship Customizer 0.9.0).
+    /// reflection on the Customizer's public ShipCustomizerApi, found only when that plugin is loaded and turned on in its
+    /// config: Fleet never references or needs it. Without it (or with a version older than the API) every call answers
+    /// "not CUSTOM". Ships are numbered 1-6 here, as in the API. Ship 1 is the game's own selection (the Customizer handles
+    /// its CUSTOM by itself). Ship 2 works with any Customizer that has the API (its ship-2 members); ships 3-6 need its
+    /// per-ship members (Ship Customizer 0.9.0).
     /// </summary>
     internal static class CustomizerLink
     {
@@ -24,7 +25,7 @@ namespace VoidCrewFleet
         private static MethodInfo _getDef, _getStandIn, _setTerminalShip, _checkShip2, _setShip2, _buildShip2, _getShip2Alloys, _getRuleOptions;
         private static MethodInfo _checkShip, _setShip, _buildShip, _getShipAlloys, _getDefaultLoadout;
 
-        /// <summary>Whether the Customizer is installed at all (even one without the API).</summary>
+        /// <summary>Whether the Customizer is installed and turned on (even one without the API).</summary>
         public static bool Installed
         {
             get
@@ -44,7 +45,10 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>Looked up on first use, never from Awake: the Customizer loads after Fleet.</summary>
+        /// <summary>
+        /// Looked up once, on first use after the game has loaded, when every plugin has finished starting (BepInEx starts the
+        /// Customizer before Fleet anyway: Fleet names it as a soft dependency).
+        /// </summary>
         private static void Look()
         {
             if (_looked || !FleetRuntime.GameReady) return;
@@ -55,6 +59,11 @@ namespace VoidCrewFleet
                 if (!Chainloader.PluginInfos.TryGetValue(PluginGuid, out info) || info == null)
                 {
                     Log.Verbose("Ship Customizer is not installed.");
+                    return;
+                }
+                if (!TurnedOn(info))
+                {
+                    Log.Info("Ship Customizer is installed but turned off in its config: CUSTOM loadouts and ship rules are off.");
                     return;
                 }
                 _installed = true;
@@ -110,6 +119,14 @@ namespace VoidCrewFleet
                 _getDef = null;
                 Log.Failure("Linking to Ship Customizer", e);
             }
+        }
+
+        /// <summary>The Customizer's own General > Enabled setting (when it is off, the Customizer does nothing).</summary>
+        private static bool TurnedOn(BepInEx.PluginInfo info)
+        {
+            if (ReferenceEquals(info.Instance, null)) return true;
+            ConfigEntry<bool> enabled;
+            return !info.Instance.Config.TryGetEntry("General", "Enabled", out enabled) || enabled.Value;
         }
 
         /// <summary>
@@ -218,7 +235,21 @@ namespace VoidCrewFleet
         /// <summary>A ship type's default loadout as the Customizer sees it (0.9.0+), or null.</summary>
         public static ShipLoadoutDataDef GetDefaultLoadout(GUIDUnion type)
         {
-            return _getDefaultLoadout != null ? Call(() => _getDefaultLoadout, type) as ShipLoadoutDataDef : null;
+            return Call(() => _getDefaultLoadout, type) as ShipLoadoutDataDef;
+        }
+
+        /// <summary>
+        /// Whether a ship type's default loadout may still come from the Customizer later, where it gave none so far: it offers
+        /// GetDefaultLoadout (0.9.0+), whose answers wait for its list of ships, or the link isn't set up yet (before the game
+        /// has loaded).
+        /// </summary>
+        public static bool MayGiveDefaultLoadout
+        {
+            get
+            {
+                Look();
+                return !_looked || (Linked && _getDefaultLoadout != null);
+            }
         }
 
         /// <summary>
