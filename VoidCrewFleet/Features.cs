@@ -38,6 +38,7 @@ namespace VoidCrewFleet
             Notice.Listen();
             HubFleet.Listen();
             PvpTeams.Listen();
+            VoidJumpLink.Listen();
             PvpMatch.Listen();
             PvpSabotage.Listen();
             PvpPunch.Listen();
@@ -59,6 +60,7 @@ namespace VoidCrewFleet
             FleetRuntime.Slow += PvpRoster.PublishLocalId;
             FleetRuntime.Slow += PvpRoster.Tick;
             FleetRuntime.Slow += CloneTubes.Recode;
+            FleetRuntime.Slow += ShipDeath.Tick;
             FleetRuntime.Slow += PvpTeams.KeepHubTeamsComplete;
             FleetRuntime.Slow += PvpTeamScreen.Tick;
             FleetRuntime.Slow += PvpCombat.KeepFactions;

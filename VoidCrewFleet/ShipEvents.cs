@@ -60,6 +60,8 @@ namespace VoidCrewFleet
         public static bool ForeignToLocal(PlayerControlledShip ship)
         {
             if (ship == null || !FleetShips.Active) return false;
+            // A Fleet Battle player waiting for a place on no team yet hears no ship: any one would be a team's.
+            if (FleetSession.IsPvP && Spectator.Active && FleetShips.TeamOfActor(FleetShips.LocalActor) < 0) return true;
             PlayerControlledShip mine = FleetShips.ViewShip;
             return mine != null && mine != ship;
         }
