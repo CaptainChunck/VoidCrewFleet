@@ -1,8 +1,11 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using CG.Game.Scenarios;
 using CG.Game.Scenarios.Actions;
+using CG.GameLoopStateMachine;
+using CG.GameLoopStateMachine.GameStates;
 using CG.Space;
 using Code.Gameplay;
 using Gameplay.Quests;
@@ -118,12 +121,29 @@ namespace VoidCrewFleet
 
         private static Preset _current;
 
-        /// <summary>The host's start-of-match check that the ships are clear of the rocks (unscaled time; -1 for none).</summary>
+        /// <summary>The session the rock check below belongs to: a new one (the hub, or the next match) forgets it.</summary>
+        private static object _session;
+
+        /// <summary>
+        /// The host's start-of-match check that the ships are clear of the rocks: when it starts (unscaled time; -1 for none),
+        /// and the next ship (slot) it checks, one a tick.
+        /// </summary>
         private static float _checkAt = -1f;
+
+        private static int _checkSlot;
+
+        /// <summary>
+        /// The match (session ID) this player placed the salvage for as host (the room's record only changes here once the
+        /// server sends it back), and whether it is being placed right now, one object a frame.
+        /// </summary>
+        private static string _salvageFor;
+
+        private static bool _placingSalvage;
 
         /// <summary>
         /// The host's own latest next-drop time: a room property only changes on the host once the server sends it back,
-        /// so for as long as it hosts this match in this room, the host goes by what it last wrote.
+        /// so for as long as it hosts this match in this room, the host goes by what it last wrote. Forgotten as soon as it
+        /// isn't host: a player who hosts the match again later (after other hosts) goes by the room.
         /// </summary>
         private static int _hostNextDrop;
 
@@ -200,35 +220,106 @@ namespace VoidCrewFleet
         // ---------------------------------------------------------------- salvage, supply drops, clear starts (host)
 
         /// <summary>
-        /// The host starting a match: the ships' clear-of-rocks check in 8 seconds, the salvage, and the first supply drop
-        /// in 5 minutes. (Only that host checks the ships: a player who becomes host later never moves them mid-match.)
+        /// The host starting a match, as it enters the arena: the salvage, the first supply drop in 5 minutes, and the ships'
+        /// clear-of-rocks check in 8 seconds. (Only that host checks the ships: a player who becomes host later never moves
+        /// them mid-match.) The game enters this state in the hub too, where nothing is armed.
         /// </summary>
         [GamePatch(Feature, "CG.GameLoopStateMachine.GameStates.GSIngame", "OnEnter", PatchKind.Postfix)]
         private static void InGamePostfix()
         {
-            _checkAt = PhotonNetwork.IsMasterClient ? Time.unscaledTime + 8f : -1f;
             try
             {
+                SyncSession();
                 Preset preset = _current;
                 GameSession session = GameSessionManager.ActiveSession;
                 GameSessionSector sector = GameSessionManager.ActiveSector;
                 if (preset == null || !PhotonNetwork.IsMasterClient || !FleetSession.IsPvP || session == null || sector == null || sector.Id != 0) return;
-                object done;
-                if (PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeySpawned, out done) && (done as string) == session.GameSessionID) return;
-                int spawned = 0;
-                foreach (Poi poi in preset.Pois)
-                {
-                    spawned += Spawn(sector, poi.Prefab, poi.Position, Quaternion.Euler(0f, preset.Yaw, 0f));
-                    spawned += Spawn(sector, poi.Prefab, Mirror(preset, poi.Position), Quaternion.Euler(0f, preset.Yaw + 180f, 0f));
-                }
-                PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeySpawned, session.GameSessionID } });
+                if (SalvagePlaced(session.GameSessionID)) return;
+                _checkAt = Time.unscaledTime + 8f;
+                _checkSlot = 0;
+                PlaceSalvage(preset, session, sector);
                 SetNextDrop(unchecked(PhotonNetwork.ServerTimestamp + SupplyDropMilliseconds), session.GameSessionID);
-                Log.Info("PvP arena: placed " + spawned + " salvage spots, mirrored for both teams.");
             }
             catch (Exception e)
             {
                 Log.Failure("Placing the PvP arena's salvage", e);
             }
+        }
+
+        /// <summary>A new session (the hub, or the next match) has no rock check left over from the last one.</summary>
+        private static void SyncSession()
+        {
+            object session = GameSessionManager.ActiveSession;
+            if (ReferenceEquals(session, _session)) return;
+            _session = session;
+            _checkAt = -1f;
+            _checkSlot = 0;
+        }
+
+        /// <summary>Whether this match's salvage is placed (or being placed): by this player as host, or as the room says.</summary>
+        private static bool SalvagePlaced(string sessionId)
+        {
+            if (_placingSalvage || _salvageFor == sessionId) return true;
+            Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+            object done;
+            if (room == null || !room.CustomProperties.TryGetValue(KeySpawned, out done) || (done as string) != sessionId) return false;
+            _salvageFor = sessionId;
+            return true;
+        }
+
+        /// <summary>
+        /// Host: the mirrored salvage, one object a frame (two dozen in one frame stall the host's game for a moment). The room
+        /// records it first, so a player who takes over as host meanwhile never places it again.
+        /// </summary>
+        private static void PlaceSalvage(Preset preset, GameSession session, GameSessionSector sector)
+        {
+            if (FleetRuntime.Instance == null) return;
+            _salvageFor = session.GameSessionID;
+            PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeySpawned, session.GameSessionID } });
+            _placingSalvage = true;
+            FleetRuntime.Instance.StartCoroutine(SpawnSalvage(preset, session, sector));
+        }
+
+        private static IEnumerator SpawnSalvage(Preset preset, GameSession session, GameSessionSector sector)
+        {
+            try
+            {
+                Quaternion blue = Quaternion.Euler(0f, preset.Yaw, 0f);
+                Quaternion red = Quaternion.Euler(0f, preset.Yaw + 180f, 0f);
+                int spawned = 0;
+                // Each spot, then its mirror image on RED's side.
+                for (int i = 0; i < preset.Pois.Length * 2; i++)
+                {
+                    if (!PhotonNetwork.IsMasterClient || !ReferenceEquals(GameSessionManager.ActiveSession, session) || session.ActiveSector != sector)
+                    {
+                        Log.Info("PvP arena: stopped placing the salvage after " + spawned + " objects (no longer host, or the match is over).");
+                        yield break;
+                    }
+                    Poi poi = preset.Pois[i / 2];
+                    spawned += i % 2 == 0 ? Spawn(sector, poi.Prefab, poi.Position, blue) : Spawn(sector, poi.Prefab, Mirror(preset, poi.Position), red);
+                    yield return null;
+                }
+                Log.Info("PvP arena: placed " + spawned + " salvage spots, mirrored for both teams.");
+            }
+            finally
+            {
+                _placingSalvage = false;
+            }
+        }
+
+        /// <summary>
+        /// Host: a match whose salvage was never placed (its first host left while loading, before entering the arena) gets it
+        /// from the host that took over, once the arena is loaded here.
+        /// </summary>
+        private static void PlaceMissingSalvage(Preset preset)
+        {
+            GameSession session = GameSessionManager.ActiveSession;
+            GameSessionSector sector = session != null ? session.ActiveSector : null;
+            if (sector == null || sector.Id != 0 || SalvagePlaced(session.GameSessionID)) return;
+            GameStateMachine machine = GameStateMachine.Instance;
+            if (machine == null || !(machine.CurrentState is GSIngame)) return;
+            Log.Info("PvP arena: this match's salvage was never placed (its first host left while loading); the new host places it.");
+            PlaceSalvage(preset, session, sector);
         }
 
         private static int Spawn(GameSessionSector sector, GUIDUnion prefab, Vector3 position, Quaternion rotation)
@@ -247,24 +338,25 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// Host, a few times a second: a ship that starts inside rock is moved clear (only by the host that started the
-        /// match); supply drops arrive on the room's schedule, which a new host carries on.
+        /// match); salvage the match never got is placed; supply drops arrive on the room's schedule, which a new host
+        /// carries on.
         /// </summary>
         public static void Tick()
         {
+            SyncSession();
             if (!PhotonNetwork.IsMasterClient)
             {
+                // A host's own records are only good while it hosts: one who hosts again later goes by the room.
                 _checkAt = -1f;
+                _hostHasNextDrop = false;
                 return;
             }
             Preset preset = _current;
             if (preset == null || !PvpCombat.Active) return;
             try
             {
-                if (_checkAt > 0f && Time.unscaledTime >= _checkAt)
-                {
-                    _checkAt = -1f;
-                    foreach (PlayerControlledShip ship in FleetShips.All) KeepClear(preset, ship);
-                }
+                KeepShipsClear(preset);
+                PlaceMissingSalvage(preset);
                 if (!PvpTeams.Locked) return;
                 GameSession session = GameSessionManager.ActiveSession;
                 if (session == null) return;
@@ -321,6 +413,18 @@ namespace VoidCrewFleet
             _hostHasNextDrop = true;
             _hostDropRoom = room.Name;
             _hostDropSession = sessionId;
+        }
+
+        /// <summary>The start-of-match rock check, one ship a tick (a ship can take a few dozen sphere checks).</summary>
+        private static void KeepShipsClear(Preset preset)
+        {
+            if (_checkAt < 0f || Time.unscaledTime < _checkAt) return;
+            if (_checkSlot >= FleetSession.ShipCount)
+            {
+                _checkAt = -1f;
+                return;
+            }
+            KeepClear(preset, FleetShips.BySlot(_checkSlot++));
         }
 
         private static void KeepClear(Preset preset, PlayerControlledShip ship)

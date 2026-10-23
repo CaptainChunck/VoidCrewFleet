@@ -33,6 +33,10 @@ namespace VoidCrewFleet
         private static readonly Color LostRed = new Color32(0xFF, 0x00, 0x00, 0xFF);
 
         private static UIDocument _hud;
+
+        /// <summary>The HUD document's tree the row was built for: a document makes a new one when it is enabled again.</summary>
+        private static VisualElement _hudRoot;
+
         private static VisualElement _shipInfo;
         private static VisualElement _topPanel;
         private static VisualElement _row;
@@ -45,8 +49,22 @@ namespace VoidCrewFleet
         private static StyleBackground _mainStart;
         private static StyleBackground _subStart;
         private static bool _inHub;
-        private static string _shown;
-        private static string _typeFor;
+
+        // What the row says, as last written: it is only written again when one of these changes (no text is built until then).
+        private static bool _shown;
+        private static int _shownSlot;
+        private static bool _shownTeams;
+        private static int _shownTeam;
+        private static bool _shownLost;
+        private static string _shownType;
+
+        // The ship type's name (TypeName), and what it was worked out from.
+        private static bool _typeKnown;
+        private static int _typeSlot;
+        private static bool _typeInHub;
+        private static int _typeRevision;
+        private static FleetPlan _typePlan;
+        private static int _typeShip;
         private static string _typeName;
 
         /// <summary>A few times a second.</summary>
@@ -54,27 +72,32 @@ namespace VoidCrewFleet
         {
             try
             {
-                string team;
-                string ship;
-                string type;
-                bool lost;
-                Color colour;
                 bool inHub = GameSessionManager.InHub;
-                if (!Wanted(inHub, out team, out ship, out type, out lost, out colour) || !Place(inHub))
+                CrewEntry entry;
+                bool teams;
+                if (!Wanted(inHub, out entry, out teams) || !Place(inHub))
                 {
                     Hide();
                     return;
                 }
-                string state = team + "|" + ship + "|" + type + "|" + lost + "|" + colour;
-                if (state == _shown) return;
-                _shown = state;
-                _team.text = team ?? "";
+                int team = teams && entry.Team >= 0 ? entry.Team : -1;
+                bool lost = entry.State == CrewState.Dead;
+                string type = TypeName(entry.Slot, inHub);
+                if (_shown && entry.Slot == _shownSlot && teams == _shownTeams && team == _shownTeam && lost == _shownLost && type == _shownType) return;
+                _shown = true;
+                _shownSlot = entry.Slot;
+                _shownTeams = teams;
+                _shownTeam = team;
+                _shownLost = lost;
+                _shownType = type;
+                Color colour = team >= 0 ? FleetApi.TeamColor(team) : Color.white;
+                _team.text = team >= 0 ? PvpTeams.TeamName(team) + " TEAM" : "";
                 _team.style.color = colour;
-                _team.style.display = string.IsNullOrEmpty(team) ? DisplayStyle.None : DisplayStyle.Flex;
-                _ship.text = ship;
+                _team.style.display = team >= 0 ? DisplayStyle.Flex : DisplayStyle.None;
+                _ship.text = FleetSlots.Name(entry.Slot, teams);
                 _type.text = lost ? "LOST" : type ?? "";
                 _type.style.color = lost ? LostRed : Color.white;
-                _icon.style.unityBackgroundImageTintColor = lost ? LostRed : (team != null ? colour : Color.white);
+                _icon.style.unityBackgroundImageTintColor = lost ? LostRed : colour;
                 _row.style.display = DisplayStyle.Flex;
             }
             catch (Exception e)
@@ -95,16 +118,14 @@ namespace VoidCrewFleet
         private static void Hide()
         {
             if (_row != null) _row.style.display = DisplayStyle.None;
-            _shown = null;
+            _shown = false;
         }
 
-        private static bool Wanted(bool inHub, out string team, out string ship, out string type, out bool lost, out Color colour)
+        /// <summary>Whether the row shows now, and for which of the local player's places (their crew entry; a team match or not).</summary>
+        private static bool Wanted(bool inHub, out CrewEntry entry, out bool teams)
         {
-            team = null;
-            ship = null;
-            type = null;
-            lost = false;
-            colour = Color.white;
+            entry = default(CrewEntry);
+            teams = false;
             if (!FleetRuntime.GameReady || !PhotonNetwork.InRoom || Spectator.Active) return false;
             GameStateMachine machine = GameStateMachine.Instance;
             if (machine == null || !(machine.CurrentState is GSIngame)) return false;
@@ -113,17 +134,8 @@ namespace VoidCrewFleet
             // On a terminal's screen the HUD puts its panels away; this row goes with them.
             if (me.InteractionState != null && (me.InteractionState.ActiveModes & InteractionMode.TerminalScreen) != 0) return false;
             if (inHub ? !PvpTeams.HubFleetPlanned : FleetSession.ShipCount < 2) return false;
-            CrewEntry entry;
             if (!FleetShips.TryGetEntry(FleetShips.LocalActor, out entry) || entry.Slot < 0 || entry.State == CrewState.Waiting) return false;
-            bool teams = FleetApi.IsTeamMatch;
-            ship = FleetSlots.Name(entry.Slot, teams);
-            type = TypeName(entry.Slot, inHub);
-            lost = entry.State == CrewState.Dead;
-            if (teams && entry.Team >= 0)
-            {
-                team = PvpTeams.TeamName(entry.Team) + " TEAM";
-                colour = FleetApi.TeamColor(entry.Team);
-            }
+            teams = FleetApi.IsTeamMatch;
             return true;
         }
 
@@ -134,10 +146,17 @@ namespace VoidCrewFleet
         private static string TypeName(int slot, bool inHub)
         {
             PlayerControlledShip spawned = inHub ? null : FleetShips.BySlot(slot);
-            string key = slot + "|" + inHub + "|" + (inHub ? HubFleet.Revision : 0) + "|" + (inHub ? null : FleetSession.Current) + "|" +
-                         (spawned != null ? spawned.GetInstanceID() : 0);
-            if (key == _typeFor) return _typeName;
-            _typeFor = key;
+            int revision = inHub ? HubFleet.Revision : 0;
+            FleetPlan plan = inHub ? null : FleetSession.Current;
+            int ship = spawned != null ? spawned.GetInstanceID() : 0;
+            if (_typeKnown && slot == _typeSlot && inHub == _typeInHub && revision == _typeRevision && ReferenceEquals(plan, _typePlan) && ship == _typeShip)
+                return _typeName;
+            _typeKnown = true;
+            _typeSlot = slot;
+            _typeInHub = inHub;
+            _typeRevision = revision;
+            _typePlan = plan;
+            _typeShip = ship;
             _typeName = null;
             try
             {
@@ -148,7 +167,6 @@ namespace VoidCrewFleet
                 }
                 else
                 {
-                    FleetPlan plan = FleetSession.Current;
                     ShipPlan planned = plan != null ? plan.Ship(slot) : null;
                     type = planned != null ? planned.Type : GUIDUnion.Empty();
                     if (type.IsNull && spawned != null) type = spawned.assetGuid;
@@ -163,22 +181,33 @@ namespace VoidCrewFleet
             return _typeName;
         }
 
-        /// <summary>Builds the row in the game's current HUD (again once the HUD is replaced) and puts it in its place.</summary>
+        /// <summary>
+        /// Builds the row in the game's current HUD (again once the HUD's document or tree is replaced, or the panel it was put
+        /// in has left the HUD) and puts it in its place. A HUD without that place (a game update renamed it) is logged once,
+        /// and the row isn't built again for it: building looks the game's art up, a scan of every loaded asset.
+        /// </summary>
         private static bool Place(bool inHub)
         {
             MainHUDUI hudUi = MainHUDUI.Instance;
             UIDocument hud = hudUi != null ? hudUi.GetComponent<UIDocument>() : null;
             VisualElement root = hud != null ? hud.rootVisualElement : null;
             if (root == null) return false;
-            if (hud != _hud || _row == null || _row.panel == null)
+            bool dropped = _row != null && _row.parent != null && _row.panel == null && root.panel != null;
+            if (hud != _hud || root != _hudRoot || _row == null || dropped)
             {
                 if (_row != null) _row.RemoveFromHierarchy();
                 _hud = hud;
+                _hudRoot = root;
                 Build(root);
-                _shown = null;
+                _shown = false;
             }
             VisualElement parent = inHub ? _topPanel : _shipInfo;
-            if (parent == null) return false;
+            if (parent == null)
+            {
+                if (inHub) Log.WarnOnce("crew row hub", "The team and ship row has no place in the hub's HUD (no TopPanel), so it isn't shown there.");
+                else Log.WarnOnce("crew row mission", "The team and ship row has no place in a mission's HUD (no ShipInfo panel), so it isn't shown there.");
+                return false;
+            }
             if (_row.parent == parent && _inHub == inHub) return true;
             _inHub = inHub;
             _row.RemoveFromHierarchy();

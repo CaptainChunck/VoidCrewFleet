@@ -8,6 +8,7 @@ using CG.Objects;
 using CG.Ship.Hull;
 using CG.Ship.Object;
 using Client.Player.Interactions;
+using Photon.Pun;
 using ResourceAssets;
 using RuntimeAssets;
 using UI.LoadoutTerminal;
@@ -47,6 +48,14 @@ namespace VoidCrewFleet
         public static bool Is(CarryableObject carryable)
         {
             return carryable != null && carryable.assetGuid == Guid;
+        }
+
+        /// <summary>The hacking terminal with this photon view ID (the same on every client), or null.</summary>
+        public static CarryableObject Find(int view)
+        {
+            PhotonView found = view > 0 ? PhotonView.Find(view) : null;
+            CarryableObject item = found != null ? found.GetComponent<CarryableObject>() : null;
+            return Is(item) ? item : null;
         }
 
         /// <summary>What the local player holds, when it is a hacking terminal.</summary>
@@ -206,14 +215,28 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "CG.Ship.Hull.CarryablesSocket", "DoesAccept", PatchKind.Postfix)]
         private static void DoesAcceptPostfix(CarryablesSocket __instance, CarryableObject carryable, ref bool __result)
         {
-            if (__result && Is(carryable) && __instance.GetComponentInParent<CarryablesShelf>() == null) __result = false;
+            try
+            {
+                if (__result && Is(carryable) && __instance.GetComponentInParent<CarryablesShelf>() == null) __result = false;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Keeping the hacking terminal out of sockets", e);
+            }
         }
 
         /// <summary>The Nano Copy Matrix can't duplicate it.</summary>
         [GamePatch(Feature, "CG.Ship.Object.InteractiveCarryableItemCopier", "GetGuidOfCopyableCarryable", PatchKind.Postfix)]
         private static void CopyPostfix(CarryableObject targetCarryable, ref GUIDUnion __result)
         {
-            if (Is(targetCarryable)) __result = GUIDUnion.Empty();
+            try
+            {
+                if (Is(targetCarryable)) __result = GUIDUnion.Empty();
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Keeping the hacking terminal from being copied", e);
+            }
         }
 
         // ---------------------------------------------------------------- using it up
