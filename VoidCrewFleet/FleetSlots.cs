@@ -115,6 +115,61 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>A ship's type name (TypeNameOf), and what it was worked out from.</summary>
+        private sealed class KnownType
+        {
+            public bool InHub;
+            public int Revision;
+            public FleetPlan Plan;
+            public int Ship;
+            public string Name;
+        }
+
+        private static readonly Dictionary<int, KnownType> KnownTypes = new Dictionary<int, KnownType>();
+
+        /// <summary>
+        /// A ship's type name ("DESTROYER"), or null: in the hub as chosen now, in a mission the type the host forced, else the
+        /// type of the ship as it spawned, else of its planned loadout. Worked out again only when one of those changes.
+        /// </summary>
+        public static string TypeNameOf(int slot, bool inHub)
+        {
+            CG.Space.PlayerControlledShip spawned = inHub ? null : FleetShips.BySlot(slot);
+            int revision = inHub ? HubFleet.Revision : 0;
+            FleetPlan plan = inHub ? null : FleetSession.Current;
+            int ship = spawned != null ? spawned.GetInstanceID() : 0;
+            KnownType known;
+            if (KnownTypes.TryGetValue(slot, out known) && known.InHub == inHub && known.Revision == revision && ReferenceEquals(known.Plan, plan) &&
+                known.Ship == ship)
+                return known.Name;
+            if (known == null) KnownTypes[slot] = known = new KnownType();
+            known.InHub = inHub;
+            known.Revision = revision;
+            known.Plan = plan;
+            known.Ship = ship;
+            known.Name = null;
+            try
+            {
+                GUIDUnion type;
+                if (inHub)
+                {
+                    type = HubFleet.TypeOf(HubFleet.ShipDef(slot));
+                }
+                else
+                {
+                    ShipPlan planned = plan != null ? plan.Ship(slot) : null;
+                    type = planned != null ? planned.Type : GUIDUnion.Empty();
+                    if (type.IsNull && spawned != null) type = spawned.assetGuid;
+                    if (type.IsNull && planned != null && !planned.Loadout.IsNull) type = HubFleet.TypeOf(HubFleet.LoadoutDef(planned.Loadout));
+                }
+                if (!type.IsNull) known.Name = TypeName(type, null);
+            }
+            catch
+            {
+                // just the ship's name then
+            }
+            return known.Name;
+        }
+
         /// <summary>A ship type's name as the terminal shows it, without "METEM": "DESTROYER"; unknown when no loadout names it.</summary>
         public static string TypeName(GUIDUnion type, string unknown = "SHIP TYPE")
         {
