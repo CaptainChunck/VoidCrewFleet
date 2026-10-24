@@ -204,9 +204,16 @@ namespace VoidCrewFleet
             if (published == null || published.Length < 2) return false;
             for (int slot = 0; slot < published.Length; slot++)
             {
-                if (published[slot] != 0 && !IsAlive(slot)) return true;
+                if (IsLost(slot)) return true;
             }
             return false;
+        }
+
+        /// <summary>Whether a ship this mission started with (the host's published list) is gone or dying; one that never spawned isn't.</summary>
+        public static bool IsLost(int slot)
+        {
+            int[] published = PublishedShips();
+            return published != null && slot >= 0 && slot < published.Length && published[slot] != 0 && !IsAlive(slot);
         }
 
         /// <summary>A ship's slot: 0 for ship 1 up to 5 for ship 6; -1 when the ship is unknown.</summary>
@@ -332,6 +339,12 @@ namespace VoidCrewFleet
             object value;
             if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null || !PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeyCrew, out value)) return null;
             return value as int[];
+        }
+
+        /// <summary>The crew list as stored, a new object whenever it changes: a caller can skip its work while it is the same.</summary>
+        public static object CrewStamp
+        {
+            get { return Crew(); }
         }
 
         /// <summary>Every placed player's entry, by actor number.</summary>

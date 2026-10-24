@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.3
+**The crew list in big rooms.** The game's list of players under the ship panel has a row for every other player, so
+with more than about 10 players it ran off the screen.
+- **Before teams are picked** (and in the co-op hub): every player on the left. When they don't all fit, it shows 7
+  and the game's own key prompt: **[** opens a scrolling list of every player, with the game's own rows (mute and kick
+  in their menus).
+- **Fleet Battle, once the teams are confirmed:** BLUE on the left and RED on the right, each with its own prompt when
+  it doesn't fit: **[** opens BLUE's whole list and **]** RED's, grouped by ship. Both keys can be changed in the config
+  (Crew list); Tab is the game's camera view.
+- **In a mission:** the players on your own ship (7 at most), then a card for each other ship on your side, in the
+  ship panel's style:
+  - its name and type, and a head for each of its crew: black while they live, red once dead;
+  - its hull as the panel shows yours, with that ship type's silhouette (as the loadout terminal shows it) in the
+    diamond;
+  - a lost ship shows the game's red skull and LOST.
+- **Enemy ships** (Fleet Battle) get a card on the right, under the objectives, while they are within your ship's scan
+  range (the helm's, 3000 m to start): their name, type and hull, in red. Nothing of their crew: the crew list no longer
+  shows the other team, whose health and whereabouts (at the helm, out in space, seated) it gave away.
+- **Your ship's row** in the ship panel shows its type's silhouette (the skull once lost) and sits as the panel's third
+  row: its diamond and the panel's two make a >, and the power row's breaker pips stay on top.
+
+**Lobby screen**
+- Fills the screen: its columns share the screen's width and height, so three ships per team show without scrolling.
+- Long names stay on one line, cut short with "…" only when there is no room (they wrapped a letter at a time).
+
+Works with 0.4.2 in the same room (no network change).
+
 ## 0.4.2
 Fixes from a second full code review (of 0.4.1), and Fleet's own work per frame cut down. Everyone in a room needs
 0.4.2: the network protocol changed.

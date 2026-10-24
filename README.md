@@ -23,7 +23,14 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
 - On the lobby screen the host can **force each ship's type** (Destroyer, Frigate or Striker) or leave it free. A ship
   with no loadout chosen copies ship 1 (AS SHIP 1) when its type allows it, or else gets its type's standard loadout.
 - From the moment you have a ship in the lobby until the mission ends, **your ship** shows as one more row of the
-  ship panel in the top left corner, in the HUD's own style: SHIP 2 with its type, or LOST once it is destroyed.
+  ship panel in the top left corner, in the HUD's own style: its type's silhouette, SHIP 2 and its type, or the red
+  skull and LOST once it is destroyed.
+- **The crew list** under the ship panel:
+  - in the hub, every player; when they don't all fit it shows 7 and a key prompt: **[** opens a scrolling list of
+    everyone (the game's own rows, with mute and kick in their menus);
+  - in a mission, only **your own crew** (7 players at most), then a card for each other ship: its name and type, a
+    head for each of its crew (black while they live, red once dead) and its hull as the ship panel shows yours, with
+    its type's silhouette; a lost ship shows the red skull and LOST.
 - The ships start side by side, fly freely, and **void-jump together**:
   - the escape vector set on any ship's astral map counts for every ship;
   - each crew charges its own ship's void drive;
@@ -72,7 +79,10 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
      - Teams and crews stay even (an odd count allows one extra), and every ship needs a crew. The host can move
        players, auto-balance and confirms.
   2. Everyone on a team wears a **BLUE TEAM / RED TEAM** badge above their head, and sees their own team and ship
-     as a row of the ship panel in the top left corner (BLUE TEAM  BLUE 1, DESTROYER).
+     as a row of the ship panel in the top left corner (BLUE TEAM  BLUE 1, DESTROYER). Once the teams are confirmed
+     the crew list shows BLUE on the left and RED on the right, with **[** and **]** opening each team's whole list
+     when it doesn't fit. In the match it shows your own crew and a card for each other ship of your team, and each
+     enemy ship's health (in red) while it is within your ship's scan range: nothing of the other team's players.
   3. At the loadout terminal the FLEET panel lists every ship in team colours. Only a ship's own team can change its
      loadout, Ship Customizer's CUSTOM included. A ship nobody set up starts with its type's standard loadout.
   4. The host starts the match by **sitting in a ready-room seat**, and everyone spawns aboard their ship.
@@ -162,6 +172,8 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
 | PvP | Arena | auto | Where Fleet Battle is fought: auto, Dz-A, Or-A, Oz-B, Defiance or off (host). |
 | PvP | HackTerminalCost | 10 | The hacking terminal's fabricator price in alloys (host). |
 | PvP | ShipRules | (empty) | Your last Fleet Battle ship rules; set them on the lobby screen, not here. |
+| Crew list | PlayersKey | `<Keyboard>/leftBracket` | Opens the list of every player, or of the BLUE team once teams are picked (Tab is the game's camera view). |
+| Crew list | RedTeamKey | `<Keyboard>/rightBracket` | Opens the list of the RED team once teams are picked. |
 | Diagnostics | VerboseLogging | false | More detail in the BepInEx log. |
 | Diagnostics | AutoTest | Off | Developer self-test; leave it Off to play. |
 

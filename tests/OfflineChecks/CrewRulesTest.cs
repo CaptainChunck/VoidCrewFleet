@@ -48,9 +48,85 @@ internal static class CrewRulesTest
     private static int Main()
     {
         CrewRulesChecks();
+        CrewListChecks();
         RosterChecks();
         Console.WriteLine(_failures == 0 ? "CREW RULES PASSED (" + _checks + ")" : "CREW RULES FAILED: " + _failures + " of " + _checks);
         return _failures == 0 ? 0 : 1;
+    }
+
+    // ---------------------------------------------------------------- the HUD's crew list
+
+    private static string Join(IEnumerable<int> values)
+    {
+        return string.Join(",", values.Select(v => v.ToString()).ToArray());
+    }
+
+    private static void CrewListChecks()
+    {
+        const int rowsLimit = CrewRules.MaxCrew - 1;
+        List<int> others = Enumerable.Range(2, 23).ToList();
+
+        // Co-op, 24 players on three ships, the local player (1) on ship 1: their 7 crewmates, in the list's order.
+        var coop = new Dictionary<int, CrewEntry>();
+        for (int actor = 1; actor <= 24; actor++) coop[actor] = CrewEntry.Play(actor, 0, (actor - 1) % 3);
+        Equal("4,7,10,13,16,19,22", Join(CrewRules.Listed(others, coop, 1, rowsLimit)), "co-op, 24 players: the local player's crew");
+
+        // Fleet Battle 3v3, 24 players, the local player (3) on BLUE 2: BLUE 2's crew only, never RED.
+        var pvp = new Dictionary<int, CrewEntry>();
+        for (int actor = 1; actor <= 24; actor++)
+        {
+            int slot = (actor - 1) % 6;
+            pvp[actor] = CrewEntry.Play(actor, CrewRules.TeamOf(slot, true), slot);
+        }
+        List<int> everyone = Enumerable.Range(1, 24).ToList();
+        Equal("9,15,21", Join(CrewRules.Listed(everyone, pvp, 3, rowsLimit)), "Fleet Battle: the local player's ship only, never themselves");
+
+        // A lost ship's crew still list each other (they keep its slot); a waiting player (no slot) and an unplaced one don't show.
+        var lost = new Dictionary<int, CrewEntry>
+        {
+            { 1, new CrewEntry { Actor = 1, Team = 0, Slot = 1, State = CrewState.Dead } },
+            { 2, new CrewEntry { Actor = 2, Team = 0, Slot = 1, State = CrewState.Dead } },
+            { 3, CrewEntry.Play(3, 0, 0) },
+            { 4, new CrewEntry { Actor = 4, Team = -1, Slot = -1, State = CrewState.Waiting } },
+        };
+        Equal("2", Join(CrewRules.Listed(new List<int> { 2, 3, 4, 5 }, lost, 1, rowsLimit)), "a lost ship's crew: its other members");
+
+        // Without a ship: the first 7 others in the list's order (waiting, the hub before picking, a room without crews).
+        Equal("5,6,7,8,9,10,11", Join(CrewRules.Listed(Enumerable.Range(4, 20).ToList(), lost, 4, rowsLimit)), "waiting: the first 7 others");
+        Equal("2,3,4,5,6,7,8", Join(CrewRules.Listed(others, new Dictionary<int, CrewEntry>(), 1, rowsLimit)), "no crews: the first 7");
+        Equal("2,3,4,5,6,7,8", Join(CrewRules.Listed(others, null, 1, rowsLimit)), "no crew list at all: the first 7");
+        Equal("2,3", Join(CrewRules.Listed(new List<int> { 2, 3 }, null, 1, rowsLimit)), "a small room: everyone");
+        // A crew bigger than the list (a hub with too many picks for one ship): still 7.
+        var crowded = new Dictionary<int, CrewEntry>();
+        for (int actor = 1; actor <= 12; actor++) crowded[actor] = CrewEntry.Play(actor, 0, 0);
+        Equal(rowsLimit, CrewRules.Listed(Enumerable.Range(2, 11).ToList(), crowded, 1, rowsLimit).Count, "never more than 7 rows");
+
+        // The other ships on the local player's side.
+        Equal("1,2", Join(CrewRules.OtherShipsOfSide(0, 3, false)), "co-op ship 1 of 3: ships 2 and 3");
+        Equal("0", Join(CrewRules.OtherShipsOfSide(1, 2, false)), "co-op ship 2 of 2: ship 1");
+        Equal("2,4", Join(CrewRules.OtherShipsOfSide(0, 6, true)), "BLUE 1 in 3v3: BLUE 2 and BLUE 3");
+        Equal("1,5", Join(CrewRules.OtherShipsOfSide(3, 6, true)), "RED 2 in 3v3: RED 1 and RED 3");
+        Equal("", Join(CrewRules.OtherShipsOfSide(0, 2, true)), "1v1: no other ship on the side");
+        Equal("", Join(CrewRules.OtherShipsOfSide(-1, 3, false)), "no ship: none");
+
+        // The other team's ships, for the enemy cards: only in a team match.
+        Equal("1,3,5", Join(CrewRules.EnemyShips(0, 6, true)), "BLUE 1 in 3v3: RED 1, RED 2, RED 3");
+        Equal("0,2", Join(CrewRules.EnemyShips(3, 4, true)), "RED 2 in 2v2: BLUE 1 and BLUE 2");
+        Equal("", Join(CrewRules.EnemyShips(0, 3, false)), "co-op: no enemy ships");
+        Equal("", Join(CrewRules.EnemyShips(-1, 6, true)), "no ship: none");
+
+        // The teams' lists once teams are picked: each team's players in the list's order; unplaced players on neither.
+        var picked = new Dictionary<int, CrewEntry>(pvp) { { 30, new CrewEntry { Actor = 30, Team = -1, Slot = -1, State = CrewState.Waiting } } };
+        List<int> withUnplaced = Enumerable.Range(2, 23).Concat(new[] { 30, 31 }).ToList();
+        Equal("2,4,6,8,10,12,14,16,18,20,22,24", Join(CrewRules.OfTeam(withUnplaced, picked, 1)), "RED's players in order");
+        Equal(11, CrewRules.OfTeam(withUnplaced, picked, 0).Count, "BLUE's other players (the local player has no row)");
+        Equal(0, CrewRules.OfTeam(withUnplaced, null, 0).Count, "no crew list: nobody is on a team");
+
+        // A list shows every player while they fit; with more, one row fewer and the key prompt in its place.
+        Equal(5, CrewRules.RowsShown(5, 8), "5 players, 8 rows: all 5");
+        Equal(8, CrewRules.RowsShown(8, 8), "8 players, 8 rows: all 8");
+        Equal(7, CrewRules.RowsShown(9, 8), "9 players, 8 rows: 7 and the prompt");
+        Equal(7, CrewRules.RowsShown(23, 8), "23 players, 8 rows: 7 and the prompt");
     }
 
     // ---------------------------------------------------------------- CrewRules

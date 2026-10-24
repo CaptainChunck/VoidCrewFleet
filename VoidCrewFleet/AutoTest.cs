@@ -119,6 +119,14 @@ namespace VoidCrewFleet
                     return;
                 case Step.WaitHub:
                     if (Since < 8f) return;
+                    if (!_hubPreviewStarted)
+                    {
+                        _hubPreviewStarted = true;
+                        _sequenceDone = false;
+                        FleetRuntime.Instance.StartCoroutine(HubCrewListSequence());
+                        return;
+                    }
+                    if (!_sequenceDone && Since < 40f) return;
                     StartMission();
                     Go(Step.Starting);
                     return;
@@ -135,7 +143,11 @@ namespace VoidCrewFleet
                     if (Time.unscaledTime - _lastReport < 5f) return;
                     _lastReport = Time.unscaledTime;
                     Report("mission");
-                    Screenshot("mission");
+                    // The second shot: a full crew's stand-in rows over the other ships' cards (set up a report earlier, as the
+                    // cards are worked out a few times a second); the third and later ones the real list.
+                    if (_reports == 0) CrewListPreview(true);
+                    else if (_reports == 2) CrewListPreview(false);
+                    Screenshot(_reports == 1 ? "crew-list" : "mission");
                     if (FleetSession.IsPvP && _reports == 0) StartHackTest();
                     if (++_reports < (FleetSession.IsPvP ? 10 : 3)) return;
                     if (Settings.AutoTestTour.Value && FleetSession.IsPvP && Step.Tour > _done)
@@ -887,6 +899,7 @@ namespace VoidCrewFleet
             text.AppendLine("  active sector " + (GameSessionManager.ActiveSector != null ? GameSessionManager.ActiveSector.Id.ToString() : "none") +
                             ", room players " + PhotonNetwork.PlayerList.Length + "/" + (PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.MaxPlayers : 0));
             text.AppendLine("  crew row: " + CrewBadge.Describe());
+            text.AppendLine("  crew list: " + CrewList.Describe());
             text.AppendLine("  chat: " + DescribeChat());
             Log.Info(text.ToString());
         }
@@ -923,6 +936,41 @@ namespace VoidCrewFleet
             {
                 return "unknown (" + e.Message + ")";
             }
+        }
+
+        private static bool _hubPreviewStarted;
+
+        /// <summary>
+        /// Self-test, alone in the hub: the crew lists as a big room shows them (stand-in rows made from the game's own row
+        /// template): everyone with the key prompt, then BLUE and RED, then the whole BLUE list's window.
+        /// </summary>
+        private static System.Collections.IEnumerator HubCrewListSequence()
+        {
+            CrewList.PreviewForTest("everyone");
+            yield return new WaitForSeconds(1f);
+            Log.Info("[autotest] crew list: " + CrewList.Describe());
+            Screenshot("hub-crew-list");
+            yield return new WaitForSeconds(0.5f);
+            CrewList.PreviewForTest("teams");
+            yield return new WaitForSeconds(1f);
+            Log.Info("[autotest] crew list: " + CrewList.Describe());
+            Screenshot("hub-team-lists");
+            yield return new WaitForSeconds(0.5f);
+            PlayerListPanel.OpenPreview(PlayerListPanel.Kind.Blue, 12);
+            yield return new WaitForSeconds(1f);
+            Screenshot("player-list");
+            yield return new WaitForSeconds(0.5f);
+            PlayerListPanel.Close();
+            CrewList.PreviewForTest(null);
+            _sequenceDone = true;
+        }
+
+        /// <summary>Self-test, alone in a mission: a full crew's stand-in rows over the cards, stand-in heads, and the enemy cards.</summary>
+        private static void CrewListPreview(bool show)
+        {
+            CrewList.PreviewForTest(show ? "own" : null);
+            ShipCards.HeadsForTest = show ? 5 : 0;
+            ShipCards.EnemiesInRangeForTest = show && FleetSession.IsPvP;
         }
 
         private static void Screenshot(string label)

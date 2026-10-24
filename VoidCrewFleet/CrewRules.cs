@@ -72,6 +72,70 @@ namespace VoidCrewFleet
             return slots;
         }
 
+        /// <summary>
+        /// The other players the HUD's crew list shows, in the list's order (rows): for a player with a ship (picked in the
+        /// hub, or theirs in a mission, lost or not), the players on that ship; for one without (the hub before picking, a
+        /// one-ship game, a waiting player), the first ones. Never more than maxRows.
+        /// </summary>
+        public static List<int> Listed(IList<int> rows, IDictionary<int, CrewEntry> crews, int local, int maxRows)
+        {
+            var listed = new List<int>();
+            CrewEntry me = default(CrewEntry);
+            bool ship = crews != null && crews.TryGetValue(local, out me) && me.Slot >= 0;
+            foreach (int actor in rows)
+            {
+                if (listed.Count >= maxRows) break;
+                if (actor == local) continue;
+                CrewEntry entry;
+                if (ship && (!crews.TryGetValue(actor, out entry) || entry.Slot != me.Slot)) continue;
+                listed.Add(actor);
+            }
+            return listed;
+        }
+
+        /// <summary>The other ships on a ship's side, lowest slot first: every other ship, or its team's in a team match.</summary>
+        public static List<int> OtherShipsOfSide(int slot, int ships, bool teamMatch)
+        {
+            if (slot < 0) return new List<int>();
+            List<int> side = SlotsOfTeam(TeamOf(slot, teamMatch), ships, teamMatch);
+            side.Remove(slot);
+            return side;
+        }
+
+        /// <summary>The other team's ships in a team match (none outside one), lowest slot first.</summary>
+        public static List<int> EnemyShips(int slot, int ships, bool teamMatch)
+        {
+            var enemies = new List<int>();
+            if (!teamMatch || slot < 0) return enemies;
+            for (int other = 0; other < ships; other++)
+            {
+                if (TeamOf(other, true) != TeamOf(slot, true)) enemies.Add(other);
+            }
+            return enemies;
+        }
+
+        /// <summary>One team's players in the list's order (rows); a player the host hasn't put on a team is on neither.</summary>
+        public static List<int> OfTeam(IList<int> rows, IDictionary<int, CrewEntry> crews, int team)
+        {
+            var players = new List<int>();
+            if (crews == null) return players;
+            foreach (int actor in rows)
+            {
+                CrewEntry entry;
+                if (crews.TryGetValue(actor, out entry) && entry.Team == team) players.Add(actor);
+            }
+            return players;
+        }
+
+        /// <summary>
+        /// How many of a list's players show as rows where the HUD has room for rows: all of them while they fit, else one
+        /// fewer, the last place going to the key prompt that opens the whole list.
+        /// </summary>
+        public static int RowsShown(int players, int rows)
+        {
+            return players <= rows ? players : Math.Max(0, rows - 1);
+        }
+
         /// <summary>Players crewing a ship (spectators not counted).</summary>
         public static int CrewOf(IDictionary<int, CrewEntry> crews, ICollection<int> players, int slot, int except = int.MinValue)
         {
