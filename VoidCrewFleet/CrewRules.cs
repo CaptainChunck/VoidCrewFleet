@@ -102,6 +102,40 @@ namespace VoidCrewFleet
             return side;
         }
 
+        /// <summary>The other team's ships in a team match (none outside one), lowest slot first.</summary>
+        public static List<int> EnemyShips(int slot, int ships, bool teamMatch)
+        {
+            var enemies = new List<int>();
+            if (!teamMatch || slot < 0) return enemies;
+            for (int other = 0; other < ships; other++)
+            {
+                if (TeamOf(other, true) != TeamOf(slot, true)) enemies.Add(other);
+            }
+            return enemies;
+        }
+
+        /// <summary>One team's players in the list's order (rows); a player the host hasn't put on a team is on neither.</summary>
+        public static List<int> OfTeam(IList<int> rows, IDictionary<int, CrewEntry> crews, int team)
+        {
+            var players = new List<int>();
+            if (crews == null) return players;
+            foreach (int actor in rows)
+            {
+                CrewEntry entry;
+                if (crews.TryGetValue(actor, out entry) && entry.Team == team) players.Add(actor);
+            }
+            return players;
+        }
+
+        /// <summary>
+        /// How many of a list's players show as rows where the HUD has room for rows: all of them while they fit, else one
+        /// fewer, the last place going to the key prompt that opens the whole list.
+        /// </summary>
+        public static int RowsShown(int players, int rows)
+        {
+            return players <= rows ? players : Math.Max(0, rows - 1);
+        }
+
         /// <summary>Players crewing a ship (spectators not counted).</summary>
         public static int CrewOf(IDictionary<int, CrewEntry> crews, ICollection<int> players, int slot, int except = int.MinValue)
         {

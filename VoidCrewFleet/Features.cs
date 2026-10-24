@@ -58,6 +58,7 @@ namespace VoidCrewFleet
             Register("PvpVoice.Frame", () => FleetRuntime.Frame += PvpVoice.Frame);
             Register("ShipResources.Frame", () => FleetRuntime.Frame += ShipResources.Frame);
             Register("Spectator.Frame", () => FleetRuntime.Frame += Spectator.Frame);
+            Register("CrewList.Frame", () => FleetRuntime.Frame += CrewList.Frame);
             Register("FistPose.Late", () => FleetRuntime.Late += FistPose.Late);
 
             Register("ShipResources.OnShipLost", () => ShipDeath.ShipLost += ShipResources.OnShipLost);

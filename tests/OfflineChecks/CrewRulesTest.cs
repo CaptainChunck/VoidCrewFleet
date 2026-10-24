@@ -108,6 +108,25 @@ internal static class CrewRulesTest
         Equal("1,5", Join(CrewRules.OtherShipsOfSide(3, 6, true)), "RED 2 in 3v3: RED 1 and RED 3");
         Equal("", Join(CrewRules.OtherShipsOfSide(0, 2, true)), "1v1: no other ship on the side");
         Equal("", Join(CrewRules.OtherShipsOfSide(-1, 3, false)), "no ship: none");
+
+        // The other team's ships, for the enemy cards: only in a team match.
+        Equal("1,3,5", Join(CrewRules.EnemyShips(0, 6, true)), "BLUE 1 in 3v3: RED 1, RED 2, RED 3");
+        Equal("0,2", Join(CrewRules.EnemyShips(3, 4, true)), "RED 2 in 2v2: BLUE 1 and BLUE 2");
+        Equal("", Join(CrewRules.EnemyShips(0, 3, false)), "co-op: no enemy ships");
+        Equal("", Join(CrewRules.EnemyShips(-1, 6, true)), "no ship: none");
+
+        // The teams' lists once teams are picked: each team's players in the list's order; unplaced players on neither.
+        var picked = new Dictionary<int, CrewEntry>(pvp) { { 30, new CrewEntry { Actor = 30, Team = -1, Slot = -1, State = CrewState.Waiting } } };
+        List<int> withUnplaced = Enumerable.Range(2, 23).Concat(new[] { 30, 31 }).ToList();
+        Equal("2,4,6,8,10,12,14,16,18,20,22,24", Join(CrewRules.OfTeam(withUnplaced, picked, 1)), "RED's players in order");
+        Equal(11, CrewRules.OfTeam(withUnplaced, picked, 0).Count, "BLUE's other players (the local player has no row)");
+        Equal(0, CrewRules.OfTeam(withUnplaced, null, 0).Count, "no crew list: nobody is on a team");
+
+        // A list shows every player while they fit; with more, one row fewer and the key prompt in its place.
+        Equal(5, CrewRules.RowsShown(5, 8), "5 players, 8 rows: all 5");
+        Equal(8, CrewRules.RowsShown(8, 8), "8 players, 8 rows: all 8");
+        Equal(7, CrewRules.RowsShown(9, 8), "9 players, 8 rows: 7 and the prompt");
+        Equal(7, CrewRules.RowsShown(23, 8), "23 players, 8 rows: 7 and the prompt");
     }
 
     // ---------------------------------------------------------------- CrewRules

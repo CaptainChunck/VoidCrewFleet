@@ -17,7 +17,6 @@ using PlatformAbstractionLayer;
 using Photon.Pun;
 using ResourceAssets;
 using ToolClasses;
-using UI.MainHUD;
 using UnityEngine;
 using UnityEngine.UIElements;
 
@@ -120,6 +119,14 @@ namespace VoidCrewFleet
                     return;
                 case Step.WaitHub:
                     if (Since < 8f) return;
+                    if (!_hubPreviewStarted)
+                    {
+                        _hubPreviewStarted = true;
+                        _sequenceDone = false;
+                        FleetRuntime.Instance.StartCoroutine(HubCrewListSequence());
+                        return;
+                    }
+                    if (!_sequenceDone && Since < 40f) return;
                     StartMission();
                     Go(Step.Starting);
                     return;
@@ -136,9 +143,11 @@ namespace VoidCrewFleet
                     if (Time.unscaledTime - _lastReport < 5f) return;
                     _lastReport = Time.unscaledTime;
                     Report("mission");
-                    // The first shot: the crew list with a full crew's stand-in rows over the ship rows; then the real list.
-                    CrewListPreview(_reports == 0);
-                    Screenshot(_reports == 0 ? "crew-list" : "mission");
+                    // The second shot: a full crew's stand-in rows over the other ships' cards (set up a report earlier, as the
+                    // cards are worked out a few times a second); the third and later ones the real list.
+                    if (_reports == 0) CrewListPreview(true);
+                    else if (_reports == 2) CrewListPreview(false);
+                    Screenshot(_reports == 1 ? "crew-list" : "mission");
                     if (FleetSession.IsPvP && _reports == 0) StartHackTest();
                     if (++_reports < (FleetSession.IsPvP ? 10 : 3)) return;
                     if (Settings.AutoTestTour.Value && FleetSession.IsPvP && Step.Tour > _done)
@@ -929,56 +938,39 @@ namespace VoidCrewFleet
             }
         }
 
-        private static readonly List<VisualElement> PreviewRows = new List<VisualElement>();
+        private static bool _hubPreviewStarted;
 
         /// <summary>
-        /// Self-test, alone in the room: 7 stand-in rows (a full crew's other players) made from the game's own row template,
-        /// above the ship rows, to see a big room's crew list; taken out again with show false.
+        /// Self-test, alone in the hub: the crew lists as a big room shows them (stand-in rows made from the game's own row
+        /// template): everyone with the key prompt, then BLUE and RED, then the whole BLUE list's window.
         /// </summary>
+        private static System.Collections.IEnumerator HubCrewListSequence()
+        {
+            CrewList.PreviewForTest("everyone");
+            yield return new WaitForSeconds(1f);
+            Log.Info("[autotest] crew list: " + CrewList.Describe());
+            Screenshot("hub-crew-list");
+            yield return new WaitForSeconds(0.5f);
+            CrewList.PreviewForTest("teams");
+            yield return new WaitForSeconds(1f);
+            Log.Info("[autotest] crew list: " + CrewList.Describe());
+            Screenshot("hub-team-lists");
+            yield return new WaitForSeconds(0.5f);
+            PlayerListPanel.OpenPreview(PlayerListPanel.Kind.Blue, 12);
+            yield return new WaitForSeconds(1f);
+            Screenshot("player-list");
+            yield return new WaitForSeconds(0.5f);
+            PlayerListPanel.Close();
+            CrewList.PreviewForTest(null);
+            _sequenceDone = true;
+        }
+
+        /// <summary>Self-test, alone in a mission: a full crew's stand-in rows over the cards, stand-in heads, and the enemy cards.</summary>
         private static void CrewListPreview(bool show)
         {
-            try
-            {
-                foreach (VisualElement row in PreviewRows) row.RemoveFromHierarchy();
-                PreviewRows.Clear();
-                if (!show) return;
-                MainHUDUI hud = MainHUDUI.Instance;
-                CoopBuddiesPanel panel = hud != null ? hud.GetComponent<CoopBuddiesPanel>() : null;
-                UIDocument document = hud != null ? hud.GetComponent<UIDocument>() : null;
-                VisualElement list = document != null && document.rootVisualElement != null ? document.rootVisualElement.Q("CoopBuddiesContainer") : null;
-                if (panel == null || panel.CoopBuddyPrefab == null || list == null)
-                {
-                    Log.Info("[autotest] Crew list preview: the HUD has no crew list.");
-                    return;
-                }
-                VisualElement ships = list.Q("FleetShipRows");
-                int at = ships != null && ships.parent == list ? list.IndexOf(ships) : list.childCount;
-                for (int i = 0; i < CrewRules.MaxCrew - 1; i++)
-                {
-                    TemplateContainer row = panel.CoopBuddyPrefab.Instantiate();
-                    Label name = row.Q<Label>("PlayerName");
-                    if (name != null) name.text = "Crewmate " + (i + 2);
-                    Label rank = row.Q<Label>("RankLabel");
-                    if (rank != null) rank.text = (10 + i * 7).ToString();
-                    // As the game sets a row up (CoopBuddyView): its menu and mute marks hidden, a healthy player.
-                    foreach (string part in new[] { "ActionPanel", "ChatMuteState", "VoiceMuteState", "MicrophoneMutedState" })
-                    {
-                        VisualElement hidden = row.Q(part);
-                        if (hidden != null) hidden.style.display = DisplayStyle.None;
-                    }
-                    StateVE state = row.Q<StateVE>();
-                    if (state != null) state.SetClassState("player-hud-health", "high");
-                    VisualElement health = row.Q("HealthBarProgress");
-                    if (health != null) health.style.width = Length.Percent(100 - i * 9);
-                    list.Insert(at + i, row);
-                    PreviewRows.Add(row);
-                }
-                Log.Info("[autotest] Crew list preview: " + PreviewRows.Count + " stand-in rows above the ship rows.");
-            }
-            catch (Exception e)
-            {
-                Log.Failure("[autotest] crew list preview", e);
-            }
+            CrewList.PreviewForTest(show ? "own" : null);
+            ShipCards.HeadsForTest = show ? 5 : 0;
+            ShipCards.EnemiesInRangeForTest = show && FleetSession.IsPvP;
         }
 
         private static void Screenshot(string label)

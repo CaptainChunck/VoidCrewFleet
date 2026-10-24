@@ -18,6 +18,8 @@ namespace VoidCrewFleet
         public static ConfigEntry<int> HackTerminalCost;
         public static ConfigEntry<string> PvpArena;
         public static ConfigEntry<string> PvpShipRules;
+        public static ConfigEntry<string> PlayerListKey;
+        public static ConfigEntry<string> RedListKey;
         public static ConfigEntry<bool> VerboseLogging;
         public static ConfigEntry<AutoTestMode> AutoTest;
         public static ConfigEntry<bool> AutoTestJump;
@@ -78,6 +80,13 @@ namespace VoidCrewFleet
                     new AcceptableValueRange<int>(1, 60)));
             PvpShipRules = config.Bind("PvP", "ShipRules", "",
                 "Your last Fleet Battle ship rules (set them on the lobby screen's SHIP RULES tab); a lobby you host starts with them.");
+
+            PlayerListKey = config.Bind("Crew list", "PlayersKey", "<Keyboard>/leftBracket",
+                "The key that opens the list of every player (before teams are picked), or of the BLUE team (once they are), when they don't all " +
+                "fit in the crew list on the left. An Input System control path, such as <Keyboard>/leftBracket or <Keyboard>/f2. Tab is the " +
+                "game's camera view.");
+            RedListKey = config.Bind("Crew list", "RedTeamKey", "<Keyboard>/rightBracket",
+                "The key that opens the list of the RED team once teams are picked, when they don't all fit in the list on the right.");
 
             VerboseLogging = config.Bind("Diagnostics", "VerboseLogging", false,
                 "Write extra detail to the BepInEx log.");

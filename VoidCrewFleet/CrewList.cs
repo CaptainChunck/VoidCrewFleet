@@ -2,102 +2,158 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using CG.Game.Player;
+using Gameplay.Chat;
 using Photon.Pun;
+using UI.Core;
 using UI.MainHUD;
 using UnityEngine;
+using UnityEngine.InputSystem;
 using UnityEngine.UIElements;
 
 namespace VoidCrewFleet
 {
     /// <summary>
-    /// The game's crew list under the ship panel has an 80 px row for each other player: made for Void Crew's 4 players, it
-    /// runs off the screen in a big room (9 rows fit above the player's own panel). It lists instead:
-    /// - for a player with a ship (picked in the hub, or theirs in a mission), the players on that ship: 7 rows at most, a
-    ///   full crew (CrewRules.MaxCrew), and in Fleet Battle nothing of the other team's health and whereabouts;
-    /// - under them, a row for each other ship on their side (every other ship in co-op, their team's in Fleet Battle) with
-    ///   its type and how many crew it has, or LOST, built like the ship panel's own rows (HudShipRow);
-    /// - for a player without a ship (the hub before picking, a one-ship game), the first 7 players.
-    /// Everyone stays in the escape menu's player list, with mute, kick, block and report. The game's rows are only hidden,
-    /// so their voice and health updates carry on; the ship rows sit at the end of the list, so they show and hide with it.
+    /// The HUD's crew list (the game's CoopBuddiesPanel: an 80 px row for each other player, made for Void Crew's 4 players;
+    /// 9 fit above the player's own panel), kept to what fits in a big room:
+    /// - before teams are picked (and in the co-op hub, and in one-ship games): every player, in the game's list on the left;
+    /// - in the hub once Fleet Battle's teams are confirmed: BLUE in the game's list on the left, RED in a list of the same rows
+    ///   on the right;
+    /// - in a fleet mission: the players on the local player's own ship (7 at most, CrewRules.MaxCrew), then the other ships'
+    ///   cards (ShipCards).
+    /// A list with more players than fit shows one row fewer and, in its place, the game's own key prompt for the whole list
+    /// (PlayerListPanel): [ for the left one (everyone, or BLUE), ] for the right one (RED), as set in the config. The game's
+    /// rows are only hidden or moved, so their voice and health updates carry on.
     /// </summary>
     internal static class CrewList
     {
         public const string Feature = "Crew list per ship";
 
-        /// <summary>The most player rows: a full crew's others.</summary>
-        private const int MaxRows = CrewRules.MaxCrew - 1;
+        private enum Mode
+        {
+            Everyone,
+            Teams,
+            OwnShip
+        }
 
-        /// <summary>Between the last player row and the first ship row.</summary>
-        private const float ShipsGap = 6f;
+        /// <summary>The most player rows in a list (9 fit): with more players, 7 and the key prompt.</summary>
+        private const int ListRows = 8;
+
+        /// <summary>The most player rows in a mission: a full crew's others.</summary>
+        private const int CrewRows = CrewRules.MaxCrew - 1;
+
+        /// <summary>The game's crew row: 289 px wide, 20 px into its place (CoopBuddyStyles' .coop-buddy).</summary>
+        private const float RowWidth = 309f;
 
         private static readonly FieldInfo ViewsField = GameMember.Field(typeof(CoopBuddiesPanel), "view");
         private static readonly FieldInfo RowField = GameMember.Field(typeof(CoopBuddyView), "container");
+        private static readonly PropertyInfo PromptKey = GameMember.Property(typeof(KeyBindVE), "Key");
 
         private static readonly StyleEnum<DisplayStyle> Shown = new StyleEnum<DisplayStyle>(StyleKeyword.Null);
         private static readonly StyleEnum<DisplayStyle> Hidden = new StyleEnum<DisplayStyle>(DisplayStyle.None);
 
         private static readonly Dictionary<VisualElement, int> ActorOfRow = new Dictionary<VisualElement, int>();
-        private static readonly List<VisualElement> Rows = new List<VisualElement>();
-        private static readonly List<int> RowActors = new List<int>();
-        private static readonly List<HudShipRow> ShipRows = new List<HudShipRow>();
+        private static readonly Dictionary<int, VisualElement> RowOfActor = new Dictionary<int, VisualElement>();
+        /// <summary>The players with a row, in the order their rows first appeared (the game's own order: as they joined).</summary>
+        private static readonly List<int> Order = new List<int>();
+        private static readonly List<VisualElement> StandIns = new List<VisualElement>();
 
         // The game's HUD and its crew list panel.
         private static MainHUDUI _hudUi;
         private static UIDocument _hudDocument;
         private static CoopBuddiesPanel _panel;
 
-        // The HUD the ship rows were built in: built again for a new document or tree.
+        // The HUD the lists were set up in: set up again for a new document or tree.
         private static UIDocument _hud;
         private static VisualElement _hudRoot;
         private static VisualElement _list;
-        private static VisualElement _ships;
+        private static VisualElement _right;
+        private static KeyBindVE _leftPrompt;
+        private static KeyBindVE _rightPrompt;
         private static float _indent = float.NaN;
+        private static float _rightTop = float.NaN;
 
-        // What the list was last set for: nothing is worked out again while all of these stay the same.
+        // What the lists were last set for: nothing is worked out again while all of these stay the same.
+        private static Mode _mode;
         private static object _crewStamp;
         private static int _rowCount = -1;
         private static int _players = -1;
-        private static bool _inHub;
-        private static int _shipCount = -1;
-        private static bool _teams;
-        private static int _revision = -1;
-        private static FleetPlan _plan;
-        private static int _lost = -1;
+        private static bool _shownOnce;
+
+        private static InputAction _leftKey;
+        private static InputAction _rightKey;
+        private static bool _preview;
 
         /// <summary>A few times a second.</summary>
         public static void Tick()
         {
             Refresh(false);
+            ShipCards.Tick(_list != null && _mode == Mode.OwnShip);
+            if (!_preview) FollowList();
         }
 
-        /// <summary>A player's row is added: shown or hidden at once, not a quarter of a second later.</summary>
+        /// <summary>A player's row is added: shown, hidden or moved at once, not a quarter of a second later.</summary>
         [GamePatch(Feature, "UI.MainHUD.CoopBuddiesPanel", "PlayerSpawned", PatchKind.Postfix, Optional = true)]
         private static void PlayerSpawnedPostfix()
         {
             Refresh(true);
         }
 
-        /// <summary>For the self-test's reports: the player rows shown, and what the ship rows say.</summary>
+        /// <summary>Every frame: the keys that open the whole lists, and the open list itself.</summary>
+        public static void Frame()
+        {
+            try
+            {
+                bool usable = _list != null && _mode != Mode.OwnShip && PhotonNetwork.InRoom;
+                SetKeys(usable || PlayerListPanel.IsOpen);
+                if (_leftKey != null && _leftKey.enabled && KeysFree())
+                {
+                    if (_leftKey.WasPressedThisFrame()) PlayerListPanel.Toggle(_mode == Mode.Teams ? PlayerListPanel.Kind.Blue : PlayerListPanel.Kind.Everyone);
+                    else if (_rightKey.WasPressedThisFrame() && _mode == Mode.Teams) PlayerListPanel.Toggle(PlayerListPanel.Kind.Red);
+                }
+                if (PlayerListPanel.IsOpen && !usable) PlayerListPanel.Close();
+                PlayerListPanel.Frame();
+            }
+            catch (Exception e)
+            {
+                Log.Failure("The player list's keys", e);
+            }
+        }
+
+        /// <summary>For the self-test's reports: the rows shown in each list, and the prompts.</summary>
         internal static string Describe()
         {
             if (_list == null) return "not set up";
+            return _mode + ": " + Count(_list) + " rows on the left" + (PromptShown(_leftPrompt) ? " + prompt \"" + PromptText(_leftPrompt) + "\"" : "") + ", " +
+                   (_right != null && _right.resolvedStyle.display != DisplayStyle.None ? Count(_right) + " on the right" + (PromptShown(_rightPrompt) ? " + prompt \"" + PromptText(_rightPrompt) + "\"" : "") : "none on the right") +
+                   "; cards: " + ShipCards.Describe();
+        }
+
+        private static int Count(VisualElement list)
+        {
             int shown = 0;
-            foreach (VisualElement row in Rows)
+            for (int i = 0; i < list.childCount; i++)
             {
-                if (row.resolvedStyle.display != DisplayStyle.None) shown++;
+                VisualElement child = list[i];
+                if ((ActorOfRow.ContainsKey(child) || StandIns.Contains(child)) && child.resolvedStyle.display != DisplayStyle.None) shown++;
             }
-            var ships = new List<string>();
-            foreach (HudShipRow row in ShipRows)
-            {
-                if (row.Row.resolvedStyle.display == DisplayStyle.Flex)
-                    ships.Add(row.Bold.text + " " + row.Regular.text + " / " + row.Value.text + " at " + row.Row.worldBound + ", icon " +
-                              (row.Icon.resolvedStyle.backgroundImage.sprite != null));
-            }
-            return shown + " of " + Rows.Count + " player rows shown; ship rows: " + (ships.Count > 0 ? string.Join("; ", ships.ToArray()) : "none");
+            return shown;
+        }
+
+        private static bool PromptShown(KeyBindVE prompt)
+        {
+            return prompt != null && prompt.resolvedStyle.display != DisplayStyle.None;
+        }
+
+        private static string PromptText(KeyBindVE prompt)
+        {
+            Label key = prompt.Q<Label>("Key");
+            Label action = prompt.Q<Label>("Action");
+            return (key != null ? key.text : "") + "  " + (action != null ? action.text : "");
         }
 
         private static void Refresh(bool force)
         {
+            if (_preview) return;
             try
             {
                 MainHUDUI hudUi = MainHUDUI.Instance;
@@ -118,145 +174,339 @@ namespace VoidCrewFleet
                     force = true;
                 }
                 if (_list == null) return;
-                // The list's own indent (40 px in the game's style sheet): the ship rows stand out of it, under the ship
-                // panel's rows, with the player rows indented between them.
+                // The list's own indent (40 px in the game's style sheet): the cards stand out of it, under the ship panel's rows.
                 float indent = _list.resolvedStyle.paddingLeft;
                 if (!float.IsNaN(indent) && indent != _indent)
                 {
                     _indent = indent;
-                    _ships.style.marginLeft = HudShipRow.Left - indent;
+                    ShipCards.SetIndent(indent);
                 }
 
                 bool inHub = GameSessionManager.InHub;
-                bool teams = FleetApi.IsTeamMatch;
-                int shipCount = (inHub ? PvpTeams.HubFleetPlanned : FleetSession.ShipCount >= 2) ? PvpTeams.ShipCount : 1;
+                Mode mode = inHub
+                    ? (FleetApi.IsTeamMatch && PvpTeams.HubFleetPlanned && PvpTeams.Locked ? Mode.Teams : Mode.Everyone)
+                    : (FleetSession.ShipCount >= 2 ? Mode.OwnShip : Mode.Everyone);
                 object crewStamp = FleetShips.CrewStamp;
                 int players = PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.PlayerCount : 0;
-                int revision = inHub ? HubFleet.Revision : 0;
-                FleetPlan plan = inHub ? null : FleetSession.Current;
-                int lost = inHub ? 0 : LostShips(shipCount);
-                if (!force && ReferenceEquals(crewStamp, _crewStamp) && views.Count == _rowCount && players == _players && inHub == _inHub &&
-                    shipCount == _shipCount && teams == _teams && revision == _revision && ReferenceEquals(plan, _plan) && lost == _lost)
-                    return;
+                if (!force && _shownOnce && mode == _mode && ReferenceEquals(crewStamp, _crewStamp) && views.Count == _rowCount && players == _players) return;
+                _shownOnce = true;
+                _mode = mode;
                 _crewStamp = crewStamp;
                 _rowCount = views.Count;
                 _players = players;
-                _inHub = inHub;
-                _shipCount = shipCount;
-                _teams = teams;
-                _revision = revision;
-                _plan = plan;
-                _lost = lost;
-
-                // Ships count only for a fleet (as for CrewBadge): picks left from a fleet the host has since turned off don't.
-                Dictionary<int, CrewEntry> crews = shipCount >= 2 ? FleetShips.Crews() : new Dictionary<int, CrewEntry>();
-                ShowPlayers(views, crews);
-                ShowShips(crews, inHub, shipCount, teams);
+                ShowPlayers(views, mode == Mode.Everyone ? new Dictionary<int, CrewEntry>() : FleetShips.Crews(), mode);
             }
             catch (Exception e)
             {
-                Log.Failure("Keeping the crew list to the local player's ship", e);
+                Log.Failure("Keeping the crew list to what fits", e);
             }
         }
 
-        /// <summary>The ship rows' place at the end of the game's list, in a HUD document or tree that is new.</summary>
+        /// <summary>The right list, the key prompts and the ship cards' places, in a HUD document or tree that is new.</summary>
         private static void Build(UIDocument hud, VisualElement root)
         {
-            if (_ships != null) _ships.RemoveFromHierarchy();
-            ShipRows.Clear();
-            Rows.Clear();
+            if (_right != null)
+            {
+                // The game's rows in it go back to the game's list (the old one goes with its document).
+                if (_list != null && _list.panel != null)
+                {
+                    while (_right.childCount > 0)
+                    {
+                        VisualElement row = _right[0];
+                        if (ActorOfRow.ContainsKey(row)) _list.Add(row);
+                        else row.RemoveFromHierarchy();
+                    }
+                }
+                _right.RemoveFromHierarchy();
+            }
+            if (_leftPrompt != null) _leftPrompt.RemoveFromHierarchy();
+            ActorOfRow.Clear();
+            RowOfActor.Clear();
+            Order.Clear();
             _hud = hud;
             _hudRoot = root;
-            _list = root.Q("CoopBuddiesContainer");
-            _ships = null;
             _indent = float.NaN;
+            _rightTop = float.NaN;
+            _shownOnce = false;
+            _list = root.Q("CoopBuddiesContainer");
+            _right = null;
+            _leftPrompt = null;
+            _rightPrompt = null;
             if (_list == null)
             {
-                Log.WarnOnce("crew list", "The game's HUD has no crew list (CoopBuddiesContainer), so it isn't kept to the local player's ship.");
+                Log.WarnOnce("crew list", "The game's HUD has no crew list (CoopBuddiesContainer), so it isn't kept to what fits.");
                 return;
             }
-            _ships = new VisualElement { name = "FleetShipRows", pickingMode = PickingMode.Ignore };
-            _ships.style.flexDirection = FlexDirection.Column;
-            _ships.style.marginTop = ShipsGap;
-            _ships.style.display = DisplayStyle.None;
-            _list.Add(_ships);
+            // The right list stands in the HUD's right column (with the objectives), mirroring the game's list on the left.
+            VisualElement rightSide = root.Q("RightSide") ?? root;
+            _right = new VisualElement { name = "FleetRedList", pickingMode = PickingMode.Ignore };
+            _right.style.position = Position.Absolute;
+            _right.style.right = 20;
+            _right.style.width = RowWidth;
+            _right.style.flexDirection = FlexDirection.Column;
+            _right.style.display = DisplayStyle.None;
+            rightSide.Add(_right);
+            ShipCards.Attach(root, _list);
+
+            SetKeys(true);
+            _leftPrompt = Prompt("FleetPlayersPrompt", _list, _leftKey);
+            _rightPrompt = Prompt("FleetRedPrompt", _right, _rightKey);
         }
 
-        /// <summary>Hides the rows of the players CrewRules.Listed leaves out, in the list's own order.</summary>
-        private static void ShowPlayers(Dictionary<Player, CoopBuddyView> views, Dictionary<int, CrewEntry> crews)
+        /// <summary>
+        /// The game's own key prompt (KeyBindVE: its key cap and action text) for one of the list keys, at the end of a list. Its
+        /// key is given once it is attached: attaching makes a prompt look its key up among the game's own actions, and warn when
+        /// it isn't one of them.
+        /// </summary>
+        private static KeyBindVE Prompt(string name, VisualElement list, InputAction key)
+        {
+            string label = "?";
+            try
+            {
+                string control;
+                string device;
+                InputControlPath.ToHumanReadableString(key.bindings[0].effectivePath, out device, out control, InputControlPath.HumanReadableStringOptions.OmitDevice);
+                if (device == "Keyboard" && Keyboard.current != null && Keyboard.current[control] != null) label = Keyboard.current[control].displayName;
+            }
+            catch
+            {
+                // the prompt makes its own key cap from the action
+            }
+            KeyBindVE prompt = null;
+            try
+            {
+                bool late = PromptKey != null;
+                prompt = new KeyBindVE(name, late ? "" : label, false);
+                prompt.pickingMode = PickingMode.Ignore;
+                prompt.style.marginLeft = 20;
+                prompt.style.marginTop = 4;
+                prompt.style.display = DisplayStyle.None;
+                list.Add(prompt);
+                if (late) PromptKey.SetValue(prompt, label, null);
+                prompt.Init(null, key);
+                return prompt;
+            }
+            catch (Exception e)
+            {
+                // The lists still keep to what fits; the whole list is opened with the key all the same.
+                if (prompt != null) prompt.RemoveFromHierarchy();
+                Log.WarnOnce("crew list prompt", "The game's key prompt couldn't be made for the player lists (" + e.Message + "); they show without it.");
+                Log.Verbose("The key prompt's failure: " + e);
+                return null;
+            }
+        }
+
+        /// <summary>Which rows show where, for the mode, and the prompts of lists that don't all fit.</summary>
+        private static void ShowPlayers(Dictionary<Player, CoopBuddyView> views, Dictionary<int, CrewEntry> crews, Mode mode)
         {
             ActorOfRow.Clear();
+            RowOfActor.Clear();
             foreach (KeyValuePair<Player, CoopBuddyView> view in views)
             {
                 VisualElement row = GameMember.Read<VisualElement>(RowField, view.Value, null);
                 Photon.Realtime.Player owner = view.Key != null ? view.Key.PhotonPlayer : null;
-                if (row != null && owner != null) ActorOfRow[row] = owner.ActorNumber;
+                if (row == null || owner == null) continue;
+                ActorOfRow[row] = owner.ActorNumber;
+                RowOfActor[owner.ActorNumber] = row;
             }
-            Rows.Clear();
-            RowActors.Clear();
+            Order.RemoveAll(actor => !RowOfActor.ContainsKey(actor));
             for (int i = 0; i < _list.childCount; i++)
             {
-                VisualElement row = _list[i];
                 int actor;
-                if (!ActorOfRow.TryGetValue(row, out actor)) continue;
-                Rows.Add(row);
-                RowActors.Add(actor);
+                if (ActorOfRow.TryGetValue(_list[i], out actor) && !Order.Contains(actor)) Order.Add(actor);
             }
-            List<int> listed = CrewRules.Listed(RowActors, crews, FleetShips.LocalActor, MaxRows);
-            for (int i = 0; i < Rows.Count; i++) Rows[i].style.display = listed.Contains(RowActors[i]) ? Shown : Hidden;
-        }
+            foreach (int actor in RowOfActor.Keys)
+            {
+                if (!Order.Contains(actor)) Order.Add(actor);
+            }
 
-        /// <summary>A row for each other ship on the local player's side, under the players; none without a ship of their own.</summary>
-        private static void ShowShips(Dictionary<int, CrewEntry> crews, bool inHub, int shipCount, bool teams)
-        {
-            if (_ships == null) return;
-            CrewEntry me;
-            List<int> others = crews.TryGetValue(FleetShips.LocalActor, out me) && me.Slot >= 0
-                ? CrewRules.OtherShipsOfSide(me.Slot, shipCount, teams)
-                : new List<int>();
-            while (ShipRows.Count < others.Count)
+            List<int> left;
+            List<int> red = null;
+            List<int> right = null;
+            int leftPlayers = 0;
+            int rightPlayers = 0;
+            if (mode == Mode.OwnShip)
             {
-                var row = new HudShipRow(_hudRoot, "FleetShip" + (ShipRows.Count + 1));
-                // The diamonds reach out of their rows: the rows keep that far apart.
-                row.Row.style.marginTop = HudShipRow.DiamondOverhang + 2;
-                row.Row.style.marginBottom = HudShipRow.DiamondOverhang;
-                ShipRows.Add(row);
-                _ships.Add(row.Row);
+                left = CrewRules.Listed(Order, crews, FleetShips.LocalActor, CrewRows);
             }
-            ICollection<int> players = PhotonNetwork.CurrentRoom != null ? (ICollection<int>)PhotonNetwork.CurrentRoom.Players.Keys : new int[0];
-            for (int i = 0; i < ShipRows.Count; i++)
+            else if (mode == Mode.Teams)
             {
-                HudShipRow row = ShipRows[i];
-                if (i >= others.Count)
+                List<int> blue = CrewRules.OfTeam(Order, crews, 0);
+                red = CrewRules.OfTeam(Order, crews, 1);
+                left = blue.GetRange(0, CrewRules.RowsShown(blue.Count, ListRows));
+                right = red.GetRange(0, CrewRules.RowsShown(red.Count, ListRows));
+                leftPlayers = blue.Count;
+                rightPlayers = red.Count;
+            }
+            else
+            {
+                left = Order.GetRange(0, CrewRules.RowsShown(Order.Count, ListRows));
+                leftPlayers = Order.Count;
+            }
+
+            bool moved = false;
+            foreach (int actor in Order)
+            {
+                VisualElement row = RowOfActor[actor];
+                VisualElement place = red != null && red.Contains(actor) ? _right : _list;
+                if (row.parent != place)
                 {
-                    row.Row.style.display = DisplayStyle.None;
-                    continue;
+                    place.Add(row);
+                    moved = true;
                 }
-                int slot = others[i];
-                bool lost = !inHub && FleetShips.IsLost(slot);
-                int crew = CrewRules.CrewOf(crews, players, slot);
-                Color colour = teams ? FleetApi.TeamColor(CrewRules.TeamOf(slot, true)) : Color.white;
-                row.Bold.text = FleetSlots.Name(slot, teams);
-                row.Regular.text = FleetSlots.TypeNameOf(slot, inHub) ?? "";
-                row.Value.text = lost ? "LOST" : (crew == 0 ? "NO CREW" : crew + " CREW");
-                row.Value.style.color = lost ? HudShipRow.LostRed : Color.white;
-                row.Icon.style.unityBackgroundImageTintColor = lost ? HudShipRow.LostRed : colour;
-                row.Row.style.display = DisplayStyle.Flex;
+                row.style.display = left.Contains(actor) || (right != null && right.Contains(actor)) ? Shown : Hidden;
             }
-            _ships.style.display = others.Count > 0 ? DisplayStyle.Flex : DisplayStyle.None;
-            // The game adds a joining player's row at the end of the list: the ship rows go back under it.
-            if (_ships.parent == _list && _list.IndexOf(_ships) != _list.childCount - 1) _ships.BringToFront();
+            // Each list in the players' own order, its prompt under its rows.
+            if (moved)
+            {
+                foreach (int actor in Order) RowOfActor[actor].BringToFront();
+            }
+
+            Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+            ICollection<int> inRoom = room != null ? (ICollection<int>)room.Players.Keys : new int[0];
+            if (mode == Mode.Teams)
+            {
+                SetPrompt(_leftPrompt, leftPlayers > ListRows, "BLUE TEAM  ·  " + Players(CrewRules.TeamSize(crews, inRoom, 0, true)));
+                SetPrompt(_rightPrompt, rightPlayers > ListRows, "RED TEAM  ·  " + Players(CrewRules.TeamSize(crews, inRoom, 1, true)));
+            }
+            else
+            {
+                SetPrompt(_leftPrompt, leftPlayers > ListRows, "ALL " + Players(room != null ? room.PlayerCount : leftPlayers + 1));
+                SetPrompt(_rightPrompt, false, null);
+            }
+            if (_leftPrompt != null) _leftPrompt.BringToFront();
+            if (_rightPrompt != null) _rightPrompt.BringToFront();
         }
 
-        /// <summary>The lost ships of this mission, one bit per slot.</summary>
-        private static int LostShips(int shipCount)
+        private static string Players(int count)
         {
-            int lost = 0;
-            for (int slot = 0; slot < shipCount && slot < 31; slot++)
+            return count + (count == 1 ? " PLAYER" : " PLAYERS");
+        }
+
+        private static void SetPrompt(KeyBindVE prompt, bool show, string text)
+        {
+            if (prompt == null) return;
+            prompt.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
+            if (!show) return;
+            Label action = prompt.Q<Label>("Action");
+            if (action != null && action.text != text) action.text = text;
+        }
+
+        /// <summary>
+        /// A few times a second: the right list shows only for teams, hides with the game's list (on a terminal's screen, say),
+        /// and starts level with it.
+        /// </summary>
+        private static void FollowList()
+        {
+            if (_right == null || _list == null) return;
+            bool show = _mode == Mode.Teams && _list.resolvedStyle.display != DisplayStyle.None && _list.panel != null;
+            _right.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
+            if (!show || _right.parent == null) return;
+            float top = _right.parent.WorldToLocal(_list.worldBound.position).y;
+            if (float.IsNaN(top) || Mathf.Abs(top - _rightTop) < 0.5f) return;
+            _rightTop = top;
+            _right.style.top = top;
+        }
+
+        private static void SetKeys(bool on)
+        {
+            if (_leftKey == null)
             {
-                if (FleetShips.IsLost(slot)) lost |= 1 << slot;
+                if (!on) return;
+                // The game's key prompts read an action's own interactions, which an action made with its binding leaves null:
+                // made with none (an empty list, as the game's own actions have), then given the binding.
+                _leftKey = new InputAction("Fleet player list", InputActionType.Button, null, "");
+                _leftKey.AddBinding(Settings.PlayerListKey.Value);
+                _rightKey = new InputAction("Fleet RED team list", InputActionType.Button, null, "");
+                _rightKey.AddBinding(Settings.RedListKey.Value);
             }
-            return lost;
+            if (on == _leftKey.enabled) return;
+            if (on)
+            {
+                _leftKey.Enable();
+                _rightKey.Enable();
+            }
+            else
+            {
+                _leftKey.Disable();
+                _rightKey.Disable();
+            }
+        }
+
+        /// <summary>The keys are free: no text being typed, and no game menu up (the list itself aside).</summary>
+        private static bool KeysFree()
+        {
+            TextChat chat = TextChat.Instance;
+            if (chat != null && chat.TextingEnabled) return false;
+            return PlayerListPanel.IsOpen || !MenuScreenController.IsOpen();
+        }
+
+        /// <summary>
+        /// Self-test, alone in the room: how a big room's lists look, from stand-in rows made from the game's own row template
+        /// ("everyone": 7 and the prompt; "teams": 7 and a prompt each side; "own": a full crew over the ship cards); null puts
+        /// the real lists back.
+        /// </summary>
+        internal static void PreviewForTest(string kind)
+        {
+            try
+            {
+                foreach (VisualElement row in StandIns) row.RemoveFromHierarchy();
+                StandIns.Clear();
+                _preview = kind != null;
+                if (_list == null) return;
+                if (kind == null)
+                {
+                    Refresh(true);
+                    FollowList();
+                    return;
+                }
+                VisualTreeAsset template = _panel != null ? _panel.CoopBuddyPrefab : null;
+                if (template == null) return;
+                bool teams = kind == "teams";
+                AddStandIns(template, _list, kind == "own" ? CrewRows : ListRows - 1, 2);
+                if (teams) AddStandIns(template, _right, ListRows - 1, 9);
+                SetPrompt(_leftPrompt, kind != "own", teams ? "BLUE TEAM  ·  12 PLAYERS" : "ALL 24 PLAYERS");
+                SetPrompt(_rightPrompt, teams, "RED TEAM  ·  12 PLAYERS");
+                if (_leftPrompt != null) _leftPrompt.BringToFront();
+                if (_rightPrompt != null) _rightPrompt.BringToFront();
+                _right.style.display = teams ? DisplayStyle.Flex : DisplayStyle.None;
+                if (teams)
+                {
+                    _rightTop = float.NaN;
+                    float top = _right.parent.WorldToLocal(_list.worldBound.position).y;
+                    if (!float.IsNaN(top)) _right.style.top = top;
+                }
+                Log.Info("[autotest] Crew list preview (" + kind + "): " + StandIns.Count + " stand-in rows.");
+            }
+            catch (Exception e)
+            {
+                Log.Failure("[autotest] crew list preview", e);
+            }
+        }
+
+        private static void AddStandIns(VisualTreeAsset template, VisualElement list, int count, int firstNumber)
+        {
+            // Over the ship cards, as the game's rows are.
+            VisualElement cards = list.Q("FleetShipCards");
+            int at = cards != null && cards.parent == list ? list.IndexOf(cards) : list.childCount;
+            for (int i = 0; i < count; i++)
+            {
+                TemplateContainer row = template.Instantiate();
+                Label name = row.Q<Label>("PlayerName");
+                if (name != null) name.text = "Crewmate " + (firstNumber + i);
+                Label rank = row.Q<Label>("RankLabel");
+                if (rank != null) rank.text = (10 + (firstNumber + i) * 7).ToString();
+                // As the game sets a row up (CoopBuddyView): its menu and mute marks hidden, a healthy player.
+                foreach (string part in new[] { "ActionPanel", "ChatMuteState", "VoiceMuteState", "MicrophoneMutedState" })
+                {
+                    VisualElement hidden = row.Q(part);
+                    if (hidden != null) hidden.style.display = DisplayStyle.None;
+                }
+                StateVE state = row.Q<StateVE>();
+                if (state != null) state.SetClassState("player-hud-health", "high");
+                list.Insert(at + i, row);
+                StandIns.Add(row);
+            }
         }
     }
 }

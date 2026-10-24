@@ -115,23 +115,35 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>A ship's type name (TypeNameOf), and what it was worked out from.</summary>
+        /// <summary>A ship's type and its name (TypeOf, TypeNameOf), and what they were worked out from.</summary>
         private sealed class KnownType
         {
             public bool InHub;
             public int Revision;
             public FleetPlan Plan;
             public int Ship;
+            public GUIDUnion Type;
             public string Name;
         }
 
         private static readonly Dictionary<int, KnownType> KnownTypes = new Dictionary<int, KnownType>();
 
         /// <summary>
-        /// A ship's type name ("DESTROYER"), or null: in the hub as chosen now, in a mission the type the host forced, else the
-        /// type of the ship as it spawned, else of its planned loadout. Worked out again only when one of those changes.
+        /// A ship's type (empty when unknown): in the hub as chosen now, in a mission the type the host forced, else the type of
+        /// the ship as it spawned, else of its planned loadout. Worked out again only when one of those changes.
         /// </summary>
+        public static GUIDUnion TypeOf(int slot, bool inHub)
+        {
+            return Known(slot, inHub).Type;
+        }
+
+        /// <summary>A ship's type name ("DESTROYER"), or null (TypeOf).</summary>
         public static string TypeNameOf(int slot, bool inHub)
+        {
+            return Known(slot, inHub).Name;
+        }
+
+        private static KnownType Known(int slot, bool inHub)
         {
             CG.Space.PlayerControlledShip spawned = inHub ? null : FleetShips.BySlot(slot);
             int revision = inHub ? HubFleet.Revision : 0;
@@ -140,12 +152,13 @@ namespace VoidCrewFleet
             KnownType known;
             if (KnownTypes.TryGetValue(slot, out known) && known.InHub == inHub && known.Revision == revision && ReferenceEquals(known.Plan, plan) &&
                 known.Ship == ship)
-                return known.Name;
+                return known;
             if (known == null) KnownTypes[slot] = known = new KnownType();
             known.InHub = inHub;
             known.Revision = revision;
             known.Plan = plan;
             known.Ship = ship;
+            known.Type = GUIDUnion.Empty();
             known.Name = null;
             try
             {
@@ -161,13 +174,39 @@ namespace VoidCrewFleet
                     if (type.IsNull && spawned != null) type = spawned.assetGuid;
                     if (type.IsNull && planned != null && !planned.Loadout.IsNull) type = HubFleet.TypeOf(HubFleet.LoadoutDef(planned.Loadout));
                 }
+                known.Type = type;
                 if (!type.IsNull) known.Name = TypeName(type, null);
             }
             catch
             {
                 // just the ship's name then
             }
-            return known.Name;
+            return known;
+        }
+
+        private static readonly List<KeyValuePair<GUIDUnion, Sprite>> TypeIcons = new List<KeyValuePair<GUIDUnion, Sprite>>();
+
+        /// <summary>A ship type's silhouette as the loadout terminal's SHIP tiles show it (its context icon), or null.</summary>
+        public static Sprite TypeIcon(GUIDUnion type)
+        {
+            if (type.IsNull) return null;
+            foreach (KeyValuePair<GUIDUnion, Sprite> known in TypeIcons)
+            {
+                if (known.Key == type) return known.Value;
+            }
+            Sprite icon = null;
+            try
+            {
+                var context = ResourceAssetContainer<CloneStarObjectContainer, CG.AbstractCloneStarObject, CloneStarObjectDef>.Instance.GetContext(type) as
+                    Client.Player.Interactions.ContextInfo;
+                icon = context != null ? context.Icon : null;
+            }
+            catch
+            {
+                // no icon: the caller keeps its own
+            }
+            if (icon != null) TypeIcons.Add(new KeyValuePair<GUIDUnion, Sprite>(type, icon));
+            return icon;
         }
 
         /// <summary>A ship type's name as the terminal shows it, without "METEM": "DESTROYER"; unknown when no loadout names it.</summary>
