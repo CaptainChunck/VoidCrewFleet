@@ -1,8 +1,8 @@
 {
   "name": "Void_Crew_Fleet",
-  "version_number": "0.4.3",
+  "version_number": "0.4.4",
   "website_url": "https://github.com/CaptainChunck/VoidCrewFleet",
-  "description": "Up to three player ships per lobby, or two teams of up to three in PvP, and up to 24 players. Missions with a fleet, the Fleet Pilgrimage, or Fleet Battle: teams, boarding, sabotage, punching, airlock hacking and spectators.",
+  "description": "Up to three player ships per lobby, or two teams of up to three in PvP, and up to 48 players. Missions with a fleet, the Fleet Pilgrimage, or Fleet Battle: teams, boarding, sabotage, punching, airlock hacking and spectators.",
   "dependencies": [
     "BepInEx-BepInExPack-5.4.2305"
   ]

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.4
+**For big playtests.**
+- **Rooms of up to 48 players** (MaxPlayers, 4-48), still 8 per ship: a 3v3 Fleet Battle takes 48, co-op's three ships
+  24. With 36 players in a 3v3 the crews even out at 6 a ship. A room size saved by an older version stays as it was:
+  raise MaxPlayers in the config.
+- **Only the host chooses the mission and starts it:**
+  - Other players' picks on the galaxy map (the game's missions, FLEET PILGRIMAGE and FLEET BATTLE) are refused with
+    a message. Before, one player's pick could turn FLEET BATTLE off and clear every ship pick and the confirmed teams.
+  - In every mission only the host sitting in a ready-room seat starts the countdown. Before, any two seated players
+    started the game's 30-second countdown in co-op and the game's own missions.
+- **Player list window:** Escape closes it without also opening the escape menu.
+
+Players on 0.4.2 and 0.4.3 can still join a 0.4.4 host.
+
 ## 0.4.3
 **The crew list in big rooms.** The game's list of players under the ship panel has a row for every other player, so
 with more than about 10 players it ran off the screen.

@@ -1,7 +1,7 @@
 # Void Crew Fleet
 
 A BepInEx mod for **Void Crew** that puts **up to three player ships** in one lobby, or **two teams of up to three
-ships** in PvP, for up to **24 players** (8 per ship). Fly the game's own missions as a fleet, take on the **Fleet
+ships** in PvP, with up to **8 players per ship** (rooms of up to 48). Fly the game's own missions as a fleet, take on the **Fleet
 Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Battle**, a team-versus-team PvP mode.
 
 > Everyone in a Fleet room needs the mod. Rooms you host with it are marked as modded `[mod_session]`, as Void Crew's
@@ -9,8 +9,9 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
 
 ## Features
 
-### Up to three ships, 24 players
-- Rooms hold up to 24 players (the game's own limit is 6), 8 per ship, each ship with its own clone tubes.
+### Up to three ships, up to 48 players
+- Rooms hold up to 48 players (the game's own limit is 6), 8 per ship, each ship with its own clone tubes: three
+  co-op ships take 24, a 3v3 Fleet Battle 48.
 - The hub's **ship loadout terminal** gets a **FLEET** panel:
   - **SHIPS: 1 / 2 / 3** (the host's) sets how many ships the game's own missions use (one in a new room; your last
     choice is remembered). With more than 8 players a mission adds ships by itself and evens out the crews. A saved run
@@ -64,6 +65,8 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
   every ship is lost; Fleet Battle ends when a team has none left.
 
 ### Missions (galaxy map)
+- **Only the host chooses the mission and starts it.** Other players' picks on the galaxy map are refused with a
+  message, and only the host sitting in a ready-room seat starts the countdown, in every mission.
 - **The game's own missions** can be flown with up to three ships.
 - **FLEET PILGRIMAGE**: the Pilgrimage for two or three ships. Enemies come in greater numbers (more with a third ship)
   and every sector holds more objectives, so the crews can split up and work on different objectives at the same time.
@@ -161,7 +164,7 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
 | Section | Setting | Default | What it does |
 |---|---|---|---|
 | General | Enabled | true | Turn the mod off without removing it. |
-| Lobby | MaxPlayers | 24 | Room size for rooms you host (4–24). |
+| Lobby | MaxPlayers | 24 | Room size for rooms you host (4–48). |
 | Lobby | Ships | 1 | How many ships rooms you host start with (1–3; follows the FLEET panel's SHIPS). |
 | Two ships | ShipSpacing | 160 | Distance between ships side by side at the start and after a jump (m). |
 | Fleet Pilgrimage | EnemyMultiplier | 1.6 | How many more enemies the Fleet Pilgrimage sends with two ships (host); a third ship adds as much again. A change applies from the next mission. |
