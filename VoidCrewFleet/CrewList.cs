@@ -91,6 +91,18 @@ namespace VoidCrewFleet
             if (!_preview) FollowList();
         }
 
+        /// <summary>
+        /// The game's menu key (Escape) with the whole-list window open closes the window only: the game's menu action stays
+        /// on while its controls are in menu mode, so it would also open the escape menu.
+        /// </summary>
+        [GamePatch(Feature, "ToggleInGameMenu", "TryToggleMenu", PatchKind.Prefix, Optional = true)]
+        private static bool MenuKeyPrefix()
+        {
+            if (!PlayerListPanel.IsOpen) return true;
+            PlayerListPanel.Close();
+            return false;
+        }
+
         /// <summary>A player's row is added: shown, hidden or moved at once, not a quarter of a second later.</summary>
         [GamePatch(Feature, "UI.MainHUD.CoopBuddiesPanel", "PlayerSpawned", PatchKind.Postfix, Optional = true)]
         private static void PlayerSpawnedPostfix()

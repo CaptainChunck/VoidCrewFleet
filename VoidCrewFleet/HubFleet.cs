@@ -464,6 +464,13 @@ namespace VoidCrewFleet
                 if (variant != HubVariant.None && variant != HubVariant.FleetPilgrimage && variant != HubVariant.FleetBattle) return;
                 // Activating the mission that is already chosen changes nothing (it used to reopen confirmed teams).
                 if (variant == Variant) return;
+                // Only the host chooses the mission: in a big room one player's pick would clear every ship pick and the
+                // confirmed teams.
+                if (!Net.FromHost(sender))
+                {
+                    Net.ToActor(sender, Msg.Notice, OnlyHostChangesMission);
+                    return;
+                }
                 SelectVariantAsHost(variant);
             });
         }
@@ -525,6 +532,33 @@ namespace VoidCrewFleet
             catch (Exception e)
             {
                 Log.Failure("Checking who changes ship 1's loadout", e);
+                return true;
+            }
+        }
+
+        private const string OnlyHostChangesMission = "Only the host can choose the mission.";
+
+        /// <summary>
+        /// Host: another player's mission pick on the galaxy map is refused; only the host chooses the mission. The game takes
+        /// anyone's pick, and a pick ends a fleet mission, clearing every ship pick and the confirmed teams. The host's own
+        /// picks aren't RPCs and go through.
+        /// </summary>
+        [GamePatch(Feature, "Gameplay.Hub.HubQuestManager", "SelectQuest", PatchKind.Prefix, Optional = true)]
+        private static bool SelectQuestPrefix(HubQuestManager __instance)
+        {
+            try
+            {
+                if (__instance == null || _applyingVariant || !HostInHub()) return true;
+                int actor;
+                if (!RpcSender.Of(__instance.photonView, out actor)) return true;
+                if (PhotonNetwork.LocalPlayer != null && actor == PhotonNetwork.LocalPlayer.ActorNumber) return true;
+                Log.WarnOnce("mission refused " + actor, "Refused a mission pick from player " + actor + ": only the host chooses the mission.");
+                Net.ToActor(actor, Msg.Notice, OnlyHostChangesMission);
+                return false;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking who changes the mission", e);
                 return true;
             }
         }
@@ -685,42 +719,34 @@ namespace VoidCrewFleet
         private static float _lastSeatNotice = -100f;
 
         /// <summary>
-        /// Co-op with several ships: nothing starts before the host has confirmed the crews; then the game's own countdown
-        /// once everyone is seated.
-        /// Host, FLEET BATTLE: the teams are already picked, so the host sitting in the ready room starts the match (the
-        /// game's short countdown for "everyone is seated"); nobody else's seat counts. Before the teams are confirmed, or
-        /// while BLUE 1 (the game's own ship selection) has no loadout, sitting down starts nothing: the game itself counts
-        /// seats only while a ship is selected, and starting without one fails half-way and leaves the hub unable to start
-        /// anything. Clients don't run their own countdown (it would count their own seat): they show the host's, which the
-        /// game sends them.
+        /// Only the host starts a match, in every mission: the host sitting in the ready room starts it (the game's short
+        /// countdown for "everyone is seated"); nobody else's seat counts. Co-op with several ships: nothing starts before
+        /// the host has confirmed the crews. FLEET BATTLE: nothing starts before the teams are confirmed. While no ship is
+        /// selected (BLUE 1 in FLEET BATTLE has no loadout), sitting down starts nothing: the game itself counts seats only
+        /// while a ship is selected, and starting without one fails half-way and leaves the hub unable to start anything.
+        /// Clients don't run their own countdown (it would count their own seat): they show the host's, which the game sends
+        /// them.
         /// </summary>
         [GamePatch(Feature, "Gameplay.Quests.QuestStartProcess", "UpdateQuestProcess", PatchKind.Prefix)]
         private static bool StartCountdownPrefix(ref int playersInZoneCount)
         {
             if (!HostHasFleet) return true;
-            if (Variant != HubVariant.FleetBattle)
+            // Only the host starts a match, in every mission: clients show the host's countdown, which the game sends them.
+            if (!PhotonNetwork.IsMasterClient) return false;
+            try
             {
-                // Co-op with several ships: the game's own countdown (everyone seated), once the host has confirmed the crews.
-                if (PlannedMode != FleetMode.Coop || PvpTeams.Locked) return true;
-                playersInZoneCount = 0;
-                try
+                if (Variant != HubVariant.FleetBattle && PlannedMode == FleetMode.Coop && !PvpTeams.Locked)
                 {
-                    if (PhotonNetwork.IsMasterClient && Time.unscaledTime - _lastSeatNotice > 10f && HostSeatedInReadyRoom())
+                    // Co-op with several ships: nothing starts before the host has confirmed the crews.
+                    playersInZoneCount = 0;
+                    if (Time.unscaledTime - _lastSeatNotice > 10f && HostSeatedInReadyRoom())
                     {
                         _lastSeatNotice = Time.unscaledTime;
                         Notice.Show("Confirm the crews first (CONFIRM CREWS on the crew screen; CREWS on the FLEET panel brings it back); then sit down here to start.");
                     }
+                    return true;
                 }
-                catch (Exception e)
-                {
-                    Log.Failure("Holding the co-op start for the crews", e);
-                }
-                return true;
-            }
-            if (!PhotonNetwork.IsMasterClient) return false;
-            try
-            {
-                if (!PvpTeams.Locked)
+                if (Variant == HubVariant.FleetBattle && !PvpTeams.Locked)
                 {
                     playersInZoneCount = 0;
                     if (Time.unscaledTime - _lastSeatNotice > 10f && HostSeatedInReadyRoom())
@@ -731,10 +757,12 @@ namespace VoidCrewFleet
                     return true;
                 }
                 HubShipManager manager = HubShipManager.Instance;
-                if (manager == null || manager.CurrentShipSelected == null)
+                HubQuestManager quests = HubQuestManager.Instance;
+                bool preserved = quests != null && quests.QuestStartType == HubQuestManager.SessionStartType.Preserved;
+                if (!preserved && (manager == null || manager.CurrentShipSelected == null))
                 {
                     playersInZoneCount = 0;
-                    if (Time.unscaledTime - _lastSeatNotice > 10f && HostSeatedInReadyRoom())
+                    if (Variant == HubVariant.FleetBattle && Time.unscaledTime - _lastSeatNotice > 10f && HostSeatedInReadyRoom())
                     {
                         _lastSeatNotice = Time.unscaledTime;
                         Notice.Show(ShipLabel(0) + " has no loadout, so the match can't start: a " + PvpTeams.TeamName(0) + " player picks one at the loadout " +
@@ -742,11 +770,12 @@ namespace VoidCrewFleet
                     }
                     return true;
                 }
+                // The host's seat starts the game's short countdown for "everyone is seated"; nobody else's seat counts.
                 playersInZoneCount = HostSeatedInReadyRoom() && PhotonNetwork.CurrentRoom != null ? Mathf.Max(1, (int)PhotonNetwork.CurrentRoom.PlayerCount) : 0;
             }
             catch (Exception e)
             {
-                Log.Failure("Starting Fleet Battle from the ready room", e);
+                Log.Failure("Starting from the ready room", e);
             }
             return true;
         }

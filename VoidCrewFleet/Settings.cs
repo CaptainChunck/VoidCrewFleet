@@ -39,8 +39,8 @@ namespace VoidCrewFleet
                 "Turn Void Crew Fleet on or off. When off, rooms you host are the game's own one-ship rooms and the game is untouched.");
 
             MaxPlayers = config.Bind("Lobby", "MaxPlayers", 24,
-                new ConfigDescription("How many players a room you host can hold (8 per ship). The game's own limit is 6.",
-                    new AcceptableValueRange<int>(4, 24)));
+                new ConfigDescription("How many players a room you host can hold: up to 48 (8 per ship in a 3v3 Fleet Battle; co-op's three ships take 24). The game's own limit is 6.",
+                    new AcceptableValueRange<int>(4, 48)));
             PlayerId = config.Bind("Lobby", "PlayerId", "",
                 "When Steam isn't running: the ID that fleet rooms know you by, to give you your place back after a lost connection. Made by itself; leave it as it is.");
             Ships = config.Bind("Lobby", "Ships", 1,

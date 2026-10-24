@@ -17,7 +17,8 @@ using UnityEngine.UIElements;
 namespace VoidCrewFleet
 {
     /// <summary>
-    /// Rooms of up to 24 players (8 per ship). The game caps rooms at 6 in four places and breaks above that in two:
+    /// Rooms of up to 48 players (8 per ship, six ships in a Fleet Battle). The game caps rooms at 6 in four places and
+    /// breaks above that in two:
     /// - the Photon room (6 at creation) and the three player-limit sliders (main menu host panel, ESC-menu lobby
     ///   panel, hub matchmaking terminal), one of which writes its clamped value back to the room whenever it opens;
     /// - the Steam lobby used for invites and join-by-friend (6 members);
@@ -26,10 +27,10 @@ namespace VoidCrewFleet
     /// </summary>
     internal static class PlayerCap
     {
-        public const string Feature = "24-player rooms";
+        public const string Feature = "48-player rooms";
 
-        /// <summary>The largest room the plugin allows (three ships of eight).</summary>
-        public const int MaxRoom = 24;
+        /// <summary>The largest room the plugin allows (six ships of eight).</summary>
+        public const int MaxRoom = 48;
 
         private static readonly FieldInfo ClampedMax = GameMember.Field(typeof(ClampedSetting<int>), "max");
         private static readonly PropertyInfo SliderHighValue = GameMember.Property(typeof(SliderIntSettingEntryVE), "HighValue");
@@ -65,7 +66,7 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- the room
 
-        /// <summary>A new room starts at the full size; the host can lower it with the sliders, which now go to 24.</summary>
+        /// <summary>A new room starts at the full size; the host can lower it with the sliders, which now go to 48.</summary>
         [GamePatch(Feature, "PhotonService", "OnCreatedRoom", PatchKind.Postfix)]
         private static void OnCreatedRoomPostfix()
         {
