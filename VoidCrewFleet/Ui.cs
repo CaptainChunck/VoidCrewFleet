@@ -336,16 +336,28 @@ namespace VoidCrewFleet
             return bar;
         }
 
+        /// <summary>A GameSection width: the sections of a row share its width equally.</summary>
+        public const float SharedWidth = 0f;
+
         /// <summary>
         /// A section in the style of the loadout terminal's (SHIP SYSTEMS, RESOURCES): a big white header over the game's
         /// decorative line, then the content, and the line again below. With the terminal's style sheet loaded the lines
-        /// turn white under the pointer, as its own do.
+        /// turn white under the pointer, as its own do. Its width in reference pixels, or SharedWidth.
         /// </summary>
         public static VisualElement GameSection(string title, float width, out Label header, out VisualElement content)
         {
             var section = new VisualElement();
             section.AddToClassList("ship-loadout-subpanel");
-            section.style.width = width;
+            if (width > 0f)
+            {
+                section.style.width = width;
+            }
+            else
+            {
+                // SharedWidth: an equal share of its row, whatever the screen's width.
+                section.style.flexGrow = 1;
+                section.style.flexBasis = 0;
+            }
             section.style.minWidth = 0;
             section.style.paddingLeft = 10;
             section.style.paddingRight = 10;

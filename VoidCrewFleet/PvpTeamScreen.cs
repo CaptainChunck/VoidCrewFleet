@@ -270,9 +270,18 @@ namespace VoidCrewFleet
             return true;
         }
 
-        /// <summary>The lobby screen's width (in the game's 1920 x 1080 reference pixels) and its three sections'.</summary>
-        private const float ScreenWidth = 1640f;
-        public const float SectionWidth = 500f;
+        /// <summary>
+        /// The lobby screen fills the screen but for this margin (in the game's 1920 x 1080 reference pixels), its sections sharing
+        /// its width with SectionGap between them, so it grows with wide screens and gives long names room.
+        /// </summary>
+        private const float ScreenMargin = 24f;
+        public const float SectionGap = 24f;
+
+        /// <summary>The sections of a row of them, SectionGap apart.</summary>
+        internal static void SpaceSections(VisualElement row)
+        {
+            for (int i = 0; i < row.childCount; i++) row[i].style.marginLeft = i > 0 ? SectionGap : 0f;
+        }
 
         private static void Build(VisualElement root)
         {
@@ -280,15 +289,19 @@ namespace VoidCrewFleet
             _screen = new VisualElement { name = "FleetTeamScreen" };
             Ui.Fill(_screen);
             _screen.style.backgroundColor = Ui.GameBackdrop;
-            _screen.style.alignItems = Align.Center;
+            _screen.style.alignItems = Align.Stretch;
             _screen.style.justifyContent = Justify.Center;
+            _screen.style.paddingTop = ScreenMargin;
+            _screen.style.paddingBottom = ScreenMargin;
+            _screen.style.paddingLeft = ScreenMargin;
+            _screen.style.paddingRight = ScreenMargin;
             _screen.pickingMode = PickingMode.Position;
 
             // A screen in the style of the game's hub terminals (the loadout terminal's): its background picture, the
             // meander bars along the top and bottom, sections with big white headers over its decorative lines, rows like
             // its RESOURCES list, and its big hex button for the one thing to do at the end.
             var panel = new VisualElement { name = "Terminal" };
-            panel.style.width = ScreenWidth;
+            panel.style.flexGrow = 1;
             panel.style.backgroundColor = Ui.GameItemBackground;
             Sprite background = Ui.GameSprite("UIBackground01IL");
             if (background != null) panel.style.backgroundImage = new StyleBackground(background);
@@ -300,6 +313,7 @@ namespace VoidCrewFleet
 
             var body = new VisualElement();
             Ui.Padding(body, 0, 30);
+            body.style.flexGrow = 1;
 
             VisualElement headerRow = Ui.HorizontalRow();
             headerRow.style.justifyContent = Justify.SpaceBetween;
@@ -356,7 +370,8 @@ namespace VoidCrewFleet
             _teamsView = Ui.HorizontalRow();
             _teamsView.style.alignItems = Align.Stretch;
             _teamsView.style.justifyContent = Justify.SpaceBetween;
-            _teamsView.style.height = ShipRulesView.Height;
+            _teamsView.style.flexGrow = 1;
+            _teamsView.style.minHeight = 0;
             _teamsView.style.marginTop = 10;
             body.Add(_teamsView);
             _rulesView = ShipRulesView.Build();
@@ -432,13 +447,14 @@ namespace VoidCrewFleet
                 _teamsView.Add(TeamColumn(0, ships));
                 _teamsView.Add(WaitingColumn("NO TEAM YET", "Players here haven't picked a ship."));
                 _teamsView.Add(TeamColumn(1, ships));
+                SpaceSections(_teamsView);
                 return;
             }
             for (int slot = 0; slot < ships; slot++)
             {
                 Label header;
                 VisualElement content;
-                VisualElement section = Ui.GameSection("SHIP " + (slot + 1), SectionWidth, out header, out content);
+                VisualElement section = Ui.GameSection("SHIP " + (slot + 1), Ui.SharedWidth, out header, out content);
                 ShipBlock block = MakeBlock(slot, content, false);
                 block.Header = header;
                 _teamsView.Add(section);
@@ -453,13 +469,14 @@ namespace VoidCrewFleet
                 _unpicked = Ui.GameLabel("", "ui-text-size__medium", "ui-text-dropshadow");
                 _unpicked.style.color = Ui.GameBrightGrey;
             }
+            SpaceSections(_teamsView);
         }
 
         private static VisualElement TeamColumn(int team, int ships)
         {
             Label header;
             VisualElement content;
-            VisualElement section = Ui.GameSection(PvpTeams.TeamName(team) + " TEAM", SectionWidth, out header, out content);
+            VisualElement section = Ui.GameSection(PvpTeams.TeamName(team) + " TEAM", Ui.SharedWidth, out header, out content);
             header.style.color = FleetApi.TeamColor(team);
             TeamCounts[team] = Ui.GameLabel("", "ui-text-size__medium", "ui-text-dropshadow");
             TeamCounts[team].style.color = Ui.GameBrightGrey;
@@ -524,7 +541,7 @@ namespace VoidCrewFleet
         {
             Label header;
             VisualElement content;
-            VisualElement section = Ui.GameSection(title, SectionWidth, out header, out content);
+            VisualElement section = Ui.GameSection(title, Ui.SharedWidth, out header, out content);
             Label hint = Ui.GameLabel(hintText, "ui-text-size__medium", "ui-text-dropshadow");
             hint.style.color = Ui.GameBrightGrey;
             hint.style.whiteSpace = WhiteSpace.Normal;
@@ -779,12 +796,18 @@ namespace VoidCrewFleet
 
             VisualElement left = Ui.HorizontalRow();
             left.style.flexShrink = 1;
+            left.style.flexGrow = 1;
+            left.style.minWidth = 0;
             Label label = Ui.GameLabel(Name(player), "ui-text-size__medium");
             label.style.fontSize = 20;
             label.style.color = me ? Ui.GameOrange : Color.white;
             label.style.unityFontStyleAndWeight = me ? FontStyle.Bold : FontStyle.Normal;
             label.style.flexShrink = 1;
+            label.style.minWidth = 0;
             label.style.overflow = Overflow.Hidden;
+            // One line, cut short with "…" only when even a wide column hasn't room (squeezed, it wrapped a letter at a time).
+            label.style.whiteSpace = WhiteSpace.NoWrap;
+            label.style.textOverflow = TextOverflow.Ellipsis;
             left.Add(label);
             if (player.IsMasterClient) left.Add(Tag("HOST"));
             if (me) left.Add(Tag("YOU"));

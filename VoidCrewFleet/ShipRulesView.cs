@@ -23,9 +23,6 @@ namespace VoidCrewFleet
             public string Name;
         }
 
-        /// <summary>The lobby screen's tabs share this height, so switching doesn't resize the screen.</summary>
-        public const float Height = 500f;
-
         private static readonly Button[] TierButtons = new Button[3];
         private static List<Option> _options = new List<Option>();
         private static List<string> _categories = new List<string>();
@@ -56,14 +53,16 @@ namespace VoidCrewFleet
 
         public static VisualElement Build()
         {
+            // As tall as the lobby screen's teams, which it replaces: both fill the screen's height.
             _view = Ui.HorizontalRow();
             _view.style.alignItems = Align.Stretch;
             _view.style.justifyContent = Justify.SpaceBetween;
-            _view.style.height = Height;
+            _view.style.flexGrow = 1;
+            _view.style.minHeight = 0;
 
             Label header;
             VisualElement content;
-            VisualElement left = Ui.GameSection("ALLOWED TIERS", PvpTeamScreen.SectionWidth, out header, out content);
+            VisualElement left = Ui.GameSection("ALLOWED TIERS", Ui.SharedWidth, out header, out content);
             content.Add(Note("Weapons, modules and items of these MK tiers may be fitted. The fabricator may start at the highest one."));
             VisualElement tiers = Ui.HorizontalRow();
             tiers.style.marginTop = 10;
@@ -99,7 +98,7 @@ namespace VoidCrewFleet
             content.Add(_clearButton);
             _view.Add(left);
 
-            VisualElement middle = Ui.GameSection("CATEGORIES", PvpTeamScreen.SectionWidth, out header, out content);
+            VisualElement middle = Ui.GameSection("CATEGORIES", Ui.SharedWidth, out header, out content);
             content.Add(Note("Pick one to list its options. Its button blocks the whole category."));
             _categoryList = new ScrollView(ScrollViewMode.Vertical);
             _categoryList.style.flexGrow = 1;
@@ -107,13 +106,14 @@ namespace VoidCrewFleet
             content.Add(_categoryList);
             _view.Add(middle);
 
-            VisualElement right = Ui.GameSection("", PvpTeamScreen.SectionWidth, out _itemsTitle, out content);
+            VisualElement right = Ui.GameSection("", Ui.SharedWidth, out _itemsTitle, out content);
             content.Add(Note("Click an option to ban it, and again to allow it."));
             _itemList = new ScrollView(ScrollViewMode.Vertical);
             _itemList.style.flexGrow = 1;
             _itemList.style.marginTop = 8;
             content.Add(_itemList);
             _view.Add(right);
+            PvpTeamScreen.SpaceSections(_view);
 
             _drawn = false;
             return _view;
