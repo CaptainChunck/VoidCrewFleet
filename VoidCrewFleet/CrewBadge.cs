@@ -14,15 +14,19 @@ namespace VoidCrewFleet
 {
     /// <summary>
     /// The local player's team and ship as one more row of the game's ship panel in the top left corner, built like the
-    /// panel's own rows from its own art: the diamond with the game's ship icon in the team's colour, the bar plate with
-    /// "BLUE TEAM  BLUE 2" ("SHIP 2" in co-op) and the value plate with the ship's type, or LOST once that ship is destroyed.
-    /// It lives in the game's HUD, so it shows, hides and scales with it: in a mission under the panel's power row, in the
-    /// hub on its own where the hull row would be, from the moment the player has a ship in the lobby until the mission ends.
+    /// panel's own rows from its own art: the diamond with the ship type's silhouette in the team's colour (the red skull once
+    /// the ship is destroyed), the bar plate with "BLUE TEAM  BLUE 2" in the hub and "BLUE 2" in a mission ("SHIP 2" in
+    /// co-op), and the value plate with the ship's type, or LOST. It lives in the game's HUD, so it shows, hides and scales
+    /// with it: in a mission as the panel's third row (its diamonds making a >), in the hub on its own where the hull row would
+    /// be, from the moment the player has a ship in the lobby until the mission ends.
     /// </summary>
     internal static class CrewBadge
     {
-        // In a mission: under the power row and its breaker pips (the panel is 110 px tall, its rows at 22 and 44).
-        private const float RowTopInPanel = 83f;
+        // In a mission: the panel's third row, as far under its power row as that is under its hull row (FollowPanelRows; this
+        // until the panel has a layout), its diamond in the hull diamond's column, so the three diamonds make a > down the
+        // panel's left edge. The power row's breaker pips hang over the row's middle (drawn over it): the row's plate then
+        // names only the ship (BLUE 1, before the pips), with its type in the value plate after them.
+        private const float RowTopInPanel = 74f;
         // In the hub, where the panel is hidden: where its hull row would be.
         private const float RowTopInHub = 26f;
 
@@ -35,6 +39,8 @@ namespace VoidCrewFleet
         private static VisualElement _topPanel;
         private static HudShipRow _row;
         private static bool _inHub;
+        private static float _rowLeft = float.NaN;
+        private static float _rowTop = float.NaN;
 
         // What the row says, as last written: it is only written again when one of these changes (no text is built until then).
         private static bool _shown;
@@ -43,6 +49,7 @@ namespace VoidCrewFleet
         private static int _shownTeam;
         private static bool _shownLost;
         private static string _shownType;
+        private static bool _shownInHub;
 
         /// <summary>A few times a second.</summary>
         public static void Tick()
@@ -60,20 +67,31 @@ namespace VoidCrewFleet
                 int team = teams && entry.Team >= 0 ? entry.Team : -1;
                 bool lost = entry.State == CrewState.Dead;
                 string type = FleetSlots.TypeNameOf(entry.Slot, inHub);
-                if (_shown && entry.Slot == _shownSlot && teams == _shownTeams && team == _shownTeam && lost == _shownLost && type == _shownType) return;
+                if (_shown && entry.Slot == _shownSlot && teams == _shownTeams && team == _shownTeam && lost == _shownLost && type == _shownType &&
+                    inHub == _shownInHub)
+                    return;
                 _shown = true;
                 _shownSlot = entry.Slot;
                 _shownTeams = teams;
                 _shownTeam = team;
                 _shownLost = lost;
                 _shownType = type;
+                _shownInHub = inHub;
                 Color colour = team >= 0 ? FleetApi.TeamColor(team) : Color.white;
-                _row.Bold.text = team >= 0 ? PvpTeams.TeamName(team) + " TEAM" : "";
+                // In the hub: BLUE TEAM  BLUE 2. In a mission the breaker pips leave room for the ship's name only: BLUE 2, in
+                // the team's colour.
+                string ship = FleetSlots.Name(entry.Slot, teams);
+                _row.Bold.text = inHub ? (team >= 0 ? PvpTeams.TeamName(team) + " TEAM" : "") : ship;
                 _row.Bold.style.color = colour;
-                _row.Bold.style.display = team >= 0 ? DisplayStyle.Flex : DisplayStyle.None;
-                _row.Regular.text = FleetSlots.Name(entry.Slot, teams);
+                _row.Bold.style.display = inHub && team < 0 ? DisplayStyle.None : DisplayStyle.Flex;
+                _row.Regular.text = inHub ? ship : "";
+                _row.Regular.style.display = inHub ? DisplayStyle.Flex : DisplayStyle.None;
                 _row.Value.text = lost ? "LOST" : type ?? "";
                 _row.Value.style.color = lost ? HudShipRow.LostRed : Color.white;
+                // The ship type's silhouette, as the loadout terminal's SHIP tiles show it (the ship cards' too); the skull once lost.
+                Sprite typeIcon = FleetSlots.TypeIcon(FleetSlots.TypeOf(entry.Slot, inHub));
+                if (lost) _row.Icon.style.backgroundImage = Ui.GameArt(null, "icon_skull");
+                else if (typeIcon != null) _row.Icon.style.backgroundImage = new StyleBackground(typeIcon);
                 _row.Icon.style.unityBackgroundImageTintColor = lost ? HudShipRow.LostRed : colour;
                 _row.Row.style.display = DisplayStyle.Flex;
             }
@@ -147,7 +165,11 @@ namespace VoidCrewFleet
                 return false;
             }
             VisualElement row = _row.Row;
-            if (row.parent == parent && _inHub == inHub) return true;
+            if (row.parent == parent && _inHub == inHub)
+            {
+                if (!inHub) FollowPanelRows(row);
+                return true;
+            }
             _inHub = inHub;
             row.RemoveFromHierarchy();
             if (inHub)
@@ -164,18 +186,58 @@ namespace VoidCrewFleet
             }
             else
             {
-                // One more row of the panel, under its power row and breaker pips, outside the panel's own layout.
-                _shipInfo.Add(row);
+                // The panel's third row, outside its own layout and drawn under its own rows, so the breaker pips show over it.
+                _shipInfo.Insert(0, row);
                 row.style.position = Position.Absolute;
-                row.style.left = HudShipRow.Left;
-                row.style.top = RowTopInPanel;
                 row.style.marginLeft = 0;
                 row.style.marginTop = 0;
                 row.style.marginBottom = 0;
+                _rowLeft = float.NaN;
+                _rowTop = float.NaN;
+                FollowPanelRows(row);
             }
             // On its own in the hub; in a mission under the power row.
             _row.StartAs(inHub);
             return true;
+        }
+
+        /// <summary>
+        /// In a mission the row is the panel's third: its diamond as far under the power row's diamond as that is under the hull
+        /// row's, in the hull diamond's column, so the three diamonds make a >. Taken from where the panel's diamonds are drawn
+        /// (the game draws its rows a few px off their layout boxes), with RowTopInPanel until they are.
+        /// </summary>
+        private static void FollowPanelRows(VisualElement row)
+        {
+            float left = HudShipRow.Left;
+            float top = RowTopInPanel;
+            VisualElement hull = _shipInfo.Q("HullIconBg");
+            VisualElement power = _shipInfo.Q("PowerIconBg");
+            if (hull != null && power != null)
+            {
+                Rect hullBox = hull.worldBound;
+                Rect powerBox = power.worldBound;
+                if (!float.IsNaN(hullBox.y) && !float.IsNaN(powerBox.y) && hullBox.height > 0f && powerBox.height > 0f && powerBox.y > hullBox.y)
+                {
+                    // The row is 22 px tall with its diamond centred on it.
+                    float centre = powerBox.center.y + (powerBox.center.y - hullBox.center.y);
+                    Vector2 place = _shipInfo.WorldToLocal(new Vector2(hullBox.x, centre));
+                    if (!float.IsNaN(place.x) && !float.IsNaN(place.y))
+                    {
+                        left = place.x;
+                        top = place.y - 11f;
+                    }
+                }
+            }
+            if (float.IsNaN(_rowLeft) || Mathf.Abs(left - _rowLeft) > 0.25f)
+            {
+                _rowLeft = left;
+                row.style.left = left;
+            }
+            if (float.IsNaN(_rowTop) || Mathf.Abs(top - _rowTop) > 0.25f)
+            {
+                _rowTop = top;
+                row.style.top = top;
+            }
         }
     }
 }

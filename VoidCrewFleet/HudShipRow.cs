@@ -11,10 +11,11 @@ namespace VoidCrewFleet
     /// </summary>
     internal sealed class HudShipRow
     {
-        // The panel's hull row, which this row copies: 363 x 22, its right end under the others', nudged 3 px right.
+        // The panel's hull row, which this row copies: 363 x 22 from x 17, its diamond in the hull diamond's column, 3 px longer
+        // so its right end comes under the bars' value plates.
         public const float Width = 363f;
         public const float Left = 17f;
-        private const float Nudge = 3f;
+        private const float Reach = 3f;
 
         /// <summary>The diamond is 40 px tall on the 22 px row: it reaches this far above and below it.</summary>
         public const float DiamondOverhang = 9f;
@@ -46,10 +47,9 @@ namespace VoidCrewFleet
             Row = Part(prefix + "Panel");
             Row.style.flexDirection = FlexDirection.Row;
             Row.style.alignItems = Align.Center;
-            Row.style.width = Width;
+            Row.style.width = Width + Reach;
             Row.style.height = 22;
             Row.style.flexShrink = 0;
-            Row.style.translate = new Translate(new Length(Nudge), new Length(0f), 0f);
 
             VisualElement iconBackground = Part(prefix + "IconBg");
             iconBackground.AddToClassList("bg-tint_gray");
