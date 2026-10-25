@@ -149,8 +149,39 @@ namespace VoidCrewFleet
             get { return DataTable<DamageTypesTable>.Instance.defaultDamageType; }
         }
 
-        /// <summary>A fast call to a game method the plugin can't call by name (protected or private), or null when it is missing or has changed.</summary>
-        private static T Bind<T>(MethodInfo method) where T : Delegate
+        // ---------------------------------------------------------------- shared by the PvP features (the field reader by the spectator view too)
+
+        /// <summary>
+        /// What blocks a player's sight in the PvP checks (a punch, a hacking terminal's panel, an enemy's name tag): the
+        /// layers walls, hulls and ship interiors are on (10, 12 and 27).
+        /// </summary>
+        public const int SightMask = (1 << 10) | (1 << 12) | (1 << 27);
+
+        /// <summary>The local player's team (0 BLUE, 1 RED), or -1 when not on a team.</summary>
+        public static int LocalTeam
+        {
+            get { return FleetShips.TeamOfActor(FleetShips.LocalActor); }
+        }
+
+        /// <summary>Whether a player (by actor number) is on the other team from the local player; false while either has no team.</summary>
+        public static bool IsEnemyActor(int actor)
+        {
+            int mine = LocalTeam;
+            int theirs = FleetShips.TeamOfActor(actor);
+            return mine >= 0 && theirs >= 0 && mine != theirs;
+        }
+
+        /// <summary>The actor number of the player a character belongs to, or -1.</summary>
+        public static int ActorOf(Player player)
+        {
+            return player != null && player.photonView != null && player.photonView.Owner != null ? player.photonView.Owner.ActorNumber : -1;
+        }
+
+        /// <summary>
+        /// A fast call to a game method the plugin can't call by name (protected or private), or null (with a warning, so a
+        /// feature that loses part of its work after a game update says so) when it is missing or has changed.
+        /// </summary>
+        internal static T Bind<T>(MethodInfo method) where T : Delegate
         {
             if (method == null) return null;
             try
@@ -160,6 +191,21 @@ namespace VoidCrewFleet
             catch (Exception e)
             {
                 Log.Warn("Game method " + method.DeclaringType.Name + "." + method.Name + " can't be called directly (" + e.Message + "); the game may have changed.");
+                return null;
+            }
+        }
+
+        /// <summary>A reader for a game's field (no reflection call per read), or null (with a warning) when the field is missing or has changed.</summary>
+        internal static HarmonyLib.AccessTools.FieldRef<T, F> FieldRef<T, F>(FieldInfo field) where T : class
+        {
+            if (field == null) return null;
+            try
+            {
+                return HarmonyLib.AccessTools.FieldRefAccess<T, F>(field);
+            }
+            catch (Exception e)
+            {
+                Log.Warn("Game field " + field.DeclaringType.Name + "." + field.Name + " can't be read directly (" + e.Message + "); the game may have changed.");
                 return null;
             }
         }

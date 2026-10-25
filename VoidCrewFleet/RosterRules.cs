@@ -120,17 +120,32 @@ namespace VoidCrewFleet
         /// <summary>
         /// Waiting players who left and stayed away for the hold time hold nothing (no place, no ship): they are forgotten,
         /// so the roster doesn't keep everyone who ever passed through. Dead players and expired holds stay: a player who
-        /// comes back must still find their lost ship, or their team. True when anyone was forgotten.
+        /// comes back must still find their lost ship, or their team. True when anyone was forgotten. (A plain loop, like Held:
+        /// the host runs it a few times a second, and a query would make garbage each time.)
         /// </summary>
         public static bool DropGone(List<RosterSeat> seats, int now, int holdMs)
         {
-            return seats.RemoveAll(s => s.Away && s.State == CrewState.Waiting && Elapsed(now, s.AwaySince) >= holdMs) > 0;
+            bool dropped = false;
+            for (int i = seats.Count - 1; i >= 0; i--)
+            {
+                RosterSeat seat = seats[i];
+                if (!seat.Away || seat.State != CrewState.Waiting || Elapsed(now, seat.AwaySince) < holdMs) continue;
+                seats.RemoveAt(i);
+                dropped = true;
+            }
+            return dropped;
         }
 
-        /// <summary>Holds left for a team: players away whose place is still theirs.</summary>
-        public static int Held(IEnumerable<RosterSeat> seats, int team)
+        /// <summary>Holds left for a team: players away whose place is still theirs. (Every player's game counts these a few times a second.)</summary>
+        public static int Held(IList<RosterSeat> seats, int team)
         {
-            return seats.Count(s => s.Team == team && s.Away && !s.Expired && s.State == CrewState.Playing);
+            int held = 0;
+            for (int i = 0; i < seats.Count; i++)
+            {
+                RosterSeat seat = seats[i];
+                if (seat.Team == team && seat.Away && !seat.Expired && seat.State == CrewState.Playing) held++;
+            }
+            return held;
         }
 
         /// <summary>

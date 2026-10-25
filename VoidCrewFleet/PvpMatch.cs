@@ -369,9 +369,13 @@ namespace VoidCrewFleet
         /// <summary>
         /// The game's state events (ready, running, ended) come from the host's game alone, and set the state of every other
         /// player's game. In a fleet mission one that another player in the room sent (a modified game, to end the mission for
-        /// everyone) is ignored, on every player's game. Events the room keeps for players who join later, the host's (who may
-        /// have left since), count as before. In PvP every other player's end screen shows their own team's result, whatever
-        /// result the host sent: by the host's decision (its message, or the room's copy for a player who joined after it).
+        /// everyone) is ignored, on every player's game. The room keeps these events for players who join later, as the room's
+        /// own (nobody's), so the sender can't tell a forged one kept there from the host's. A "mission ended" event whose
+        /// sender isn't in the room (one from the room's keeping, or from a player who has left) only counts once the room says
+        /// the session is over (SessionOver): the host's own end of the mission writes that just before its event, and a
+        /// player who joins then sees it with the room. The other events the room keeps count as before. In PvP every other
+        /// player's end screen shows their own team's result, whatever result the host sent: by the host's decision (its
+        /// message, or the room's copy for a player who joined after it).
         /// </summary>
         [GamePatch(Feature, "CG.Game.ClientGame", "OnEvent", PatchKind.Prefix)]
         private static bool GameEventPrefix(EventData photonEvent)
@@ -381,14 +385,21 @@ namespace VoidCrewFleet
                 if (photonEvent == null || photonEvent.Code != 2 || FleetSession.Mode == FleetMode.OneShip) return true;
                 int sender = photonEvent.Sender;
                 Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
-                if (sender > 0 && !Net.FromHost(sender) && room != null && room.GetPlayer(sender) != null)
+                bool inRoom = sender > 0 && room != null && room.GetPlayer(sender) != null;
+                if (inRoom && !Net.FromHost(sender))
                 {
                     Log.WarnOnce("game state from " + sender, "Player " + sender + " sent a change of the mission's state, which only the host's game sends; ignored.");
                     return false;
                 }
-                if (!FleetSession.IsPvP) return true;
                 var data = photonEvent.CustomData as object[];
-                if (data == null || data.Length < 2 || Convert.ToInt32(data[0]) != (int)ClientGameState.Ended) return true;
+                bool ended = data != null && data.Length >= 1 && data[0] != null && Convert.ToInt32(data[0]) == (int)ClientGameState.Ended;
+                if (ended && !inRoom && !SessionOver(room))
+                {
+                    Log.WarnOnce("game end while the session is on", "The end of the mission arrived from the room's keeping (or from a player who has left) " +
+                                                                     "while the room says the mission is still on, which the host's own end never does; ignored.");
+                    return false;
+                }
+                if (!FleetSession.IsPvP || !ended || data.Length < 2) return true;
                 int loser = LoserTeam;
                 if (loser >= 0) data[1] = (byte)LocalResult(loser);
             }
@@ -397,6 +408,19 @@ namespace VoidCrewFleet
                 Log.Failure("Setting the PvP result", e);
             }
             return true;
+        }
+
+        /// <summary>
+        /// Whether the room says this session is over: the game's own room property for it (CloneStarConstants.RP_SESSION_ACTIVE)
+        /// is false. The host's game sets it when a session starts and clears it as the mission ends, just before it sends
+        /// everyone the "mission ended" event, and the game itself reads it to tell a player who joins that the session is in
+        /// its end screen.
+        /// </summary>
+        private static bool SessionOver(Photon.Realtime.Room room)
+        {
+            object value;
+            return room != null && room.CustomProperties != null && room.CustomProperties.TryGetValue(CloneStarConstants.RP_SESSION_ACTIVE, out value) &&
+                   value is bool && !(bool)value;
         }
 
         /// <summary>Host: a new match has no result yet.</summary>

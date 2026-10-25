@@ -13,7 +13,8 @@ namespace VoidCrewFleet
     /// the other team can't match. The host sets them on the lobby screen's SHIP RULES tab while the teams are picked:
     /// which MK tiers may be fitted (the fabricator's starting level too), which categories, which single options are
     /// banned, and how many starting alloys a CUSTOM loadout may set. They live in a room property, so every player, late
-    /// joiners too, sees the same rules, and the host's last rules are kept in the config for their next lobby. Fleet only
+    /// joiners too, sees the same rules, and the host's last rules are kept in the config for their next lobby. The host goes
+    /// by its own copy and puts it back in the room when someone else changes the room's (KeepRoomCopy). Fleet only
     /// publishes them (FleetApi); Ship Customizer greys refused options out at the terminal and, on the host, removes them
     /// from the ships it builds when the match starts. The game's own loadouts are not affected.
     /// </summary>
@@ -126,11 +127,24 @@ namespace VoidCrewFleet
             }
         }
 
-        private static string _roomJson;
-        private static Rules _room = new Rules();
-        private static Rules _pending;
-        private static string _pendingJson;
-        private static float _pendingSince;
+        private static string _readJson;
+        private static Rules _read = new Rules();
+
+        /// <summary>
+        /// The host's own rules (their JSON; null for none): what it last set or published in this room, or for a player who
+        /// took over as host (or hosts a new room), the room's rules as they were then. While it hosts that room they are the
+        /// truth, not the room's copy: the room's property only changes a round trip after the host's change (quick clicks
+        /// must build on each other), and any player can write it (KeepRoomCopy puts the host's back). So what the host's
+        /// Customizer builds into the ships at the start of a match always follows the host's own rules.
+        /// </summary>
+        private static string _hostJson;
+
+        private static string _hostRoom;
+
+        /// <summary>When the host last wrote the rules into the room (its copy there changes a round trip later).</summary>
+        private static float _hostAt = -100f;
+
+        private static readonly RoomCopyCheck RulesCopy = new RoomCopyCheck();
 
         private static string RoomJson()
         {
@@ -140,61 +154,78 @@ namespace VoidCrewFleet
                 : null;
         }
 
-        /// <summary>The room's rules: none outside a room, or until the host sets some.</summary>
+        /// <summary>
+        /// The rules' JSON this player goes by: the host's own (adopted from the room the first time it hosts that room),
+        /// everyone else's the room's. The same string until the rules change.
+        /// </summary>
+        private static string Json()
+        {
+            Photon.Realtime.Room room = PhotonNetwork.InRoom ? PhotonNetwork.CurrentRoom : null;
+            if (room == null || !PhotonNetwork.IsMasterClient)
+            {
+                // Should this player become host, it starts from the room's rules as they are then.
+                _hostRoom = null;
+                return RoomJson();
+            }
+            if (room.Name != _hostRoom)
+            {
+                _hostJson = RoomJson();
+                _hostRoom = room.Name;
+                _hostAt = -100f;
+            }
+            return _hostJson;
+        }
+
+        /// <summary>The rules this player goes by: none outside a room, or until the host sets some (on the host, its own).</summary>
         public static Rules Current
         {
             get
             {
-                string json = RoomJson();
-                if (json != _roomJson)
+                string json = Json();
+                if (json != _readJson)
                 {
-                    _roomJson = json;
-                    _room = Rules.FromJson(json);
+                    _readJson = json;
+                    _read = Rules.FromJson(json);
                 }
-                return _room;
+                return _read;
             }
         }
 
-        /// <summary>The raw rules as the room holds them, for signatures and logs.</summary>
+        /// <summary>The raw rules this player goes by ("" for none), for signatures and logs.</summary>
         public static string CurrentJson
         {
-            get { return RoomJson() ?? ""; }
+            get { return Json() ?? ""; }
         }
 
-        /// <summary>
-        /// What the lobby screen shows: on the host, its own latest change until the room has it (a property change takes a
-        /// round trip, and quick clicks must build on each other); everywhere else the room's rules.
-        /// </summary>
+        /// <summary>What the lobby screen shows: the rules this player goes by (on the host its own latest change, at once).</summary>
         public static Rules Shown
         {
-            get
-            {
-                if (_pending != null)
-                {
-                    if (RoomJson() == _pendingJson || Time.unscaledTime - _pendingSince > 5f) _pending = null;
-                    else return _pending;
-                }
-                return Current;
-            }
+            get { return Current; }
         }
 
         /// <summary>
-        /// The JSON of the rules Shown returns, without serializing them: the host's pending change, else the room's text ("" for
-        /// none). It stays the same string until the rules change, so screens compare it to redraw only then.
+        /// The JSON of the rules Shown returns ("" for none), without serializing them. It stays the same string until the rules
+        /// change, so screens compare it to redraw only then.
         /// </summary>
         public static string ShownJson
         {
-            get
-            {
-                Rules shown = Shown;
-                return _pending != null && ReferenceEquals(shown, _pending) ? _pendingJson : CurrentJson;
-            }
+            get { return CurrentJson; }
         }
 
         /// <summary>The rules can change only on the host, in the hub, while the Fleet Battle teams are being picked.</summary>
         public static bool CanEdit
         {
             get { return PhotonNetwork.IsMasterClient && PvpTeams.HubChoosing && FleetApi.IsTeamMatch; }
+        }
+
+        /// <summary>Host: the rules are these from now on (here at once, in the room a round trip later).</summary>
+        private static void Write(string json)
+        {
+            Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+            _hostJson = json;
+            _hostRoom = room.Name;
+            _hostAt = Time.realtimeSinceStartup;
+            room.SetCustomProperties(new Hashtable { { Key, json } });
         }
 
         /// <summary>Host: change the rules (a copy of what is shown, changed by the caller) and remember them for next time.</summary>
@@ -205,10 +236,7 @@ namespace VoidCrewFleet
             change(rules);
             rules.Normalized();
             string json = rules.ToJson();
-            _pending = rules;
-            _pendingJson = json;
-            _pendingSince = Time.unscaledTime;
-            PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { Key, json } });
+            Write(json);
             Settings.PvpShipRules.Value = json;
             Log.Info("Ship rules: " + Describe(rules) + ".");
         }
@@ -218,15 +246,43 @@ namespace VoidCrewFleet
         {
             try
             {
-                if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null || RoomJson() != null) return;
+                if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null || Json() != null) return;
                 Rules saved = Rules.FromJson(Settings.PvpShipRules.Value);
                 if (!saved.Restricts) return;
-                PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { Key, saved.ToJson() } });
+                Write(saved.ToJson());
                 Log.Info("Ship rules from last time: " + Describe(saved) + ".");
             }
             catch (Exception e)
             {
                 Log.Failure("Restoring the last ship rules", e);
+            }
+        }
+
+        /// <summary>
+        /// Host, a few times a second: the room's copy of the rules stays the host's own, as PvpTeams.KeepRoomCopies keeps the
+        /// lock, crews and roster. Any player can write a room property; a copy that keeps differing once the host's own write
+        /// has had time to come back (RoomCopyCheck) was written by someone else (a modified game), and the host's goes back
+        /// in, so every player, and the player who takes over as host, sees the host's rules.
+        /// </summary>
+        public static void KeepRoomCopy()
+        {
+            try
+            {
+                Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+                if (!PhotonNetwork.InRoom || room == null || !PhotonNetwork.IsMasterClient)
+                {
+                    _hostRoom = null;
+                    return;
+                }
+                string own = Json();
+                if (!RulesCopy.PutBack(RoomJson() != own, _hostAt, Time.realtimeSinceStartup, !PhotonNetwork.IsMessageQueueRunning)) return;
+                _hostAt = Time.realtimeSinceStartup;
+                room.SetCustomProperties(new Hashtable { { Key, own } });
+                Log.WarnOnce("room rules " + room.Name, "The room's ship rules differed from the host's (another player changed them?); the host put its own back.");
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Keeping the room's copy of the ship rules", e);
             }
         }
 

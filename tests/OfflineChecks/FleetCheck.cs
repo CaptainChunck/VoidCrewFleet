@@ -54,6 +54,8 @@ internal static class Program
             CheckMemberLookups(plugin);
             Console.WriteLine("Game members named in the patch methods' code and their classes' static set-up:");
             CheckHookCode();
+            Console.WriteLine("Elements of the game's HUD that Fleet's PvP displays are put in or read (the game's own code names them):");
+            CheckHudNames();
         }
         catch (Exception e)
         {
@@ -485,5 +487,42 @@ internal static class Program
             int count = level == null ? 0 : level.Methods.Count(m => m.Name == member);
             Check(count == 1, what + " exists exactly once (found " + count + ")" + where);
         }
+    }
+
+    // ------------------------------------------------------------------ 4. names in the game's HUD
+
+    /// <summary>
+    /// The elements of the game's HUD document (its UXML, which no assembly holds) that Fleet's PvP displays look up by name:
+    /// each with a game type whose own code looks the same name up, so a game update that renames one shows here, in the
+    /// game's code, rather than as a display that silently stops showing. (PvpHack's countdowns go into the HUD's mission
+    /// list and use its mission and objective templates as MissionDisplay does; ActionHint's prompt goes into the HUD's row
+    /// of key prompts, and writes the game's key prompt's action label.)
+    /// </summary>
+    private static readonly string[][] HudNames =
+    {
+        new[] { "MissionList", "MissionListUIController" },
+        new[] { "MissionName", "MissionDisplay" },
+        new[] { "MissionBody", "MissionDisplay" },
+        new[] { "ObjectiveName", "MissionDisplay" },
+        new[] { "BodyContainer", "MissionDisplay" },
+        new[] { "ObjectiveTimer", "MissionDisplay" },
+        new[] { "InteractionInfoContainer", "UI.MainHUD.HUDInteractionInfo" },
+        new[] { "Action", "UI.Core.KeyBindVE" }
+    };
+
+    private static void CheckHudNames()
+    {
+        foreach (string[] pair in HudNames)
+        {
+            TypeDefinition type = FindType(pair[1]);
+            Check(type != null && Names(type, pair[0]), "HUD element " + pair[0] + " is named by the game's own " + pair[1]);
+        }
+    }
+
+    /// <summary>Whether a type's code (its nested types' too: a coroutine's body is one) loads this text.</summary>
+    private static bool Names(TypeDefinition type, string text)
+    {
+        if (type.Methods.Where(m => m.HasBody).SelectMany(m => m.Body.Instructions).Any(i => i.OpCode == OpCodes.Ldstr && (string)i.Operand == text)) return true;
+        return type.NestedTypes.Any(nested => Names(nested, text));
     }
 }
