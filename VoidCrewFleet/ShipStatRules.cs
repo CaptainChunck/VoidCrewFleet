@@ -64,6 +64,9 @@ namespace VoidCrewFleet
 
         private static readonly List<ShipCopy> Copies = new List<ShipCopy>();
 
+        /// <summary>The game's assembly: rules whose types come from it are the game's own (GameRules).</summary>
+        private static readonly Assembly GameAssembly = typeof(ModDynamicCondition).Assembly;
+
         /// <summary>Marks the copies (they are never shared, so never copied or set up again).</summary>
         private static readonly ConditionalWeakTable<StatMod, object> CopyMarks = new ConditionalWeakTable<StatMod, object>();
 
@@ -281,6 +284,7 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// The stat mod to apply to a collection, for one with rules (in a fleet mission):
+        /// - with a rule another mod wrote: itself, left as that mod made it (GameRules);
         /// - not set up yet: itself, kept as it is now first, so copies can be made of it later;
         /// - set up for this collection's ship, applied again where it was set up, applied to a collection of no player ship,
         ///   or set up before the mission had several ships: itself;
@@ -292,6 +296,7 @@ namespace VoidCrewFleet
         {
             object mark;
             if (CopyMarks.TryGetValue(mod, out mark)) return mod;
+            if (!GameRules(mod)) return mod;
             if (!IsSetUp(mod))
             {
                 KeepPristine(mod);
@@ -322,6 +327,19 @@ namespace VoidCrewFleet
             }
             SetUpAgain(mod);
             return mod;
+        }
+
+        /// <summary>
+        /// Whether a stat mod's rules are all the game's own. Only those are kept, copied or set up again. A rule another mod
+        /// writes can hold live game objects before it is set up (Ectype Skirmisher's Get Out and Push keeps its player,
+        /// their atmosphere tracker and the ship), and the game's deep copy then copies everything they lead to, recursing
+        /// until the stack runs out: the game closed at once, with no crash report, as such a player arrived in a fleet
+        /// mission.
+        /// </summary>
+        private static bool GameRules(StatMod mod)
+        {
+            return (mod.DynamicCondition == null || mod.DynamicCondition.GetType().Assembly == GameAssembly) &&
+                (mod.DynamicValue == null || mod.DynamicValue.GetType().Assembly == GameAssembly);
         }
 
         private static bool IsSetUp(StatMod mod)

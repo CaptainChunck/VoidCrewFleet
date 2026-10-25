@@ -106,7 +106,17 @@ namespace VoidCrewFleet
                 PlayerControlledShip own = component != null ? FleetShips.OwnerOf(component) : null;
                 if (own != null) return own;
             }
-            return game != null ? game.PlayerShip : null;
+            return GameAnswer(game);
+        }
+
+        /// <summary>
+        /// The game's own answer, read as the game reads it. While a scene unloads, ClientGame is already destroyed but still
+        /// answers with its last ship; a Unity null check here gave no ship instead, and the game's teardown code then threw
+        /// (a ship's ambience unhooking from its power as the hub unloaded, before stopping its sounds).
+        /// </summary>
+        private static PlayerControlledShip GameAnswer(ClientGame game)
+        {
+            return ReferenceEquals(game, null) ? null : game.PlayerShip;
         }
 
         /// <summary>
@@ -139,7 +149,7 @@ namespace VoidCrewFleet
                     }
                 }
             }
-            return game != null ? game.PlayerShip : null;
+            return GameAnswer(game);
         }
 
         /// <summary>
@@ -155,7 +165,7 @@ namespace VoidCrewFleet
         public static PlayerControlledShip ScannerShip(ClientGame game, PlayerControlledShip own)
         {
             if (FleetShips.Active && own != null) return own;
-            return game != null ? game.PlayerShip : null;
+            return GameAnswer(game);
         }
 
         /// <summary>The living player ship nearest to a point, or null when none is left.</summary>
