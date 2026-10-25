@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 
 namespace VoidCrewFleet
@@ -39,8 +41,23 @@ namespace VoidCrewFleet
         public string[] Arguments { get; set; }
 
         /// <summary>
+        /// The patch goes on the body of the coroutine the named method starts: the MoveNext of the class the compiler makes
+        /// for it. That class is named after the method's place in its class (Start becomes &lt;Start&gt;d__20), so a game update
+        /// that adds a method renames it; it is found from the method instead, which names it ([IteratorStateMachine]).
+        /// </summary>
+        public bool Coroutine { get; set; }
+
+        /// <summary>
+        /// The patch goes on a lambda written in the named method: its number among that method's lambdas, 0 for the first.
+        /// The compiler's name for it also holds the method's place in its class (&lt;Start&gt;b__12_0, or &lt;DoPrintProcess&gt;b__1 in
+        /// a closure class &lt;&gt;c__DisplayClass47_0), which a game update that adds a method shifts; only the method's name and
+        /// the lambda's own number are used to find it. -1: not a lambda.
+        /// </summary>
+        public int Lambda { get; set; } = -1;
+
+        /// <summary>
         /// An optional patch only logs a warning when it is missing; the feature stays on (unless a required patch of it is
-        /// missing too).
+        /// missing too), and its start-up report line names the parts it runs without.
         /// </summary>
         public bool Optional { get; set; }
 
@@ -56,13 +73,27 @@ namespace VoidCrewFleet
     /// <summary>
     /// Applies every [GamePatch] in this assembly. Each target is patched on its own, so a game update that renames
     /// something only switches off the feature that needs it, never the game. A feature that misses a required patch is
-    /// switched off whole: the patches it did get are taken out again, so it never runs half-patched. PatchProcessor is used
-    /// because it behaves the same in every Harmony 2 version BepInEx installs ship.
+    /// switched off whole: the patches it did get are taken out again, so it never runs half-patched. A feature that only
+    /// misses optional patches, or whose transpiler no longer finds what it changes in a game method, runs without those
+    /// parts, and its start-up report line names them. Every patch method is compiled before it goes in (Prepare), so one
+    /// that names a game member a game update changed counts as missing too. PatchProcessor is used because it behaves the
+    /// same in every Harmony 2 version BepInEx installs ship.
     /// </summary>
     internal static class Patcher
     {
         private static readonly Dictionary<string, List<string>> Missing = new Dictionary<string, List<string>>();
         private static readonly Dictionary<string, int> Applied = new Dictionary<string, int>();
+
+        /// <summary>
+        /// Per feature that is on: the parts it runs without (optional patches that are not in, game methods its transpilers no
+        /// longer find anything to change in), for its report line.
+        /// </summary>
+        private static readonly Dictionary<string, List<string>> Degraded = new Dictionary<string, List<string>>();
+
+        /// <summary>Each patch method compiled so far: null when it compiled, else why it could not be.</summary>
+        private static readonly Dictionary<MethodInfo, Exception> Prepared = new Dictionary<MethodInfo, Exception>();
+
+        private static long _prepareTicks;
 
         /// <summary>Every patch that went in, per feature, so a feature that is switched off can be taken out again.</summary>
         private static readonly Dictionary<string, List<AppliedPatch>> Patched = new Dictionary<string, List<AppliedPatch>>();
@@ -137,6 +168,8 @@ namespace VoidCrewFleet
                 }
             }
             foreach (string feature in Missing.Keys.ToList()) Withdraw(harmony, feature);
+            Log.Info("Set up " + Prepared.Keys.Select(hook => hook.DeclaringType).Distinct().Count() + " patch classes and compiled their " + Prepared.Count +
+                     " patch methods before patching, in " + (_prepareTicks * 1000.0 / Stopwatch.Frequency).ToString("0") + " ms.");
         }
 
         /// <summary>
@@ -167,7 +200,7 @@ namespace VoidCrewFleet
 
         private static void Apply(Harmony harmony, GamePatchAttribute patch, MethodInfo hook)
         {
-            string label = patch.Type + "." + patch.Method;
+            string label = patch.Type + "." + patch.Method + (patch.Coroutine ? " (coroutine)" : patch.Lambda >= 0 ? " (lambda " + patch.Lambda + ")" : "");
             try
             {
                 Type type = AccessTools.TypeByName(patch.Type);
@@ -183,6 +216,9 @@ namespace VoidCrewFleet
                     target = patch.Method == ".ctor" ? OnlyConstructor(type) : AccessTools.Method(type, patch.Method);
                 }
                 if (target == null) throw new MissingMethodException(patch.Type, patch.Method);
+                if (patch.Coroutine) target = CoroutineBody(target);
+                else if (patch.Lambda >= 0) target = LambdaIn(target.DeclaringType, patch.Method, patch.Lambda);
+                Prepare(hook);
 
                 PatchProcessor processor = harmony.CreateProcessor(target);
                 var method = new HarmonyMethod(hook);
@@ -215,6 +251,7 @@ namespace VoidCrewFleet
                 if (patch.Optional)
                 {
                     Log.Warn("Optional patch " + label + " (" + patch.Feature + ") is not in; the game may have changed: " + e.Message);
+                    AddDegraded(patch.Feature, label + " (not patched)");
                     return;
                 }
                 List<string> missing;
@@ -222,6 +259,118 @@ namespace VoidCrewFleet
                 missing.Add(label);
                 Log.Error("Could not patch " + label + " for " + patch.Feature + " (the game may have changed): " + e.Message);
             }
+        }
+
+        /// <summary>
+        /// Sets up the patch method's class and compiles the method, inside Apply's try. A patch method (or a static field of
+        /// its class) that names a game member a game update renamed or retyped only fails when it is first compiled. Left to
+        /// the game, that happens inside the game's patched method, before the patch method's own try/catch, so the game method
+        /// would throw on every call (a hook on the hub's Update would stop every mission from starting). Here it fails at
+        /// start-up and counts as a missing patch, so its feature is switched off cleanly. The game's Mono compiles a method
+        /// when its code address is asked for; RuntimeHelpers.PrepareMethod does nothing there (it compiles on .NET). A generic
+        /// method is never compiled this way, as Mono aborts on one (the plugin has none; the offline checker makes sure).
+        /// Compiling a method also runs the static set-up of the classes whose static fields it reads; for a patch method those
+        /// are the plugin's own (its lookups and lists), never the game's. Each method is compiled once, however many patches
+        /// use it.
+        /// </summary>
+        private static void Prepare(MethodInfo hook)
+        {
+            Exception failure;
+            if (!Prepared.TryGetValue(hook, out failure))
+            {
+                long start = Stopwatch.GetTimestamp();
+                try
+                {
+                    // ContainsGenericParameters: a generic method, or one of a generic class.
+                    if (!hook.ContainsGenericParameters)
+                    {
+                        RuntimeHelpers.RunClassConstructor(hook.DeclaringType.TypeHandle);
+                        RuntimeHelpers.PrepareMethod(hook.MethodHandle);
+                        hook.MethodHandle.GetFunctionPointer();
+                    }
+                }
+                catch (Exception e)
+                {
+                    failure = new InvalidOperationException("its patch method " + hook.DeclaringType.Name + "." + hook.Name + " can't be compiled (" + Innermost(e) + ")", e);
+                }
+                _prepareTicks += Stopwatch.GetTimestamp() - start;
+                Prepared[hook] = failure;
+            }
+            if (failure != null) throw failure;
+        }
+
+        /// <summary>"MissingFieldException: Field not found: ...": the exception at the bottom of a class set-up or call that failed.</summary>
+        private static string Innermost(Exception e)
+        {
+            while ((e is TypeInitializationException || e is TargetInvocationException) && e.InnerException != null) e = e.InnerException;
+            return e.GetType().Name + ": " + e.Message;
+        }
+
+        /// <summary>
+        /// The body of the coroutine a game method starts: the MoveNext of the class the compiler made for it, which the method
+        /// names in its [IteratorStateMachine] (the compiler puts it on every coroutine). That class is nested in the method's.
+        /// </summary>
+        private static MethodBase CoroutineBody(MethodBase method)
+        {
+            object[] marks = method.GetCustomAttributes(typeof(IteratorStateMachineAttribute), false);
+            Type machine = marks.Length == 1 ? ((IteratorStateMachineAttribute)marks[0]).StateMachineType : null;
+            MethodInfo body = machine != null && machine.DeclaringType == method.DeclaringType ? AccessTools.Method(machine, "MoveNext") : null;
+            if (body == null) throw new MissingMethodException(method.DeclaringType.FullName + "." + method.Name + " is no longer a coroutine");
+            return body;
+        }
+
+        /// <summary>
+        /// The lambda with that number (0 for the first) written in a game method, on the method's class or in one of the
+        /// classes the compiler nests in it for lambdas (&lt;&gt;c, closure classes): the compiler names it &lt;Method&gt;b__N, or
+        /// &lt;Method&gt;b__P_N where P is the method's place in its class. Exactly one must match.
+        /// </summary>
+        private static MethodBase LambdaIn(Type type, string method, int number)
+        {
+            const BindingFlags all = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+            string prefix = "<" + method + ">b__";
+            var found = new List<MethodInfo>();
+            var types = new List<Type> { type };
+            types.AddRange(type.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic));
+            foreach (Type candidate in types)
+            {
+                foreach (MethodInfo lambda in candidate.GetMethods(all))
+                {
+                    if (lambda.Name.StartsWith(prefix, StringComparison.Ordinal) && LambdaNumber(lambda.Name.Substring(prefix.Length)) == number) found.Add(lambda);
+                }
+            }
+            if (found.Count == 1) return found[0];
+            if (found.Count == 0) throw new MissingMethodException(type.FullName + "." + method + " has no lambda " + number);
+            throw new AmbiguousMatchException(type.FullName + "." + method + " has " + found.Count + " lambdas numbered " + number);
+        }
+
+        /// <summary>The lambda's own number from the end of its compiler name ("1" or "12_1"), or -1.</summary>
+        private static int LambdaNumber(string suffix)
+        {
+            int cut = suffix.LastIndexOf('_');
+            int number;
+            return int.TryParse(cut >= 0 ? suffix.Substring(cut + 1) : suffix, out number) ? number : -1;
+        }
+
+        /// <summary>
+        /// A transpiler found nothing to change in a game method (a game update changed the method): its feature runs without
+        /// that part, and its start-up report line says so. Logged once per method (Harmony runs a method's transpilers again
+        /// whenever anything else patches it).
+        /// </summary>
+        public static void NothingReplaced(string feature, MethodBase original, string what)
+        {
+            string method = original.DeclaringType != null ? original.DeclaringType.FullName + "." + original.Name : original.Name;
+            if (AddDegraded(feature, method + " (no longer " + what + ")"))
+                Log.Warn(feature + ": " + method + " no longer " + what + "; that part is left as the game has it. The game may have changed.");
+        }
+
+        /// <summary>Notes a part a feature runs without; false when it was noted already.</summary>
+        private static bool AddDegraded(string feature, string part)
+        {
+            List<string> parts;
+            if (!Degraded.TryGetValue(feature, out parts)) Degraded[feature] = parts = new List<string>();
+            if (parts.Contains(part)) return false;
+            parts.Add(part);
+            return true;
         }
 
         /// <summary>
@@ -273,8 +422,8 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// One line per feature: on, or off with the game members that could not be patched (and what became of the patches
-        /// it did get).
+        /// One line per feature: on (with the parts it runs without, if any), or off with the game members that could not be
+        /// patched (and what became of the patches it did get).
         /// </summary>
         public static void Report(IEnumerable<string> features)
         {
@@ -296,7 +445,12 @@ namespace VoidCrewFleet
                 }
                 else
                 {
-                    Log.Info(feature + ": ready (" + Applied[feature] + " patches).");
+                    List<string> parts;
+                    if (Degraded.TryGetValue(feature, out parts) && parts.Count > 0)
+                        Log.Warn(feature + ": ready (" + Applied[feature] + " patches), but without " + parts.Count + (parts.Count == 1 ? " part" : " parts") +
+                                 " the game may have changed (left as the game has " + (parts.Count == 1 ? "it" : "them") + "): " + string.Join("; ", parts.ToArray()) + ".");
+                    else
+                        Log.Info(feature + ": ready (" + Applied[feature] + " patches).");
                 }
             }
         }

@@ -290,7 +290,7 @@ namespace VoidCrewFleet
                 }
                 yield return instruction;
             }
-            if (replaced == 0) Log.Warn("Clone tubes: " + original.DeclaringType.FullName + "." + original.Name + " no longer looks a tube up by index; the game may have changed.");
+            if (replaced == 0) Patcher.NothingReplaced(Feature, original, "looks a tube up by index");
         }
 
         /// <summary>A property's getter, or null when the property is missing.</summary>
