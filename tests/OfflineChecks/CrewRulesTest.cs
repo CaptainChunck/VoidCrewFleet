@@ -854,5 +854,30 @@ internal static class CrewRulesTest
         Check(!afterHeld, "room copy: nor until the messages held up have had time to come in");
         Check(!check.PutBack(true, 100f, 208.25f, false), "room copy: then a lasting difference starts its second");
         Check(check.PutBack(true, 100f, 209.25f, false), "room copy: and is put back once it has lasted");
+
+        // 0.4.6's 3v3 test: the host's own write took longer than the echo time to come back while six ships spawned. Until
+        // the room has shown the host's value once, a difference is its write still on its way.
+        check = new RoomCopyCheck();
+        bool slowEcho = false;
+        for (float now = 100f; now < 115f; now += 0.25f) slowEcho |= check.PutBack(true, 100f, now, false);
+        Check(!slowEcho, "room copy: the host's own write coming back late is nobody else's");
+        Check(!check.PutBack(false, 100f, 115f, false), "room copy: the late echo arrives; nothing to put back");
+        // Once it has come back, someone else's write is put back after the echo time and a second.
+        Check(!check.PutBack(true, 100f, 140f, false), "room copy: after the echo, another write is first seen");
+        Check(check.PutBack(true, 100f, 141f, false), "room copy: and put back once it has lasted a second");
+
+        // Its own write never showing in the room (someone wrote over it before it came back): put back after NoEchoSeconds.
+        check = new RoomCopyCheck();
+        bool beforeTimeout = false;
+        for (float now = 300f; now < 300f + RoomCopyCheck.NoEchoSeconds; now += 0.25f) beforeTimeout |= check.PutBack(true, 300f, now, false);
+        Check(!beforeTimeout, "room copy: no put-back while the host's write may still come back");
+        Check(!check.PutBack(true, 300f, 300f + RoomCopyCheck.NoEchoSeconds + 0.25f, false), "room copy: after that, a lasting difference starts its second");
+        Check(check.PutBack(true, 300f, 300f + RoomCopyCheck.NoEchoSeconds + 1.25f, false), "room copy: and is put back");
+
+        // A new write by the host starts the wait for its echo again.
+        check = new RoomCopyCheck();
+        Check(!check.PutBack(false, 400f, 401f, false), "room copy: the host's write came back");
+        Check(!check.PutBack(true, 450f, 454f, false), "room copy: a newer write of the host's isn't back yet: its own");
+        Check(!check.PutBack(true, 450f, 455f, false), "room copy: still waiting for that one");
     }
 }
