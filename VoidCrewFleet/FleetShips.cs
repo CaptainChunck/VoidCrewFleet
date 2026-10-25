@@ -163,6 +163,7 @@ namespace VoidCrewFleet
             KnownSlots.Clear();
             _hostShips = views;
             _hostShipsRoom = PhotonNetwork.CurrentRoom.Name;
+            _hostShipsAt = Time.realtimeSinceStartup;
             ViewChanged();
             PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyShips, views } });
         }
@@ -188,6 +189,7 @@ namespace VoidCrewFleet
             // Empty here at once (the room's copy changes after a round trip).
             _hostCrew = new int[0];
             _hostCrewRoom = PhotonNetwork.CurrentRoom.Name;
+            _hostCrewAt = Time.realtimeSinceStartup;
             PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable
             {
                 { KeyShips, null }, { KeyCrew, null }, { "VCF_ResStart", null }, { VoidJumpLink.KeyLead, null }
@@ -413,8 +415,96 @@ namespace VoidCrewFleet
             }
             _hostCrew = flat;
             _hostCrewRoom = PhotonNetwork.CurrentRoom.Name;
+            _hostCrewAt = Time.realtimeSinceStartup;
             ViewChanged();
             PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyCrew, flat } });
+        }
+
+        // ---------------------------------------------------------------- the room's copies
+
+        /// <summary>When the host last wrote its crew list and its ship list into the room (the room's copies change a round trip later).</summary>
+        private static float _hostCrewAt = -100f;
+
+        private static float _hostShipsAt = -100f;
+
+        /// <summary>The room whose lists this player last kept as host (null while it isn't the host): another one means a new host.</summary>
+        private static string _keptRoom;
+
+        private static readonly RoomCopyCheck CrewCopy = new RoomCopyCheck();
+        private static readonly RoomCopyCheck ShipsCopy = new RoomCopyCheck();
+
+        /// <summary>
+        /// Host, a few times a second (PvpTeams.KeepRoomCopies): the room's crew list and ship list stay the host's own, which
+        /// are what the host decides from (a crew list someone else wrote would otherwise mislead every other player, and the
+        /// player who takes over as host). Any player can write a room property: a list that keeps differing once the host's
+        /// own write has had time to come back (RoomCopyCheck) was written by someone else (a modified game), and the host's
+        /// goes back in. A player who has just become host takes the room's lists as they are as its own first (only the host
+        /// writes them).
+        /// </summary>
+        public static void KeepRoomCopies()
+        {
+            Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+            if (!PhotonNetwork.InRoom || !PhotonNetwork.IsMasterClient || room == null)
+            {
+                // Not the host: its own lists mean nothing now (Crew and PublishedShips drop them too), and should this player
+                // become host it starts from the room's.
+                _keptRoom = null;
+                _hostCrew = null;
+                _hostShips = null;
+                return;
+            }
+            float now = Time.realtimeSinceStartup;
+            if (room.Name != _keptRoom)
+            {
+                _keptRoom = room.Name;
+                if (_hostCrew == null || _hostCrewRoom != room.Name)
+                {
+                    _hostCrew = RoomInts(KeyCrew) ?? new int[0];
+                    _hostCrewRoom = room.Name;
+                    _hostCrewAt = now;
+                }
+                int[] ships = RoomInts(KeyShips);
+                if ((_hostShips == null || _hostShipsRoom != room.Name) && ships != null)
+                {
+                    _hostShips = ships;
+                    _hostShipsRoom = room.Name;
+                    _hostShipsAt = now;
+                }
+                return;
+            }
+            bool held = !PhotonNetwork.IsMessageQueueRunning;
+            if (CrewCopy.PutBack(_hostCrew != null && _hostCrewRoom == room.Name && !SameInts(RoomInts(KeyCrew), _hostCrew), _hostCrewAt, now, held))
+            {
+                _hostCrewAt = now;
+                room.SetCustomProperties(new Hashtable { { KeyCrew, _hostCrew } });
+                Log.WarnOnce("room crew " + room.Name, "The room's crew list differed from the host's (another player changed it?); the host put its own back.");
+            }
+            if (ShipsCopy.PutBack(_hostShips != null && _hostShipsRoom == room.Name && !SameInts(RoomInts(KeyShips), _hostShips), _hostShipsAt, now, held))
+            {
+                _hostShipsAt = now;
+                room.SetCustomProperties(new Hashtable { { KeyShips, _hostShips } });
+                Log.WarnOnce("room ships " + room.Name, "The room's ship list differed from the host's (another player changed it?); the host put its own back.");
+            }
+        }
+
+        /// <summary>A list of numbers in the room's properties, or null.</summary>
+        private static int[] RoomInts(string key)
+        {
+            Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+            object value;
+            return room != null && room.CustomProperties != null && room.CustomProperties.TryGetValue(key, out value) ? value as int[] : null;
+        }
+
+        /// <summary>Whether two lists hold the same numbers in the same order (no list counts as an empty one).</summary>
+        private static bool SameInts(int[] a, int[] b)
+        {
+            int count = a != null ? a.Length : 0;
+            if (count != (b != null ? b.Length : 0)) return false;
+            for (int i = 0; i < count; i++)
+            {
+                if (a[i] != b[i]) return false;
+            }
+            return true;
         }
 
         /// <summary>Host: nobody has a ship or a team (the hub's picks start over).</summary>

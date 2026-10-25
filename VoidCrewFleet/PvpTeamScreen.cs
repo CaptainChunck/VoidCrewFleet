@@ -712,6 +712,8 @@ namespace VoidCrewFleet
                 }
 
                 string why = PvpTeams.CheckPicks();
+                // More players than the crews take: moving players can't help, more ships can (CheckPicks says what).
+                bool overfull = actors.Count > ships * CrewRules.MaxCrew;
                 _hostButtons.style.display = host && picking ? DisplayStyle.Flex : DisplayStyle.None;
                 _confirmButton.text = teams ? "CONFIRM TEAMS" : "CONFIRM CREWS";
                 _confirmButton.SetEnabled(why == null);
@@ -731,7 +733,7 @@ namespace VoidCrewFleet
                     else if (host)
                         _status.text = why == null
                             ? "Everyone has a ship. Press CONFIRM CREWS, then set up the ships and sit in the ready room to start." + emptyNote
-                            : why + " Move players with the ship buttons on their row, or press AUTO-BALANCE.";
+                            : why + (overfull ? "" : " Move players with the ship buttons on their row, or press AUTO-BALANCE.");
                     else
                         _status.text = (placed ? "You fly " + ShipTitle(mine.Slot, false) + ". " : "Pick a ship. ") +
                                        "The host confirms the crews; then set up your ship at the loadout terminal.";
@@ -744,8 +746,6 @@ namespace VoidCrewFleet
                 }
                 else if (host)
                 {
-                    // More players than the crews take: moving players can't help, more ships per team can (CheckTeams says so).
-                    bool overfull = actors.Count > ships * CrewRules.MaxCrew;
                     _status.text = why == null
                         ? (inHub
                             ? "The teams are even. Press CONFIRM TEAMS, then set up the ships and sit in the ready room to start the match."

@@ -11,16 +11,19 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
 
 ### Up to three ships, up to 48 players
 - Rooms hold up to 48 players (the game's own limit is 6), 8 per ship, each ship with its own clone tubes: three
-  co-op ships take 24, a 3v3 Fleet Battle 48.
+  co-op ships take 24, a 3v3 Fleet Battle 48. Co-op crews can't be confirmed for more players than the ships take (nor
+  one of the game's own missions started); players who join after that and find every crew full wait for a free
+  place, watching.
 - The hub's **ship loadout terminal** gets a **FLEET** panel:
   - **SHIPS: 1 / 2 / 3** (the host's) sets how many ships the game's own missions use (one in a new room; your last
-    choice is remembered). With more than 8 players a mission adds ships by itself and evens out the crews. A saved run
-    always has one ship.
+    choice is remembered). With more than 8 players a mission adds ships by itself (three at most) and evens out the
+    crews; with more than 24 it doesn't start (FLEET BATTLE takes up to 48). A saved run always has one ship.
   - A row for every ship: click one to set it up at the terminal, with its own ship and loadout.
 - **The lobby screen** opens for everyone when the host sets two or three ships: **players pick the ship they fly** for
   the whole mission. Crews stay even, and the host can move players and auto-balance. The host then confirms the crews
   (CONFIRM CREWS), and only then can the mission start. **CREWS** on the FLEET panel brings the screen back, and once
-  the crews are confirmed it lets the host reopen picking. A player who joins after that goes to the smallest crew.
+  the crews are confirmed it lets the host reopen picking. A player who joins after that (in the hub or the mission)
+  goes to the smallest crew with room; when every crew is full they wait for the first free place.
 - On the lobby screen the host can **force each ship's type** (Destroyer, Frigate or Striker) or leave it free. A ship
   with no loadout chosen copies ship 1 (AS SHIP 1) when its type allows it, or else gets its type's standard loadout.
 - From the moment you have a ship in the lobby until the mission ends, **your ship** shows as one more row of the
