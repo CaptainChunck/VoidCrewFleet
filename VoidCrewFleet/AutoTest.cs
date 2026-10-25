@@ -51,6 +51,7 @@ namespace VoidCrewFleet
             Tour,
             Fists,
             Respawning,
+            Cruisers,
             Destroying,
             Returning,
             Jumping,
@@ -174,7 +175,7 @@ namespace VoidCrewFleet
                     }
                     else
                     {
-                        Go(Step.Destroying);
+                        AfterRespawn();
                     }
                     return;
                 case Step.Tour:
@@ -190,6 +191,11 @@ namespace VoidCrewFleet
                 case Step.Respawning:
                     if (!_sequenceDone && Since < 90f) return;
                     if (!_sequenceDone) Log.Warn("[autotest] The respawn test didn't finish in 90 s.");
+                    AfterRespawn();
+                    return;
+                case Step.Cruisers:
+                    if (!_sequenceDone && Since < 240f) return;
+                    if (!_sequenceDone) Log.Warn("[autotest] The cruiser test didn't finish in 240 s.");
                     Go(Step.Destroying);
                     return;
                 case Step.Destroying:
@@ -471,6 +477,170 @@ namespace VoidCrewFleet
             Report("re-cloned");
             Screenshot("recloned");
             _sequenceDone = true;
+        }
+
+        /// <summary>After the respawn test: the cruiser test (AutoTestCruisers, co-op), then the ships are destroyed.</summary>
+        private static void AfterRespawn()
+        {
+            if (Settings.AutoTestCruisers.Value && FleetSession.Mode == FleetMode.Coop)
+            {
+                Go(Step.Cruisers);
+                _sequenceDone = false;
+                FleetRuntime.Instance.StartCoroutine(CruiserSequence());
+                return;
+            }
+            Go(Step.Destroying);
+        }
+
+        /// <summary>The Fleet Battle mission's capital-ship spawner profile (SpawnerProfile_Hollow_FleetBattle_CapitolShips).</summary>
+        private const string CruiserProfile = "617c51d5b70105d46956fb25c40603f4";
+
+        /// <summary>The tag that spawner goes by and gives its cruisers (Tag_Spawner_Hollow_FleetBattle_CapitolShip).</summary>
+        private const string CruiserTag = "1424f8c92ce67d142b620e2203ae8a11";
+
+        /// <summary>
+        /// The Fleet Battle mission's HOLLOW Cruisers, without flying to a Fleet Battle sector (AutoTestCruisers): the host
+        /// brings in that mission's capital-ship spawner, the game's own (one HOLLOW Cruiser Elite at a time, which takes its
+        /// whole budget, and the next one 30 s after the last one died), lets it send a cruiser to a spot ahead of the fleet,
+        /// destroys it and checks that the next one comes, as with one ship. In Fleet 0.4.4 the next one never came in a
+        /// Fleet Pilgrimage: the enemy scaling left a remainder on the spawner's count.
+        /// </summary>
+        private static System.Collections.IEnumerator CruiserSequence()
+        {
+            Gameplay.NPC.AI.AIDirector director = Singleton<Gameplay.NPC.AI.AIDirector>.I;
+            System.Reflection.FieldInfo countField = GameMember.Field(typeof(Gameplay.NPC.AI.Spawner), "currentIntensity");
+            System.Reflection.FieldInfo unitsField = GameMember.Field(typeof(Gameplay.NPC.AI.Spawner), "trackedUnits");
+            var tag = new ScriptableObjectRef(new GUIDUnion(CruiserTag));
+            var profileGuid = new GUIDUnion(CruiserProfile);
+            Gameplay.NPC.AI.SpawnerProfile profile = null;
+            try
+            {
+                if (ScriptableObjectContainer.Instance.HasItem(profileGuid))
+                    profile = ScriptableObjectContainer.Instance.GetItem(profileGuid).Asset as Gameplay.NPC.AI.SpawnerProfile;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("[autotest] finding the Fleet Battle cruiser spawner", e);
+            }
+            PlayerControlledShip near = FleetShips.LocalShip ?? FleetShips.BySlot(0);
+            if (!PhotonNetwork.IsMasterClient || director == null || profile == null || near == null || GameSessionManager.ActiveSector == null ||
+                countField == null || unitsField == null)
+            {
+                Log.Warn("[autotest] Cruisers: skipped (host " + PhotonNetwork.IsMasterClient + ", AI Director " + (director != null) + ", spawner profile " +
+                         (profile != null) + ", a ship to send them to " + (near != null) + ", the spawner's fields " + (countField != null && unitsField != null) + ").");
+                _sequenceDone = true;
+                yield break;
+            }
+            if (director.GetSpawner(tag, true) != null)
+            {
+                Log.Warn("[autotest] Cruisers: skipped, this sector already has the Fleet Battle cruiser spawner.");
+                _sequenceDone = true;
+                yield break;
+            }
+            FleetPlan plan = FleetSession.Current;
+            Log.Info("[autotest] Cruisers: Fleet Pilgrimage enemy scaling is " + (plan != null && plan.ScaleEnemies ? "on" : "OFF, so this only shows the game's own spawner") +
+                     "; bringing in the Fleet Battle cruiser spawner.");
+            director.CreateSpawner(profile);
+            Gameplay.NPC.AI.Spawner spawner = null;
+            float until = Time.unscaledTime + 10f;
+            while (spawner == null && Time.unscaledTime < until)
+            {
+                yield return new WaitForSeconds(0.5f);
+                spawner = director.GetSpawner(tag, true);
+            }
+            if (spawner == null)
+            {
+                Log.Error("[autotest] Cruisers: FAILED, the spawner didn't start.");
+                _sequenceDone = true;
+                yield break;
+            }
+            Vector3 spot = near.WorldPosition + near.transform.forward * 1500f;
+            director.SetSpawnerSpawnHandle(tag, new CG.Game.Scenarios.Actions.SpawnHandle(GameSessionManager.ActiveSector, spot, Quaternion.identity));
+            Log.Info("[autotest] Cruisers: the spawner is up (budget " + spawner.TargetIntensity + " of " + spawner.MaxIntensity + ", counts " +
+                     SpawnerCount(countField, spawner).ToString("R") + "); its cruisers jump in 1.5 km ahead of " + FleetShips.Describe(near) + ".");
+
+            // The first cruiser: at the AI Director's next turn (every 15 s).
+            OrbitObject first = null;
+            until = Time.unscaledTime + 45f;
+            while (first == null && Time.unscaledTime < until)
+            {
+                yield return new WaitForSeconds(1f);
+                first = SpawnerUnit(unitsField, spawner, null);
+            }
+            if (first == null)
+            {
+                Log.Error("[autotest] Cruisers: FAILED, the spawner sent no cruiser in 45 s (it counts " + SpawnerCount(countField, spawner).ToString("R") + ").");
+                EndCruiserTest(director, tag, unitsField, spawner);
+                _sequenceDone = true;
+                yield break;
+            }
+            Log.Info("[autotest] Cruisers: the first cruiser is " + first.name + " (the spawner counts " + SpawnerCount(countField, spawner).ToString("R") + ").");
+            // It comes through a void jump: destroyed once it is in the sector (or after 40 s, wherever it is).
+            until = Time.unscaledTime + 40f;
+            while (first != null && !first.IsDestroyed && first.Sector != GameSessionManager.ActiveSector && Time.unscaledTime < until)
+                yield return new WaitForSeconds(1f);
+            bool gone = first == null || first.IsDestroyed;
+            bool arrived = !gone && first.Sector == GameSessionManager.ActiveSector;
+            Log.Info("[autotest] Cruisers: it " + (gone ? "was destroyed already." : (arrived ? "arrived, " + Vector3.Distance(first.WorldPosition, near.WorldPosition).ToString("0") +
+                     " m from " + FleetShips.Describe(near) : "did not arrive in 40 s") + "; destroying it."));
+            if (!gone && !first.DestroyRequested) first.Kill();
+            float died = Time.unscaledTime;
+            yield return new WaitForSeconds(1f);
+            float left = SpawnerCount(countField, spawner);
+            Log.Info("[autotest] Cruisers: with it gone the spawner counts " + left.ToString("R") + (left == 0f ? " (nothing, right)." : " (should be 0: that's room taken from the next one)."));
+
+            // The next one: 30 s after the last one died, at the AI Director's next turn.
+            OrbitObject next = null;
+            until = Time.unscaledTime + 75f;
+            while (next == null && Time.unscaledTime < until)
+            {
+                yield return new WaitForSeconds(1f);
+                next = SpawnerUnit(unitsField, spawner, first);
+            }
+            if (next != null) Log.Info("[autotest] Cruisers: PASSED, the next cruiser came " + (Time.unscaledTime - died).ToString("0") + " s after the first one died.");
+            else Log.Error("[autotest] Cruisers: FAILED, no next cruiser in 75 s; the spawner counts " + SpawnerCount(countField, spawner).ToString("R") + " of its budget " + spawner.TargetIntensity + ".");
+            EndCruiserTest(director, tag, unitsField, spawner);
+            _sequenceDone = true;
+        }
+
+        /// <summary>The intensity a spawner counts for the units it has out (NaN when it can't be read).</summary>
+        private static float SpawnerCount(System.Reflection.FieldInfo countField, Gameplay.NPC.AI.Spawner spawner)
+        {
+            return GameMember.Read(countField, spawner, float.NaN);
+        }
+
+        /// <summary>A unit the spawner sent that is still there (other than one already seen), or null.</summary>
+        private static OrbitObject SpawnerUnit(System.Reflection.FieldInfo unitsField, Gameplay.NPC.AI.Spawner spawner, OrbitObject except)
+        {
+            List<OrbitObject> units = GameMember.Read<List<OrbitObject>>(unitsField, spawner, null);
+            if (units == null) return null;
+            foreach (OrbitObject unit in units)
+            {
+                if (unit != null && !unit.IsDestroyed && !unit.DestroyRequested && !ReferenceEquals(unit, except)) return unit;
+            }
+            return null;
+        }
+
+        /// <summary>The cruiser test's spawner goes again, with the cruisers it still has out.</summary>
+        private static void EndCruiserTest(Gameplay.NPC.AI.AIDirector director, ScriptableObjectRef tag, System.Reflection.FieldInfo unitsField, Gameplay.NPC.AI.Spawner spawner)
+        {
+            try
+            {
+                List<OrbitObject> units = GameMember.Read<List<OrbitObject>>(unitsField, spawner, null);
+                if (units != null)
+                {
+                    foreach (OrbitObject unit in new List<OrbitObject>(units))
+                    {
+                        if (unit != null && !unit.IsDestroyed && !unit.DestroyRequested) unit.Kill();
+                    }
+                }
+                director.DestroySpawner(tag);
+                Log.Info("[autotest] Cruisers: the test's spawner and its cruisers are gone.");
+            }
+            catch (Exception e)
+            {
+                Log.Failure("[autotest] removing the cruiser test's spawner", e);
+            }
         }
 
         /// <summary>

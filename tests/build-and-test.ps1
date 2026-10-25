@@ -41,6 +41,17 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+Write-Output "== Building the enemy budget tests"
+& $csc -nologo -target:exe -platform:x64 "-out:$(Join-Path $out 'SpawnBudgetTest.exe')" (Join-Path $PSScriptRoot "OfflineChecks\SpawnBudgetTest.cs") (Join-Path $root "VoidCrewFleet\SpawnBudget.cs")
+if ($LASTEXITCODE -ne 0) {
+    Write-Output "ENEMY BUDGET TESTS BUILD FAILED"
+    exit 1
+}
+& (Join-Path $out "SpawnBudgetTest.exe")
+if ($LASTEXITCODE -ne 0) {
+    exit 1
+}
+
 Write-Output "== Running the offline checks"
 & (Join-Path $out "FleetCheck.exe") (Join-Path $root "VoidCrewFleet\bin\Release\VoidCrewFleet.dll") (Join-Path $VoidCrewDir "Void Crew_Data\Managed")
 exit $LASTEXITCODE
