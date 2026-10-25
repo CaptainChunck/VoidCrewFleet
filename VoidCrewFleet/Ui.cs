@@ -79,12 +79,6 @@ namespace VoidCrewFleet
             return clickable;
         }
 
-        public static void Hover(VisualElement element, Color normal, Color hover)
-        {
-            element.RegisterCallback<PointerEnterEvent>(e => element.style.backgroundColor = hover);
-            element.RegisterCallback<PointerLeaveEvent>(e => element.style.backgroundColor = normal);
-        }
-
         /// <summary>Tells the game a new element is on screen, as it does for its own (sounds, navigation, localisation).</summary>
         public static void Announce(VisualElement element)
         {
@@ -418,24 +412,6 @@ namespace VoidCrewFleet
             section.Add(content);
             section.Add(GameDivider());
             return section;
-        }
-
-        /// <summary>A row like the loadout terminal's RESOURCES list: dark grey, 34 px, its content spread along it.</summary>
-        public static VisualElement GameListRow()
-        {
-            var row = new VisualElement();
-            row.style.flexDirection = FlexDirection.Row;
-            row.style.alignItems = Align.Center;
-            row.style.justifyContent = Justify.SpaceBetween;
-            row.style.flexShrink = 0;
-            row.style.minHeight = 34;
-            row.style.backgroundColor = GameDarkGrey;
-            row.style.paddingLeft = 10;
-            row.style.paddingRight = 10;
-            row.style.paddingTop = 3;
-            row.style.paddingBottom = 3;
-            row.style.marginBottom = 4;
-            return row;
         }
 
         /// <summary>The game's decorative line under a section header (.metem-decorative__box-border), optionally recoloured.</summary>

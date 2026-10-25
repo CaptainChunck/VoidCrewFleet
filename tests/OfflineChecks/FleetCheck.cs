@@ -1049,6 +1049,8 @@ internal static class Program
             else if (owner == "VoidCrewFleet.ShipEvents" && call.Name == "End") events--;
         }
         return overrides < 0 || events < 0;
+    }
+
     // ------------------------------------------------------------------ 4. names in the game's HUD
 
     /// <summary>
