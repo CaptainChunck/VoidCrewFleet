@@ -99,7 +99,7 @@ namespace VoidCrewFleet
                 }
                 yield return instruction;
             }
-            if (replaced == 0) Log.Warn("Ships kept apart: " + original.DeclaringType.FullName + "." + original.Name + " no longer checks for hostile ships; the game may have changed.");
+            if (replaced == 0) Patcher.NothingReplaced(Feature, original, "checks for hostile ships");
         }
 
         /// <summary>

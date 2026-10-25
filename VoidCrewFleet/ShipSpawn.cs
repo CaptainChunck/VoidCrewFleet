@@ -207,7 +207,8 @@ namespace VoidCrewFleet
                     {
                         Log.Failure("Spawning " + FleetSlots.Name(slot, plan.Mode == FleetMode.PvP), e);
                     }
-                    if (ships[slot] == null) Notice.ShowAll(FleetSlots.Name(slot, plan.Mode == FleetMode.PvP) + " could not be spawned; its crew plays on another ship.");
+                    if (ships[slot] == null)
+                        Notice.ShowAll(FleetSlots.Name(slot, plan.Mode == FleetMode.PvP) + " could not be spawned; its crew plays on another ship with room (or waits for a free place).");
                 }
                 // Teams confirmed in the hub stay: nobody waits on a team screen, everyone spawns aboard their team's ship.
                 bool pvp = plan.Mode == FleetMode.PvP;

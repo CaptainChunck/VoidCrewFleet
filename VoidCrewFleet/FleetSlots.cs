@@ -19,14 +19,11 @@ namespace VoidCrewFleet
         /// <summary>The most ships a mission can have (3 per team in Fleet Battle).</summary>
         public const int MaxSlots = 6;
 
-        /// <summary>The most ships in a co-op mission.</summary>
-        public const int MaxCoopShips = 3;
+        /// <summary>The most ships in a co-op mission (the crew rules' number: CrewRules.MaxCoopShips).</summary>
+        public const int MaxCoopShips = CrewRules.MaxCoopShips;
 
         /// <summary>The most ships per team in Fleet Battle.</summary>
         public const int MaxShipsPerTeam = 3;
-
-        /// <summary>The most players one ship's crew may have.</summary>
-        public const int MaxCrewPerShip = 8;
 
         /// <summary>A slot's team in a team match (0 BLUE, 1 RED); 0 for every ship outside one.</summary>
         public static int TeamOf(int slot, bool teamMatch)

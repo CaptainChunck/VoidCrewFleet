@@ -65,7 +65,10 @@ namespace VoidCrewFleet
     /// - a player who comes back too late plays again on their own team when it has a free place none of their team waits
     ///   for (on their own ship when it has room, else on the team's ship with the smallest crew), else waits on their team;
     /// - a waiting player who leaves keeps their place in line for the hold time; after that they are forgotten.
-    /// Co-op: nobody waits; a newcomer joins the living ship with the smallest crew.
+    /// Co-op: a newcomer joins the living ship with the smallest crew while one has room (CrewRules.MaxCrew); when every crew
+    /// is full they wait (on team 0) and free places go to the waiting players, the longest waiting first. A player who comes
+    /// back returns to their ship; one whose place was given up meanwhile only while it has room, else another ship with room,
+    /// else they wait.
     /// Times are the server's clock in milliseconds, an int that wraps around: they are only ever compared by their
     /// difference (Elapsed), which stays right across the wrap.
     /// </summary>
@@ -150,13 +153,12 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// Puts a player on a living ship of their team: their own when it lives (unless their place on it was given up and,
-        /// in a team match, its crew is full), else the one with the smallest crew (with room in a team match). False when
-        /// there is none.
+        /// Puts a player on a living ship of their team: their own when it lives (unless their place on it was given up and its
+        /// crew is full), else the one with the smallest crew that has room (CrewRules.MaxCrew). False when there is none.
         /// </summary>
         private static bool Seat(List<RosterSeat> seats, RosterSeat seat, IList<int> aliveSlots, bool teamMatch)
         {
-            int limit = teamMatch ? CrewRules.MaxCrew : int.MaxValue;
+            const int limit = CrewRules.MaxCrew;
             List<RosterSeat> others = seats.Where(s => s != seat).ToList();
             // A player back too late finds their place given away: their own ship only when it still has room.
             bool own = seat.Slot >= 0 && aliveSlots.Contains(seat.Slot) && (!teamMatch || seat.Slot % 2 == seat.Team) &&
@@ -179,6 +181,12 @@ namespace VoidCrewFleet
             bool red = HasPlace(seats, 1, aliveSlots, except);
             if (blue && red) return Active(seats.Where(s => s != except), 1) < Active(seats.Where(s => s != except), 0) ? 1 : 0;
             return blue ? 0 : (red ? 1 : -1);
+        }
+
+        /// <summary>Co-op: whether anyone other than this player waits in the room for a place (any free place is theirs first).</summary>
+        private static bool AnyWaiting(List<RosterSeat> seats, RosterSeat except)
+        {
+            return seats.Any(s => s != except && !s.Away && s.State == CrewState.Waiting);
         }
 
         /// <summary>Whether a waiting player in the room could take a free place now (their team's, or any if they have none).</summary>
@@ -223,8 +231,10 @@ namespace VoidCrewFleet
                 seats.Add(seat);
                 if (!teamMatch)
                 {
+                    // Co-op: behind the players already waiting (any free place is theirs first), else on the smallest crew with
+                    // room; with every crew full they wait.
                     seat.Team = 0;
-                    if (!Seat(seats, seat, aliveSlots, false)) seat.State = CrewState.Waiting;
+                    if (!AnyWaiting(seats, seat)) Seat(seats, seat, aliveSlots, false);
                     return seat;
                 }
                 // A newcomer gets in line behind the waiting players who could take a free place (FillSeats gives it to them).
@@ -242,13 +252,19 @@ namespace VoidCrewFleet
             seat.Name = name;
             seat.Away = false;
             if (seat.State == CrewState.Dead) return seat;
-            if (!teamMatch)
-            {
-                if (!Seat(seats, seat, aliveSlots, false)) seat.State = CrewState.Waiting;
-                return seat;
-            }
             // Back in line, where they were: FillSeats gives them a place in their turn.
             if (seat.State == CrewState.Waiting) return seat;
+            if (!teamMatch)
+            {
+                // Co-op: back on their ship, whose place was kept for them. Back too late, they take the first ship with room
+                // (their own first) unless others wait for a place already; otherwise they wait too.
+                if ((!seat.Expired || !AnyWaiting(seats, seat)) && Seat(seats, seat, aliveSlots, false)) return seat;
+                seat.State = CrewState.Waiting;
+                seat.Slot = -1;
+                seat.Expired = false;
+                seat.WaitingSince = now;
+                return seat;
+            }
             bool held = !seat.Expired;
             bool ownWaiting = seats.Any(s => s != seat && !s.Away && s.State == CrewState.Waiting && s.Team == seat.Team);
             if (held || (seat.Team >= 0 && !ownWaiting && HasPlace(seats, seat.Team, aliveSlots, seat)))
@@ -267,7 +283,7 @@ namespace VoidCrewFleet
             return seat;
         }
 
-        /// <summary>A player left the room: their place is held (PvP) or kept for their return (co-op).</summary>
+        /// <summary>A player left the room: their place is held for their return (until ExpireHolds gives it up).</summary>
         public static void Leave(List<RosterSeat> seats, string id, int now)
         {
             RosterSeat seat = seats.FirstOrDefault(s => s.Id == id);
@@ -289,13 +305,23 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// Free places go to the waiting players in the room: each team's own waiters first, then the waiters without a team
-        /// one at a time, each to the team with fewer active players (BLUE on a tie); the longest waiting first. True when
-        /// anyone got a place.
+        /// Free places go to the waiting players in the room, the longest waiting first. A team match: each team's own waiters
+        /// first, then the waiters without a team one at a time, each to the team with fewer active players (BLUE on a tie).
+        /// Co-op: each to the living ship with the smallest crew that has room. True when anyone got a place.
         /// </summary>
-        public static bool FillSeats(List<RosterSeat> seats, IList<int> aliveSlots, int now)
+        public static bool FillSeats(List<RosterSeat> seats, IList<int> aliveSlots, int now, bool teamMatch = true)
         {
             bool changed = false;
+            if (!teamMatch)
+            {
+                while (true)
+                {
+                    RosterSeat next = LongestWaiting(seats, 0, now);
+                    if (next == null || !Seat(seats, next, aliveSlots, false)) break;
+                    changed = true;
+                }
+                return changed;
+            }
             for (int team = 0; team < 2; team++)
             {
                 while (true)

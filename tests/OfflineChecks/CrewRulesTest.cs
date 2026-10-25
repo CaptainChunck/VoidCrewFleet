@@ -3,8 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using VoidCrewFleet;
 
-// Offline tests for the crew and reconnect rules (CrewRules.cs, RosterRules.cs), which have nothing of the game in them:
-// they are compiled together with this file and run here. Run it with tests\build-and-test.ps1.
+// Offline tests for the crew and reconnect rules (CrewRules.cs, RosterRules.cs) and for when the host puts its crews and
+// lock back into the room (RoomCopyCheck.cs), which have nothing of the game in them: they are compiled together with
+// this file and run here. Run it with tests\build-and-test.ps1.
 internal static class CrewRulesTest
 {
     private static int _checks;
@@ -50,6 +51,7 @@ internal static class CrewRulesTest
         CrewRulesChecks();
         CrewListChecks();
         RosterChecks();
+        RoomCopyChecks();
         Console.WriteLine(_failures == 0 ? "CREW RULES PASSED (" + _checks + ")" : "CREW RULES FAILED: " + _failures + " of " + _checks);
         return _failures == 0 ? 0 : 1;
     }
@@ -307,10 +309,114 @@ internal static class CrewRulesTest
         Put(crews, 3, 4, 14);
         Equal(-1, CrewRules.PlaceFor(crews, Players(18), new List<int> { 0, 1, 3 }, true), "PvP: no place when the smaller team is full");
 
-        // Co-op has no such limit here (a mission adds ships for a big room): a full ship still takes one when all are.
+        // Co-op has the same limit: a full ship takes nobody else (who finds every crew full waits for a free place).
         crews = new Dictionary<int, CrewEntry>();
         Put(crews, 0, 8, 1);
-        Equal(0, CrewRules.PlaceFor(crews, Players(9), new List<int> { 0 }, false), "co-op: the only ship, full or not");
+        Equal(-1, CrewRules.PlaceFor(crews, Players(9), new List<int> { 0 }, false), "co-op: a full ship takes nobody else");
+        Equal(1, CrewRules.PlaceFor(crews, Players(9), new List<int> { 0, 1 }, false), "co-op: the ship with room does");
+
+        // PvP as before: a 3v3 with 48 players seats everyone; 17 players in a 1v1 still need more ships per team.
+        List<int> fortyEight = Players(48);
+        Dictionary<int, CrewEntry> full3v3 = CrewRules.Balance(new Dictionary<int, CrewEntry>(), fortyEight, 6, true);
+        Equal(48, full3v3.Count, "PvP 3v3, 48 players: everyone has a ship");
+        Check(CrewRules.CheckTeams(full3v3, fortyEight, 6, Name) == null, "PvP 3v3, 48 players: can be confirmed");
+
+        CoopCapChecks();
+    }
+
+    /// <summary>Players numbered first, first + 1, ... on a co-op ship.</summary>
+    private static void PutCoop(Dictionary<int, CrewEntry> crews, int slot, int count, int first)
+    {
+        for (int actor = first; actor < first + count; actor++) crews[actor] = CrewEntry.Play(actor, 0, slot);
+    }
+
+    /// <summary>
+    /// Co-op: 8 a ship there too, and three ships seat 24 at most. Picking, AUTO-BALANCE, late joiners and the mission's
+    /// added ships all follow it; with more players than the ships take, confirming is refused with what helps.
+    /// </summary>
+    private static void CoopCapChecks()
+    {
+        var three = new List<int> { 0, 1, 2 };
+        Equal(24, CrewRules.CoopSeats, "co-op seats 24");
+
+        // 36 players, nobody picked: AUTO-BALANCE fills the three ships with 8 each and leaves 12 without a ship.
+        List<int> players = Players(36);
+        Dictionary<int, CrewEntry> balanced = CrewRules.Balance(new Dictionary<int, CrewEntry>(), players, 3, false);
+        foreach (int slot in three) Equal(8, CrewRules.CrewOf(balanced, players, slot), "co-op 36 players, auto-balanced: ship " + (slot + 1) + " has 8");
+        Equal(24, balanced.Count, "co-op 36 players, auto-balanced: 24 have a ship");
+        string why = CrewRules.CheckCrews(balanced, players, 3, Name);
+        Check(why != null && why.Contains("FLEET BATTLE") && why.Contains("24"), "co-op 36 players: confirming says co-op takes 24 (" + why + ")");
+
+        // 36 players, 24 picked as the lobby screen allows (8 a ship): AUTO-BALANCE moves nobody, and the 12 others wait.
+        var picks = new Dictionary<int, CrewEntry>();
+        for (int actor = 1; actor <= 24; actor++) picks[actor] = CrewEntry.Play(actor, 0, (actor - 1) % 3);
+        Equal(8, CrewRules.MaxPerShip(36, 3, false), "co-op 36 players: a ship takes 8 picks");
+        Check(CrewRules.CanJoin(picks, players, 25, 0, 3, false, Name, Team) != null, "co-op 36 players: a 25th pick is refused");
+        Dictionary<int, CrewEntry> kept = CrewRules.Balance(picks, players, 3, false);
+        Check(Enumerable.Range(1, 24).All(a => kept[a].Slot == picks[a].Slot), "co-op 36 players: the 24 picks stay");
+        Check(Enumerable.Range(25, 12).All(a => !kept.ContainsKey(a)), "co-op 36 players: the 12 others wait");
+
+        // Every room from 25 to 48 players (a one-ship mission adds three ships): 8 on every ship, the rest wait, and
+        // confirming says why.
+        for (int count = 25; count <= 48; count++)
+        {
+            List<int> room = Players(count);
+            Dictionary<int, CrewEntry> crews = CrewRules.Balance(new Dictionary<int, CrewEntry>(), room, 3, false);
+            Check(three.All(s => CrewRules.CrewOf(crews, room, s) == CrewRules.MaxCrew), "co-op " + count + " players: 8 on every ship");
+            Equal(CrewRules.CoopSeats, crews.Count, "co-op " + count + " players: 24 have a ship");
+            string reason = CrewRules.CheckCrews(crews, room, 3, Name);
+            Check(reason != null && reason == CrewRules.CoopOverflow(count, 3), "co-op " + count + " players: confirming is refused with the reason");
+            string waiting = CrewRules.CoopWaiting(count, 3);
+            int over = count - CrewRules.CoopSeats;
+            Check(waiting != null && waiting.Contains(over + (over == 1 ? " player waits" : " players wait")), "co-op " + count + " players: " + over + " wait (" + waiting + ")");
+        }
+
+        // 25 players with everyone on a ship, the host having moved 9 onto one: still the reason that helps, not "9 players".
+        List<int> twentyFive = Players(25);
+        var crowded = new Dictionary<int, CrewEntry>();
+        PutCoop(crowded, 0, 9, 1);
+        PutCoop(crowded, 1, 8, 10);
+        PutCoop(crowded, 2, 8, 18);
+        Equal(CrewRules.CoopOverflow(25, 3), CrewRules.CheckCrews(crowded, twentyFive, 3, Name), "co-op 25 players, one ship crowded: confirming says co-op takes 24");
+
+        // 24 on three ships: everyone has a place and the crews can be confirmed.
+        List<int> twentyFour = Players(24);
+        Dictionary<int, CrewEntry> seated = CrewRules.Balance(new Dictionary<int, CrewEntry>(), twentyFour, 3, false);
+        Equal(24, seated.Count, "co-op 24 players: everyone has a ship");
+        Check(CrewRules.CheckCrews(seated, twentyFour, 3, Name) == null, "co-op 24 players: can be confirmed");
+        Check(CrewRules.CoopOverflow(24, 3) == null && CrewRules.CoopWaiting(24, 3) == null, "co-op 24 players on 3 ships: nobody waits");
+
+        // 17 on two ships: 16 have a place; confirming says a third ship helps. The mission's added ship seats everyone.
+        List<int> seventeen = Players(17);
+        Dictionary<int, CrewEntry> two = CrewRules.Balance(new Dictionary<int, CrewEntry>(), seventeen, 2, false);
+        Equal(16, two.Count, "co-op 17 players on 2 ships: 16 have a ship");
+        why = CrewRules.CheckCrews(two, seventeen, 2, Name);
+        Check(why != null && why.Contains("SHIPS at 3"), "co-op 17 players on 2 ships: confirming says a third ship helps (" + why + ")");
+        Dictionary<int, CrewEntry> added = CrewRules.Balance(two, seventeen, 3, false);
+        Equal(17, added.Count, "co-op 17 players, a ship added: everyone has a ship");
+        int[] sizes = three.Select(s => CrewRules.CrewOf(added, seventeen, s)).ToArray();
+        Check(sizes.Max() - sizes.Min() <= 1 && sizes.Max() <= CrewRules.MaxCrew, "co-op 17 players, a ship added: crews even (" + string.Join("/", sizes) + ")");
+        Check(CrewRules.CheckCrews(added, seventeen, 3, Name) == null, "co-op 17 players, a ship added: can be confirmed");
+
+        // After the crews are confirmed: a late joiner waits while every crew is full, and gets the place a leaver frees.
+        var confirmed = new Dictionary<int, CrewEntry>();
+        PutCoop(confirmed, 0, 8, 1);
+        PutCoop(confirmed, 1, 8, 9);
+        PutCoop(confirmed, 2, 8, 17);
+        Equal(-1, CrewRules.PlaceFor(confirmed, Players(25), three, false), "co-op: a late joiner finds every crew full");
+        confirmed.Remove(12);
+        List<int> afterLeave = Players(25).Where(a => a != 12).ToList();
+        Equal(1, CrewRules.PlaceFor(confirmed, afterLeave, three, false), "co-op: a leaver's place goes to the late joiner");
+
+        // A one-ship mission's 9 to 24 players: the added ships take them all, 8 a ship at most.
+        for (int count = 9; count <= 24; count++)
+        {
+            List<int> room = Players(count);
+            int ships = (count + CrewRules.MaxCrew - 1) / CrewRules.MaxCrew;
+            Dictionary<int, CrewEntry> crews = CrewRules.Balance(new Dictionary<int, CrewEntry>(), room, ships, false);
+            Check(crews.Count == count && Enumerable.Range(0, ships).All(s => CrewRules.CrewOf(crews, room, s) <= CrewRules.MaxCrew),
+                "co-op " + count + " players on " + ships + " ships: everyone placed, 8 a ship at most");
+        }
     }
 
     // ---------------------------------------------------------------- RosterRules
@@ -459,7 +565,75 @@ internal static class CrewRulesTest
         Equal(-1, list[2].Slot, "a waiting player has no ship");
         Equal(CrewState.Waiting, list[2].State, "and is waiting");
 
+        CoopRosterChecks(now);
         QueueChecks(now);
+    }
+
+    /// <summary>Co-op in a mission: 8 a ship there too; who finds every crew full waits, and free places go to the longest waiting.</summary>
+    private static void CoopRosterChecks(int now)
+    {
+        var alive = new List<int> { 0, 1, 2 };
+        var seats = new List<RosterSeat>();
+        seats.AddRange(Crew("a", 0, 0, 8, 100));
+        seats.AddRange(Crew("b", 0, 1, 8, 200));
+        seats.AddRange(Crew("c", 0, 2, 8, 300));
+
+        // Three full crews: newcomers wait, on the fleet's one team, without a ship.
+        RosterSeat w1 = RosterRules.Arrive(seats, "W1", 1, "W1", alive, false, now);
+        Equal(CrewState.Waiting, w1.State, "co-op, every crew full: a newcomer waits");
+        Equal(0, w1.Team, "co-op: a waiting player is on the fleet's team");
+        Equal(-1, RosterRules.Crews(seats)[1].Slot, "co-op: a waiting player has no ship");
+        RosterSeat w2 = RosterRules.Arrive(seats, "W2", 2, "W2", alive, false, now + 10);
+        Equal(CrewState.Waiting, w2.State, "co-op: the next newcomer waits too");
+        Check(alive.All(s => seats.Count(x => x.Slot == s && x.State == CrewState.Playing) == CrewRules.MaxCrew), "co-op: no crew goes past 8");
+
+        // A player leaves: their place is held for the hold time, then it goes to who waited longest.
+        RosterRules.Leave(seats, "b0", now + 100);
+        Check(!RosterRules.FillSeats(seats, alive, now + 200, false), "co-op: a held place isn't given out");
+        Check(RosterRules.ExpireHolds(seats, now + 100 + Hold, Hold), "co-op: the hold runs out");
+        Check(RosterRules.FillSeats(seats, alive, now + 100 + Hold, false), "co-op: then the place is given out");
+        Equal(CrewState.Playing, w1.State, "co-op: to who waited longest");
+        Equal(1, w1.Slot, "co-op: on the ship with the free place");
+        Equal(CrewState.Waiting, w2.State, "co-op: the other one keeps waiting");
+
+        // Back too late, with every crew full again: they wait, behind the one already waiting.
+        RosterSeat b0 = RosterRules.Arrive(seats, "b0", 3, "b0", alive, false, now + 200 + Hold);
+        Equal(CrewState.Waiting, b0.State, "co-op: back too late to full crews, they wait");
+        Equal(-1, b0.Slot, "co-op: without a ship");
+        RosterRules.Leave(seats, "c0", now + 300 + Hold);
+        RosterRules.ExpireHolds(seats, now + 300 + 2 * Hold, Hold);
+        RosterSeat late = RosterRules.Arrive(seats, "N", 4, "N", alive, false, now + 300 + 2 * Hold);
+        Equal(CrewState.Waiting, late.State, "co-op: a newcomer doesn't take a free place others wait for");
+        RosterRules.FillSeats(seats, alive, now + 300 + 2 * Hold, false);
+        Equal(CrewState.Playing, w2.State, "co-op: the free place goes to who waited longest");
+        Equal(2, w2.Slot, "co-op: on the ship it is on");
+        Equal(CrewState.Waiting, b0.State, "co-op: the others keep waiting");
+        Equal(CrewState.Waiting, late.State, "co-op: the newcomer too");
+
+        // Back in time: their own ship, whose place was kept, full or not.
+        RosterRules.Leave(seats, "a0", now + 400 + 2 * Hold);
+        RosterSeat a0 = RosterRules.Arrive(seats, "a0", 5, "a0", alive, false, now + 500 + 2 * Hold);
+        Equal(CrewState.Playing, a0.State, "co-op: back within the hold, they play");
+        Equal(0, a0.Slot, "co-op: on their own ship");
+
+        // A waiting player who leaves and comes back keeps their place in line.
+        RosterRules.Leave(seats, "b0", now + 600 + 2 * Hold);
+        RosterSeat again = RosterRules.Arrive(seats, "b0", 6, "b0", alive, false, now + 700 + 2 * Hold);
+        Equal(CrewState.Waiting, again.State, "co-op: a waiting player who comes back waits again");
+        Equal(now + 200 + Hold, again.WaitingSince, "co-op: in their place in line");
+
+        // Room on a ship: a newcomer plays at once (the smallest crew); a lost ship's crew stays dead, the waiting get
+        // places only on the living ships.
+        var room = new List<RosterSeat>();
+        room.AddRange(Crew("a", 0, 0, 8, 100));
+        room.AddRange(Crew("b", 0, 1, 5, 200));
+        RosterSeat n = RosterRules.Arrive(room, "N", 1, "N", new List<int> { 0, 1 }, false, now);
+        Equal(CrewState.Playing, n.State, "co-op, a ship with room: a newcomer plays at once");
+        Equal(1, n.Slot, "co-op: on the ship with room");
+        RosterRules.ShipLost(room, 1);
+        RosterSeat m = RosterRules.Arrive(room, "M", 2, "M", new List<int> { 0 }, false, now + 10);
+        Equal(CrewState.Waiting, m.State, "co-op, the only living ship full: a newcomer waits");
+        Equal(CrewState.Dead, n.State, "co-op: the lost ship's crew stays dead");
     }
 
     private static void QueueChecks(int now)
@@ -639,5 +813,71 @@ internal static class CrewRulesTest
         RosterRules.FillSeats(line, new List<int> { 0, 1 }, now + 400 + 2 * Hold);
         Equal(CrewState.Playing, Seat(line, "W2").State, "the free place goes to who waited longer");
         Equal(CrewState.Waiting, Seat(line, "W1").State, "the forgotten one waits behind them");
+    }
+
+    // ---------------------------------------------------------------- RoomCopyCheck
+
+    /// <summary>When the host puts its own value of a room property back: only a difference that lasts, after its own write has come back.</summary>
+    private static void RoomCopyChecks()
+    {
+        // The host wrote at 100 s; ticks every 0.25 s. While the copy matches, nothing.
+        var check = new RoomCopyCheck();
+        Check(!check.PutBack(false, 100f, 110f, false), "room copy: a copy that matches stays");
+
+        // Its own write coming back: a difference within the echo time is no one else's.
+        check = new RoomCopyCheck();
+        bool early = false;
+        for (float now = 100f; now < 100f + RoomCopyCheck.EchoSeconds; now += 0.25f) early |= check.PutBack(true, 100f, now, false);
+        Check(!early, "room copy: no put-back while the host's own write may still be on its way");
+
+        // Someone else's write long after the host's: put back once it has lasted a second, not at the first sight.
+        check = new RoomCopyCheck();
+        Check(!check.PutBack(true, 100f, 200f, false), "room copy: a difference first seen isn't acted on yet");
+        Check(!check.PutBack(true, 100f, 200.5f, false), "room copy: nor half a second later");
+        Check(check.PutBack(true, 100f, 201f, false), "room copy: a second later it is put back");
+        // The host wrote its own again at 201 s: it waits for that write to come back before it looks again.
+        Check(!check.PutBack(true, 201f, 202.5f, false), "room copy: after a put-back, the echo time again");
+
+        // A long frame: the first look after it still sees the old copy, the next one the echo: nothing put back.
+        check = new RoomCopyCheck();
+        Check(!check.PutBack(true, 100f, 110f, false), "room copy: the first look after a long frame waits");
+        Check(!check.PutBack(false, 100f, 110.25f, false), "room copy: the echo arrives; nothing to put back");
+        Check(!check.PutBack(true, 100f, 110.5f, false), "room copy: a new difference starts its second again");
+
+        // Photon holding incoming messages (the host moving to a mission): nothing while held, nor for the echo time after.
+        check = new RoomCopyCheck();
+        bool whileHeld = false;
+        for (float now = 200f; now < 205f; now += 0.25f) whileHeld |= check.PutBack(true, 100f, now, true);
+        Check(!whileHeld, "room copy: no put-back while Photon holds incoming messages");
+        bool afterHeld = false;
+        for (float now = 205f; now < 205f + RoomCopyCheck.EchoSeconds - 0.25f; now += 0.25f) afterHeld |= check.PutBack(true, 100f, now, false);
+        Check(!afterHeld, "room copy: nor until the messages held up have had time to come in");
+        Check(!check.PutBack(true, 100f, 208.25f, false), "room copy: then a lasting difference starts its second");
+        Check(check.PutBack(true, 100f, 209.25f, false), "room copy: and is put back once it has lasted");
+
+        // 0.4.6's 3v3 test: the host's own write took longer than the echo time to come back while six ships spawned. Until
+        // the room has shown the host's value once, a difference is its write still on its way.
+        check = new RoomCopyCheck();
+        bool slowEcho = false;
+        for (float now = 100f; now < 115f; now += 0.25f) slowEcho |= check.PutBack(true, 100f, now, false);
+        Check(!slowEcho, "room copy: the host's own write coming back late is nobody else's");
+        Check(!check.PutBack(false, 100f, 115f, false), "room copy: the late echo arrives; nothing to put back");
+        // Once it has come back, someone else's write is put back after the echo time and a second.
+        Check(!check.PutBack(true, 100f, 140f, false), "room copy: after the echo, another write is first seen");
+        Check(check.PutBack(true, 100f, 141f, false), "room copy: and put back once it has lasted a second");
+
+        // Its own write never showing in the room (someone wrote over it before it came back): put back after NoEchoSeconds.
+        check = new RoomCopyCheck();
+        bool beforeTimeout = false;
+        for (float now = 300f; now < 300f + RoomCopyCheck.NoEchoSeconds; now += 0.25f) beforeTimeout |= check.PutBack(true, 300f, now, false);
+        Check(!beforeTimeout, "room copy: no put-back while the host's write may still come back");
+        Check(!check.PutBack(true, 300f, 300f + RoomCopyCheck.NoEchoSeconds + 0.25f, false), "room copy: after that, a lasting difference starts its second");
+        Check(check.PutBack(true, 300f, 300f + RoomCopyCheck.NoEchoSeconds + 1.25f, false), "room copy: and is put back");
+
+        // A new write by the host starts the wait for its echo again.
+        check = new RoomCopyCheck();
+        Check(!check.PutBack(false, 400f, 401f, false), "room copy: the host's write came back");
+        Check(!check.PutBack(true, 450f, 454f, false), "room copy: a newer write of the host's isn't back yet: its own");
+        Check(!check.PutBack(true, 450f, 455f, false), "room copy: still waiting for that one");
     }
 }

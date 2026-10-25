@@ -13,6 +13,7 @@ using CG.Ship.Hull;
 using CG.Ship.Modules;
 using CG.Ship.Object;
 using CG.Space;
+using CG.Utils;
 using Gameplay.Carryables;
 using Gameplay.Enhancements;
 using Gameplay.Power;
@@ -43,6 +44,8 @@ namespace VoidCrewFleet
     ///   asked by a boarder who is alive, aboard that ship and next to it.
     /// - Whoever owns a seat (the helm, a turret, any other) or a socket of the ship refuses enemy players who ask for it or
     ///   its item, and every client ignores an enemy taking over the ship's parts or the items in its sockets.
+    /// - The host refuses to build, upgrade or take apart a module of the ship for a player outside its team, and every
+    ///   client ignores a module removal that the host didn't send.
     /// </summary>
     internal static class PvpBoarding
     {
@@ -823,6 +826,105 @@ namespace VoidCrewFleet
         {
             if (socket == null || socket.GetComponentInParent<CarryableObject>() != null) return null;
             return FleetShips.OwnerOf(socket);
+        }
+
+        // ---------------------------------------------------------------- building and taking apart the ship's modules
+
+        /// <summary>
+        /// Taking a module apart: a player's game asks the host (the build controller's network call), and the host starts it
+        /// for any player, for any module, wherever they are. A player who isn't on the module's ship's team is refused (a
+        /// modified game; an unmodified one can't reach the other team's modules, whose interactions are blocked above).
+        /// </summary>
+        [GamePatch(Feature, "CG.Client.Player.Interactions.Build.BuildProcessController", "DeconstructModuleInternal", PatchKind.Prefix, Optional = true)]
+        private static bool DeconstructRequestPrefix(int moduleViewId, PhotonMessageInfo info)
+        {
+            return ModuleRequest(moduleViewId, info, "taking apart a module");
+        }
+
+        /// <summary>Upgrading a module: the same as taking it apart (it is taken off its socket and a better one built).</summary>
+        [GamePatch(Feature, "CG.Client.Player.Interactions.Build.BuildProcessController", "UpgradeModuleInternal", PatchKind.Prefix, Optional = true)]
+        private static bool UpgradeRequestPrefix(int moduleViewId, PhotonMessageInfo info)
+        {
+            return ModuleRequest(moduleViewId, info, "upgrading a module");
+        }
+
+        private static bool ModuleRequest(int moduleViewId, PhotonMessageInfo info, string what)
+        {
+            if (!PvpCombat.Active) return true;
+            try
+            {
+                CellModule module = ObjectRegistry.FindByPhotonView<CellModule>(moduleViewId);
+                return module == null || MayBuildOn(info.Sender, FleetShips.OwnerOf(module), what, module.name);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking a request to work on a module", e);
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Building a module from a box in one of the ship's build sockets: the host's own game asks for it whenever a box lands
+        /// in a socket (for whoever put it there; the socket rules above keep the other team from putting one in), so only a
+        /// request another player sent is checked: refused to a player who isn't on the socket's ship's team.
+        /// </summary>
+        [GamePatch(Feature, "CG.Client.Player.Interactions.Build.BuildProcessController", "ConstructModuleInternal", PatchKind.Prefix, Optional = true)]
+        private static bool ConstructRequestPrefix(int buildBoxViewID, PhotonMessageInfo info)
+        {
+            if (!PvpCombat.Active) return true;
+            try
+            {
+                BuildBox box = ObjectRegistry.FindByPhotonView<BuildBox>(buildBoxViewID);
+                return box == null || MayBuildOn(info.Sender, SocketShip(box.Carrier as CarryablesSocket), "building a module", box.name);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking a request to build a module", e);
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Whether the host carries out a request to build, upgrade or take apart a module of this ship: always from the host
+        /// itself (its own game asks for every module built from a box), and from a player of the ship's own team. Anyone else
+        /// (the other team, a player without a team, or a request replayed from the room after its sender left: the game
+        /// never keeps these in the room) is refused, the first time of each kind logged. A module on no player ship goes
+        /// through.
+        /// </summary>
+        private static bool MayBuildOn(Photon.Realtime.Player sender, PlayerControlledShip ship, string what, string thing)
+        {
+            int actor = sender != null ? sender.ActorNumber : -1;
+            if (sender != null && (actor == FleetShips.LocalActor || Net.FromHost(actor))) return true;
+            int slot = FleetShips.Slot(ship);
+            if (slot < 0 || (sender != null && FleetShips.TeamOfActor(actor) == FleetShips.TeamOfSlot(slot))) return true;
+            string who = sender != null ? "player " + actor + ", who is not on its team" : "a player who has left the room";
+            Log.InfoOnce("pvp refused " + what + " " + actor, "PvP: refused " + what + " (" + thing + ") of " + FleetShips.Describe(ship) + " asked by " + who +
+                                                             " (further ones are only logged in verbose mode).");
+            Log.Verbose("PvP: refused " + what + " (" + thing + ") of " + FleetShips.Describe(ship) + " asked by " + who + ".");
+            return false;
+        }
+
+        /// <summary>
+        /// A module taken off its ship (PlayerControlledShip.NotifyRemoveModule): only the host's game sends it, to everyone,
+        /// when its work on a socket takes a module apart or upgrades it (that work runs on the host alone), and every game then
+        /// takes the module off the ship, the host's destroying it. In PvP one any other player sent (a modified game), or one
+        /// replayed from the room after its sender left, is ignored on every player's game, whatever their team: it would
+        /// remove any module from anywhere, even one the ship started with, which can't be taken apart. When RpcSender isn't
+        /// in, it counts as the game would count it.
+        /// </summary>
+        [GamePatch(Feature, "CG.Space.PlayerControlledShip", "NotifyRemoveModule", PatchKind.Prefix, Optional = true)]
+        private static bool RemoveModulePrefix(PlayerControlledShip __instance)
+        {
+            if (!PvpCombat.Active || __instance == null) return true;
+            PhotonView view = __instance.photonView;
+            int actor;
+            bool known = RpcSender.Of(view, out actor);
+            if (known ? actor == FleetShips.LocalActor || Net.FromHost(actor) : !RpcSender.FromAbsentPlayer(view)) return true;
+            string who = known ? "player " + actor : "a player who has left the room";
+            Log.InfoOnce("pvp refused module removal " + actor, "PvP: ignored a module removal on " + FleetShips.Describe(__instance) + " sent by " + who +
+                                                               ": only the host's game sends one (further ones are only logged in verbose mode).");
+            Log.Verbose("PvP: ignored a module removal on " + FleetShips.Describe(__instance) + " sent by " + who + ".");
+            return false;
         }
 
         /// <summary>The first refusal of each kind to each player is logged; the rest only in verbose mode.</summary>

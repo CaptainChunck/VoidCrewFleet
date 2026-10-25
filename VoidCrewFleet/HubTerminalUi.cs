@@ -493,7 +493,7 @@ namespace VoidCrewFleet
                 }
                 else if (ships < 2)
                 {
-                    _hint.text = "One ship, up to " + FleetSlots.MaxCrewPerShip + " players. " +
+                    _hint.text = "One ship, up to " + CrewRules.MaxCrew + " players. " +
                                  (host ? "SHIPS adds a second or third ship." : "The host can add a second or third ship.");
                 }
                 else

@@ -31,7 +31,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Output "== Building the crew rules tests"
-& $csc -nologo -target:exe -platform:x64 "-out:$(Join-Path $out 'CrewRulesTest.exe')" (Join-Path $PSScriptRoot "OfflineChecks\CrewRulesTest.cs") (Join-Path $root "VoidCrewFleet\CrewRules.cs") (Join-Path $root "VoidCrewFleet\RosterRules.cs")
+& $csc -nologo -target:exe -platform:x64 "-out:$(Join-Path $out 'CrewRulesTest.exe')" (Join-Path $PSScriptRoot "OfflineChecks\CrewRulesTest.cs") (Join-Path $root "VoidCrewFleet\CrewRules.cs") (Join-Path $root "VoidCrewFleet\RosterRules.cs") (Join-Path $root "VoidCrewFleet\RoomCopyCheck.cs")
 if ($LASTEXITCODE -ne 0) {
     Write-Output "CREW RULES TESTS BUILD FAILED"
     exit 1

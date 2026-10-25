@@ -56,6 +56,12 @@ namespace VoidCrewFleet
         /// <summary>The most players one ship's crew may have.</summary>
         public const int MaxCrew = 8;
 
+        /// <summary>The most ships a co-op mission has.</summary>
+        public const int MaxCoopShips = 3;
+
+        /// <summary>The most players a co-op mission seats: a full crew on each of its ships. Anyone past that waits for a free place.</summary>
+        public const int CoopSeats = MaxCoopShips * MaxCrew;
+
         public static int TeamOf(int slot, bool teamMatch)
         {
             return slot < 0 ? -1 : (teamMatch ? slot % 2 : 0);
@@ -219,14 +225,14 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// Where a player without a ship goes: in a team match the smaller team (or the team given), then its smallest crew
-        /// among the living ships that has room (MaxCrew), and on a tie the other team's when the smaller one is full;
-        /// otherwise the smallest crew. -1 when no ship is left, or in a team match when no crew has room for them without
-        /// putting the teams more than one apart (they then wait for a free place, as in a match).
+        /// Where a player without a ship goes: the smallest crew among the living ships that has room (MaxCrew); in a team
+        /// match the smaller team's (or the team given's), and on a tie the other team's when the smaller one is full. -1 when
+        /// no crew has room for them (in a team match, none without putting the teams more than one apart): they then wait for
+        /// a free place, in co-op as in a match. Co-op seats CoopSeats players at most.
         /// </summary>
         public static int PlaceFor(IDictionary<int, CrewEntry> crews, ICollection<int> players, ICollection<int> aliveSlots, bool teamMatch, int team = -1)
         {
-            if (!teamMatch) return SmallestCrew(crews, players, aliveSlots);
+            if (!teamMatch) return SmallestCrew(crews, players, aliveSlots, MaxCrew);
             if (team >= 0) return SmallestCrew(crews, players, aliveSlots.Where(s => s % 2 == team), MaxCrew);
             int smaller = SmallerTeam(crews, players);
             int slot = SmallestCrew(crews, players, aliveSlots.Where(s => s % 2 == smaller), MaxCrew);
@@ -238,10 +244,9 @@ namespace VoidCrewFleet
         /// <summary>
         /// Everyone in the room on a ship: picks on living ships stay, the rest (and anyone whose ship isn't there) go to the
         /// smallest crew (in a team match, their team's when they have one, else the smaller team's). Spectators stay as they are.
-        /// In a team match nobody is put on a full crew (MaxCrew): who finds no room stays without a ship, and the roster has
-        /// them wait for a free place. A ship picked by more than a full crew (players who joined while every ship was full)
-        /// hands its latest joiners to the smallest crew with room, of their team in a team match: a ship the mission added
-        /// for them, for example.
+        /// Nobody is put on a full crew (MaxCrew): who finds no room stays without a ship, and the roster has them wait for a
+        /// free place (co-op too). A ship picked by more than a full crew (the host moved players there) hands its latest
+        /// joiners to the smallest crew with room, of their team in a team match: a ship the mission added for them, for example.
         /// </summary>
         public static Dictionary<int, CrewEntry> PlaceEveryone(IDictionary<int, CrewEntry> picks, IList<int> players, ICollection<int> aliveSlots, bool teamMatch)
         {
@@ -297,10 +302,13 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// Null when the picks can start a co-op mission: everyone placed and no crew over the limit; with at least as many
-        /// players as ships, every ship crewed (with fewer players a ship may fly empty). Otherwise why not.
+        /// players as ships, every ship crewed (with fewer players a ship may fly empty). Otherwise why not, and first, with
+        /// more players than the ships' crews take, what helps (CoopOverflow), as moving players can't.
         /// </summary>
         public static string CheckCrews(IDictionary<int, CrewEntry> crews, ICollection<int> players, int ships, Func<int, string> shipName)
         {
+            string overflow = CoopOverflow(players.Count, ships);
+            if (overflow != null) return overflow;
             int unplaced = players.Count(a => !crews.ContainsKey(a) || crews[a].State != CrewState.Playing || crews[a].Slot < 0 || crews[a].Slot >= ships);
             if (unplaced > 0) return unplaced + (unplaced == 1 ? " player hasn't" : " players haven't") + " picked a ship yet.";
             for (int slot = 0; slot < ships; slot++)
@@ -310,6 +318,33 @@ namespace VoidCrewFleet
                 if (crew > MaxCrew) return shipName(slot) + " has " + crew + " players; a ship takes " + MaxCrew + " at most.";
             }
             return null;
+        }
+
+        /// <summary>
+        /// Co-op: why this many players can't all have a place on this many ships (MaxCrew a ship), and what helps; null when
+        /// they can. Up to CoopSeats, three ships give everyone a place; past that co-op can't take them all.
+        /// </summary>
+        public static string CoopOverflow(int players, int ships)
+        {
+            if (players <= ships * MaxCrew) return null;
+            if (players > CoopSeats)
+                return players + " players are more than co-op takes (" + MaxCoopShips + " ships of " + MaxCrew + ", " + CoopSeats + " players at most): " +
+                       "choose FLEET BATTLE on the galaxy map, or play co-op with " + CoopSeats + " at most.";
+            return players + " players are more than " + ships + (ships == 1 ? " ship takes" : " ships take") + " (" + MaxCrew + " a ship): with SHIPS at " +
+                   MaxCoopShips + ", everyone has a place.";
+        }
+
+        /// <summary>
+        /// Co-op, as a mission starts: the notice when some of this many players find no place on this many ships (MaxCrew a
+        /// ship; they joined after the crews were confirmed, or during the countdown): they wait for a free one. Null when
+        /// everyone has a place.
+        /// </summary>
+        public static string CoopWaiting(int players, int ships)
+        {
+            int waiting = players - ships * MaxCrew;
+            if (waiting <= 0) return null;
+            return players + " players are more than " + ships + (ships == 1 ? " ship takes" : " ships take") + " (" + MaxCrew + " a ship): " + waiting +
+                   (waiting == 1 ? " player waits" : " players wait") + " for a free place, watching until one opens.";
         }
 
         /// <summary>The ships nobody crews (co-op with fewer players than ships).</summary>

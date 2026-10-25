@@ -30,8 +30,9 @@ namespace VoidCrewFleet
 {
     /// <summary>
     /// Spectators of a fleet mission (co-op or Fleet Battle). A player whose ship was destroyed (DEAD) is never re-cloned this
-    /// mission: once their character dies they watch; a player who came back to a match whose team has no free seat
-    /// (WAITING, PvP) spawns when one opens. Both watch from a third-person camera around a ship:
+    /// mission: once their character dies they watch; a player who came back to a match whose team has no free seat, or who
+    /// found every crew full (WAITING; in co-op too, where all ships are their team's), spawns when one opens. Both watch from
+    /// a third-person camera around a ship:
     /// - Q / E (also the left and right mouse buttons, the arrow keys or a gamepad's shoulder buttons) switch ships; the
     ///   mouse (or the right stick) looks around; the wheel zooms. None of them while the player types in the text chat.
     /// - A dead player watches every remaining ship, their own team's first; a waiting player only their own team's ships,
@@ -665,7 +666,7 @@ namespace VoidCrewFleet
             if (shipPlan != null && !shipPlan.Type.IsNull) watched += " (" + FleetSlots.TypeName(shipPlan.Type) + ")";
             _title.text = entry.State == CrewState.Dead
                 ? "YOUR SHIP IS LOST · WATCHING " + watched
-                : "WAITING FOR A PLACE" + (entry.Team >= 0 ? " ON THE " + PvpTeams.TeamName(entry.Team) + " TEAM" : "") + " · WATCHING " + watched;
+                : "WAITING FOR A PLACE" + (entry.Team >= 0 && FleetSession.IsPvP ? " ON THE " + PvpTeams.TeamName(entry.Team) + " TEAM" : "") + " · WATCHING " + watched;
             _hint.text = ships > 1 ? "Q / E: OTHER SHIP     MOUSE: LOOK AROUND     WHEEL: ZOOM" : "MOUSE: LOOK AROUND     WHEEL: ZOOM";
         }
 
@@ -791,7 +792,7 @@ namespace VoidCrewFleet
         /// be switched on for the host. The call goes through EnteredRoom, which raises the same event without a character.
         /// </summary>
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "SpawnPlayer", PatchKind.Transpiler, Optional = true)]
-        private static IEnumerable<CodeInstruction> EnteredRoomTranspiler(IEnumerable<CodeInstruction> instructions)
+        private static IEnumerable<CodeInstruction> EnteredRoomTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
         {
             int replaced = 0;
             foreach (CodeInstruction instruction in instructions)
@@ -808,7 +809,7 @@ namespace VoidCrewFleet
                 }
                 yield return instruction;
             }
-            if (replaced == 0) Log.Warn("Spectators: SpawnSystem.SpawnPlayer no longer passes a newcomer to the local character; the game may have changed.");
+            if (replaced == 0) Patcher.NothingReplaced(Feature, original, "passes a newcomer to the local character");
         }
 
         /// <summary>LocalPlayer.PlayerEnteredRoom, also for a host without a character (all it does is raise the Opsive event).</summary>

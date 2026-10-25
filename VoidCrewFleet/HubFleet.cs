@@ -40,8 +40,6 @@ namespace VoidCrewFleet
     {
         public const string Feature = "Two ships in the hub";
 
-        public const int MaxCrewPerShip = FleetSlots.MaxCrewPerShip;
-
         private const string KeyOn = "VCF_On";
         private const string KeyCount = "VCF_Count";
         private const string KeyPerTeam = "VCF_PerTeam";
@@ -721,9 +719,11 @@ namespace VoidCrewFleet
         /// <summary>
         /// Only the host starts a match, in every mission: the host sitting in the ready room starts it (the game's short
         /// countdown for "everyone is seated"); nobody else's seat counts. Co-op with several ships: nothing starts before
-        /// the host has confirmed the crews. FLEET BATTLE: nothing starts before the teams are confirmed. While no ship is
-        /// selected (BLUE 1 in FLEET BATTLE has no loadout), sitting down starts nothing: the game itself counts seats only
-        /// while a ship is selected, and starting without one fails half-way and leaves the hub unable to start anything.
+        /// the host has confirmed the crews. FLEET BATTLE: nothing starts before the teams are confirmed. One of the game's
+        /// own missions planned with one ship (it adds ships for the room's size) doesn't start with more players than co-op
+        /// seats (CrewRules.CoopSeats), as the planned fleets don't confirm crews for more. While no ship is selected (BLUE 1
+        /// in FLEET BATTLE has no loadout), sitting down starts nothing: the game itself counts seats only while a ship is
+        /// selected, and starting without one fails half-way and leaves the hub unable to start anything.
         /// Clients don't run their own countdown (it would count their own seat): they show the host's, which the game sends
         /// them.
         /// </summary>
@@ -755,6 +755,21 @@ namespace VoidCrewFleet
                         Notice.Show("Confirm the teams first (CONFIRM TEAMS on the team screen); then sit down here to start the match.");
                     }
                     return true;
+                }
+                if (PlannedMode == FleetMode.OneShip && !SavedRunChosen)
+                {
+                    // Co-op seats CrewRules.CoopSeats at most, on the three ships the mission would add.
+                    string tooMany = CrewRules.CoopOverflow(PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.PlayerCount : 0, FleetSlots.MaxCoopShips);
+                    if (tooMany != null)
+                    {
+                        playersInZoneCount = 0;
+                        if (Time.unscaledTime - _lastSeatNotice > 10f && HostSeatedInReadyRoom())
+                        {
+                            _lastSeatNotice = Time.unscaledTime;
+                            Notice.Show("This mission can't start: " + tooMany);
+                        }
+                        return true;
+                    }
                 }
                 HubShipManager manager = HubShipManager.Instance;
                 HubQuestManager quests = HubQuestManager.Instance;
@@ -1052,8 +1067,10 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// Host, just before the game leaves the hub for a mission: freeze the room's fleet choices into the mission. A co-op
-        /// mission with more players than its ships' crews take adds ships (and evens out the crews over them). Saved runs are
-        /// always one-ship missions (the game's save holds one ship).
+        /// mission with more players than its ships' crews take adds ships, three at most (and evens out the crews over them,
+        /// CrewRules.MaxCrew a ship); anyone left without a place (who joined after the crews were confirmed, or during the
+        /// countdown) waits for a free one, and everyone is told. Saved runs are always one-ship missions (the game's save
+        /// holds one ship).
         /// </summary>
         [HarmonyAfter(CustomizerLink.PluginGuid)]
         [GamePatch(Feature, "CG.GameLoopStateMachine.GameStates.GSIngame", "TransitionTo", PatchKind.Prefix)]
@@ -1074,10 +1091,10 @@ namespace VoidCrewFleet
                 int players = PhotonNetwork.PlayerList.Length;
                 if (mode != FleetMode.PvP && HostHasFleet)
                 {
-                    int needed = Mathf.Min(FleetSlots.MaxCoopShips, Mathf.CeilToInt(players / (float)MaxCrewPerShip));
+                    int needed = Mathf.Min(FleetSlots.MaxCoopShips, Mathf.CeilToInt(players / (float)CrewRules.MaxCrew));
                     if (needed > ships)
                     {
-                        Notice.ShowAll(players + " players is more than " + ships + (ships == 1 ? " ship's" : " ships'") + " crews of " + MaxCrewPerShip +
+                        Notice.ShowAll(players + " players is more than " + ships + (ships == 1 ? " ship's" : " ships'") + " crews of " + CrewRules.MaxCrew +
                                        ", so this mission uses " + needed + " ships.");
                         ships = needed;
                         mode = FleetMode.Coop;
@@ -1121,6 +1138,11 @@ namespace VoidCrewFleet
                 {
                     FleetSession.Attach(gameSession, null);
                     return;
+                }
+                if (!pvp)
+                {
+                    string waiting = CrewRules.CoopWaiting(players, plan.Ships.Count);
+                    if (waiting != null) Notice.ShowAll(waiting);
                 }
                 FleetSession.Attach(gameSession, plan);
                 var names = new StringBuilder();
