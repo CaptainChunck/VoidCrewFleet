@@ -592,8 +592,8 @@ namespace VoidCrewFleet
                     Log.Failure("[autotest] asking to take apart " + name, e);
                 }
                 float started = Time.unscaledTime;
-                while (Time.unscaledTime - started < wait && socket.InstalledModule == module) yield return new WaitForSeconds(1f);
-                if (socket.InstalledModule == module)
+                while (Time.unscaledTime - started < wait && StillIn(socket, module)) yield return new WaitForSeconds(1f);
+                if (StillIn(socket, module))
                 {
                     failed++;
                     Log.Error("[autotest] Deconstruct: FAILED on " + FleetShips.Describe(ship) + ", " + name + " is still in its slot after " + wait.ToString("0") +
@@ -629,6 +629,15 @@ namespace VoidCrewFleet
             }
             Log.Info("[autotest] Deconstruct: " + passed + " passed, " + failed + " failed.");
             _sequenceDone = true;
+        }
+
+        /// <summary>
+        /// Whether a module is still in its socket. Compared as the same object: once taken apart the module is destroyed and
+        /// the socket holds nothing, which Unity's == takes for equal (a destroyed object counts as null).
+        /// </summary>
+        private static bool StillIn(BuildSocket socket, CellModule module)
+        {
+            return ReferenceEquals(socket.InstalledModule, module) && module != null;
         }
 
         /// <summary>
