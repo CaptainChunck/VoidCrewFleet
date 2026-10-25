@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using CG.GameLoopStateMachine;
 using UnityEngine;
 
@@ -15,13 +16,23 @@ namespace VoidCrewFleet
         private const float PollSeconds = 0.25f;
 
         /// <summary>
-        /// A handler that fails this many times in a row, over at least <see cref="DropAfterSeconds"/>, is switched off for
-        /// the rest of the session: it would only throw again every time. The time keeps a few bad frames while a scene
-        /// changes from switching off per-frame work, which runs many times a second.
+        /// A handler that fails this many times in a row, over at least <see cref="DropAfterSeconds"/> of play, is switched off
+        /// until the game is next in play (a hub or mission loaded): it would only throw again every time. Failures only count
+        /// while the game is in play (its GSIngame state): a long loading screen or a teardown, where the game's objects come
+        /// and go, switches nothing off.
         /// </summary>
         private const int DropAfterFailures = 30;
 
         private const float DropAfterSeconds = 10f;
+
+        /// <summary>Whether the game is in play (GSIngame: the hub or a mission), not loading, tearing down or on its end screen.</summary>
+        private static bool _playing;
+
+        /// <summary>Goes up by one each time the game comes into play again: handlers switched off before get another chance.</summary>
+        private static int _playRound;
+
+        /// <summary>The game state last looked at (the same object while the state lasts).</summary>
+        private static object _state;
 
         private static readonly HandlerList FrameHandlers = new HandlerList("per-frame");
         private static readonly HandlerList SlowHandlers = new HandlerList("periodic");
@@ -68,9 +79,33 @@ namespace VoidCrewFleet
                 Net.StartListening();
                 Log.Info("The game has loaded; Void Crew Fleet is active.");
             }
+            WatchState();
             FleetProfiler.Frame();
             FrameHandlers.RunAll(Frame);
             RunSlow();
+        }
+
+        /// <summary>
+        /// Notes whether the game is in play, and each time it comes into play again. The state is named only when it changes
+        /// (compared by name, as in CheckReady).
+        /// </summary>
+        private static void WatchState()
+        {
+            object state;
+            try
+            {
+                GameStateMachine machine = GameStateMachine.Instance;
+                state = machine != null ? machine.CurrentState : null;
+            }
+            catch
+            {
+                state = null;
+            }
+            if (ReferenceEquals(state, _state)) return;
+            _state = state;
+            bool playing = state != null && state.GetType().Name == "GSIngame";
+            if (playing && !_playing) _playRound++;
+            _playing = playing;
         }
 
         private void LateUpdate()
@@ -121,8 +156,8 @@ namespace VoidCrewFleet
         /// <summary>
         /// An event's handlers, read again only when its subscriptions changed (subscribing makes a new delegate, so the same
         /// delegate always has the same handlers), and how each has been doing. Each runs on its own, so one failing doesn't
-        /// stop the rest; one that keeps failing is switched off and logged once, and stays off even if the event's
-        /// subscriptions change later.
+        /// stop the rest; one that keeps failing in play is switched off and logged, and stays off (even if the event's
+        /// subscriptions change) until the game is next in play, when it gets another chance.
         /// </summary>
         private sealed class HandlerList
         {
@@ -135,6 +170,9 @@ namespace VoidCrewFleet
             private readonly string _what;
 
             private readonly List<Action> _switchedOff = new List<Action>();
+
+            /// <summary>The play round (_playRound) the handlers were switched off in.</summary>
+            private int _round;
 
             private Action _source;
             private Action[] _handlers = None;
@@ -153,6 +191,18 @@ namespace VoidCrewFleet
             /// <summary>Brings the list up to date with the event's subscriptions; returns how many handlers it has.</summary>
             public int Read(Action work)
             {
+                if (_round != _playRound)
+                {
+                    // The game is in play again (a hub or mission loaded): what was switched off before runs again.
+                    _round = _playRound;
+                    if (_switchedOff.Count > 0)
+                    {
+                        Log.Warn(string.Join(", ", _switchedOff.Select(h => h.Method.DeclaringType.Name + "." + h.Method.Name).ToArray()) + " (" + _what +
+                                 " work, switched off after failing) runs again now that the game is in play again; it is switched off again if it keeps failing.");
+                        _switchedOff.Clear();
+                        _source = null;
+                    }
+                }
                 if (ReferenceEquals(work, _source)) return _handlers.Length;
                 _source = work;
                 var handlers = new List<Action>();
@@ -201,10 +251,18 @@ namespace VoidCrewFleet
                 }
             }
 
-            /// <summary>A handler failed: logged (Log.Failure keeps repeats short), and switched off once it keeps failing.</summary>
+            /// <summary>
+            /// A handler failed: logged (Log.Failure keeps repeats short), and switched off once it keeps failing in play. Out of
+            /// play (loading, teardown) the failure is only logged, and the count starts again.
+            /// </summary>
             private void Failed(int index, Exception e)
             {
                 Log.Failure(_operations[index], e);
+                if (!_playing)
+                {
+                    _failures[index] = 0;
+                    return;
+                }
                 float now = Time.unscaledTime;
                 if (_failures[index]++ == 0) _failingSince[index] = now;
                 int failures = _failures[index];
@@ -213,7 +271,7 @@ namespace VoidCrewFleet
                 _failures[index] = Off;
                 _switchedOff.Add(_handlers[index]);
                 Log.Error(_names[index] + " (" + _what + " work) has failed " + failures + " times in a row, for " + seconds.ToString("0") +
-                          " s, so it is switched off for the rest of the session; the rest of the plugin keeps running. " +
+                          " s, so it is switched off until the next hub or mission loads; the rest of the plugin keeps running. " +
                           "Please send BepInEx\\LogOutput.log with a bug report.");
             }
         }

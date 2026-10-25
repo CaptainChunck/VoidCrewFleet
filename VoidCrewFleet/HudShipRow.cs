@@ -6,8 +6,8 @@ namespace VoidCrewFleet
     /// <summary>
     /// One row in the style of the game's ship panel (top left), built like the panel's hull row from the game's own art: the
     /// diamond with the game's ship icon, the bar start, the plate with a bold and a regular label, and the value plate with
-    /// its pointed end. Used for the local player's team and ship (CrewBadge) and the other ships under the crew list
-    /// (CrewList).
+    /// its pointed end. Used for the local player's team and ship (CrewBadge). (The other ships' cards under the crew list
+    /// copy the hull row itself: HudHullRow, in ShipCards; they use this row's measurements.)
     /// </summary>
     internal sealed class HudShipRow
     {

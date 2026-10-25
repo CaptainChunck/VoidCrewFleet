@@ -117,6 +117,21 @@ namespace VoidCrewFleet
             return Applied.TryGetValue(feature, out count) && count > 0 && !Missing.ContainsKey(feature);
         }
 
+        /// <summary>
+        /// True when the feature is on and its patch method of this name (nameof the hook) went in, on at least one game
+        /// method: for a feature whose optional patches are alternatives, of which at least one must be in (ProgressionGuard).
+        /// </summary>
+        public static bool HookIn(string feature, string hook)
+        {
+            List<AppliedPatch> patched;
+            if (!IsReady(feature) || !Patched.TryGetValue(feature, out patched)) return false;
+            foreach (AppliedPatch patch in patched)
+            {
+                if (patch.Hook.Name == hook) return true;
+            }
+            return false;
+        }
+
         private static Harmony _harmony;
 
         /// <summary>The plugin's Harmony instance (null before ApplyAll).</summary>

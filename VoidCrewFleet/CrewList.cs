@@ -21,8 +21,10 @@ namespace VoidCrewFleet
     /// - in a fleet mission: the players on the local player's own ship (7 at most, CrewRules.MaxCrew), then the other ships'
     ///   cards (ShipCards).
     /// A list with more players than fit shows one row fewer and, in its place, the game's own key prompt for the whole list
-    /// (PlayerListPanel): [ for the left one (everyone, or BLUE), ] for the right one (RED), as set in the config. The game's
-    /// rows are only hidden or moved, so their voice and health updates carry on.
+    /// (PlayerListPanel): [ for the left one (everyone, or BLUE), ] for the right one (RED), as set in the config. With teams,
+    /// players on neither (who joined once the teams were confirmed and wait for a place) are in BLUE's whole list, and the
+    /// left prompt shows whenever there are any, with their count. The game's rows are only hidden or moved, so their voice and
+    /// health updates carry on.
     /// </summary>
     internal static class CrewList
     {
@@ -82,6 +84,9 @@ namespace VoidCrewFleet
         private static InputAction _leftKey;
         private static InputAction _rightKey;
         private static bool _preview;
+
+        /// <summary>Whether the whole list's window was made ahead of its first use (once, when a prompt first showed).</summary>
+        private static bool _windowPrepared;
 
         /// <summary>A few times a second.</summary>
         public static void Tick()
@@ -332,11 +337,16 @@ namespace VoidCrewFleet
                 if (!Order.Contains(actor)) Order.Add(actor);
             }
 
+            Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+            ICollection<int> inRoom = room != null ? (ICollection<int>)room.Players.Keys : new int[0];
             List<int> left;
             List<int> red = null;
             List<int> right = null;
             int leftPlayers = 0;
             int rightPlayers = 0;
+            // Teams: the players on neither team (who joined once they were confirmed and wait for a place), counted in the
+            // left prompt, which then always shows: BLUE's whole list has them.
+            int teamless = 0;
             if (mode == Mode.OwnShip)
             {
                 left = CrewRules.Listed(Order, crews, FleetShips.LocalActor, CrewRows);
@@ -345,7 +355,8 @@ namespace VoidCrewFleet
             {
                 List<int> blue = CrewRules.OfTeam(Order, crews, 0);
                 red = CrewRules.OfTeam(Order, crews, 1);
-                left = blue.GetRange(0, CrewRules.RowsShown(blue.Count, ListRows));
+                teamless = CrewRules.WithoutTeam(new List<int>(inRoom), crews).Count;
+                left = blue.GetRange(0, CrewRules.RowsShown(blue.Count, ListRows, teamless > 0));
                 right = red.GetRange(0, CrewRules.RowsShown(red.Count, ListRows));
                 leftPlayers = blue.Count;
                 rightPlayers = red.Count;
@@ -374,11 +385,10 @@ namespace VoidCrewFleet
                 foreach (int actor in Order) RowOfActor[actor].BringToFront();
             }
 
-            Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
-            ICollection<int> inRoom = room != null ? (ICollection<int>)room.Players.Keys : new int[0];
             if (mode == Mode.Teams)
             {
-                SetPrompt(_leftPrompt, leftPlayers > ListRows, "BLUE TEAM  ·  " + Players(CrewRules.TeamSize(crews, inRoom, 0, true)));
+                SetPrompt(_leftPrompt, leftPlayers > ListRows || teamless > 0, "BLUE TEAM  ·  " + Players(CrewRules.TeamSize(crews, inRoom, 0, true)) +
+                                                                                (teamless > 0 ? "  ·  " + teamless + " WAITING" : ""));
                 SetPrompt(_rightPrompt, rightPlayers > ListRows, "RED TEAM  ·  " + Players(CrewRules.TeamSize(crews, inRoom, 1, true)));
             }
             else
@@ -402,6 +412,11 @@ namespace VoidCrewFleet
             if (!show) return;
             Label action = prompt.Q<Label>("Action");
             if (action != null && action.text != text) action.text = text;
+            if (_windowPrepared) return;
+            // The whole list's window is made now, while its key is only offered, not at the first press (making a panel
+            // takes a moment).
+            _windowPrepared = true;
+            PlayerListPanel.Prepare();
         }
 
         /// <summary>
@@ -477,7 +492,8 @@ namespace VoidCrewFleet
                 bool teams = kind == "teams";
                 AddStandIns(template, _list, kind == "own" ? CrewRows : ListRows - 1, 2);
                 if (teams) AddStandIns(template, _right, ListRows - 1, 9);
-                SetPrompt(_leftPrompt, kind != "own", teams ? "BLUE TEAM  ·  12 PLAYERS" : "ALL 24 PLAYERS");
+                // Teams: with a player waiting for a place, the longest the left prompt gets.
+                SetPrompt(_leftPrompt, kind != "own", teams ? "BLUE TEAM  ·  12 PLAYERS  ·  1 WAITING" : "ALL 24 PLAYERS");
                 SetPrompt(_rightPrompt, teams, "RED TEAM  ·  12 PLAYERS");
                 if (_leftPrompt != null) _leftPrompt.BringToFront();
                 if (_rightPrompt != null) _rightPrompt.BringToFront();

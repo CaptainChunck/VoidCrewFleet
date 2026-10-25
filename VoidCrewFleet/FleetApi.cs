@@ -18,7 +18,7 @@ namespace VoidCrewFleet
     /// </summary>
     public static class FleetApi
     {
-        /// <summary>Raised when a member changes in a way older callers don't understand.</summary>
+        /// <summary>The API's version: it goes up when a member changes in a way older callers don't understand.</summary>
         public const int ApiVersion = 1;
 
         private static readonly Color Blue = new Color(0.24f, 0.55f, 1f, 1f);

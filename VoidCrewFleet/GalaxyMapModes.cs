@@ -14,10 +14,12 @@ namespace VoidCrewFleet
     /// <summary>
     /// Two more missions on the hub's galaxy map, next to the game's own:
     /// - FLEET PILGRIMAGE: the standard Pilgrimage for two or three ships, with more enemies and more objectives per sector;
-    /// - FLEET BATTLE: PvP, two teams of one to three ships each.
+    /// - FLEET BATTLE: PvP, two teams of one to three ships each (not offered while a game update has switched one of the
+    ///   parts it needs off: HubFleet.PvpReady).
     /// Both are the game's standard Pilgrimage underneath (so unlocks, rewards screens and the astral map work as usual);
     /// the room's fleet choice (HubFleet) says how it is played. The game builds this list in code from a fixed set of
-    /// entries, so these two are added the same way, through its own private AddGamemodeEntry.
+    /// entries, so these two are added the same way, through its own private AddGamemodeEntry. In a Fleet room only the host
+    /// activates a mission on the map: other players are told so on their own map (ActivatePrefix).
     /// </summary>
     internal static class GalaxyMapModes
     {
@@ -55,9 +57,17 @@ namespace VoidCrewFleet
                 _controller = __instance;
                 MakeInfos();
                 _fleetEntry = AddEntry.Invoke(__instance, new object[] { (GalaxyMapUIController.GamemodeType)FleetPilgrimageType, _fleetInfo });
-                _battleEntry = AddEntry.Invoke(__instance, new object[] { (GalaxyMapUIController.GamemodeType)FleetBattleType, _battleInfo });
                 Wire(__instance, _fleetEntry, HubVariant.FleetPilgrimage);
-                Wire(__instance, _battleEntry, HubVariant.FleetBattle);
+                _battleEntry = null;
+                if (HubFleet.PvpReady)
+                {
+                    _battleEntry = AddEntry.Invoke(__instance, new object[] { (GalaxyMapUIController.GamemodeType)FleetBattleType, _battleInfo });
+                    Wire(__instance, _battleEntry, HubVariant.FleetBattle);
+                }
+                else
+                {
+                    Log.WarnOnce("fleet battle not listed", "Some of the patches Fleet Battle needs didn't apply (a game update?), so FLEET BATTLE isn't offered on the galaxy map.");
+                }
                 if (!_subscribed)
                 {
                     HubFleet.Changed += Recheck;
@@ -133,6 +143,29 @@ namespace VoidCrewFleet
                 return;
             }
             HubFleet.RequestVariant(variant);
+        }
+
+        /// <summary>
+        /// Another player's ACTIVATE on the galaxy map, in a Fleet room: only the host chooses the mission, and the host refuses
+        /// anyone else's pick (HubFleet). The game marks the shown entry as the room's choice before it asks, and the refusal
+        /// left it marked (with its glow) on that player's map; it is refused here instead, before anything is marked or sent,
+        /// with the host's reason. ACTIVATED (the room's choice already) does nothing.
+        /// </summary>
+        [GamePatch(Feature, "GalaxyMapUIController", "ActivateShownGamemode", PatchKind.Prefix, Optional = true)]
+        private static bool ActivatePrefix(GalaxyMapUIController __instance)
+        {
+            try
+            {
+                if (Photon.Pun.PhotonNetwork.IsMasterClient || !HubFleet.HostHasFleet) return true;
+                bool chosen = ShownField != null && ActivatedField != null && ReferenceEquals(ShownField.GetValue(__instance), ActivatedField.GetValue(__instance));
+                if (!chosen) Notice.Show(HubFleet.OnlyHostChangesMission);
+                return false;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking who activates a mission on the galaxy map", e);
+                return true;
+            }
         }
 
         /// <summary>
