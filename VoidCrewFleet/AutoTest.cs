@@ -541,14 +541,30 @@ namespace VoidCrewFleet
             int passed = 0, failed = 0;
             foreach (PlayerControlledShip ship in ships)
             {
-                BuildSocket socket = TakeApartCandidate(ship);
+                string passedOver;
+                BuildSocket socket = TakeApartCandidate(ship, out passedOver);
                 if (socket == null)
                 {
-                    Log.Warn("[autotest] Deconstruct: nothing on " + FleetShips.Describe(ship) + " can be taken apart right now; skipped.");
+                    Log.Warn("[autotest] Deconstruct: nothing on " + FleetShips.Describe(ship) + " can be taken apart; skipped (" + passedOver + ").");
                     continue;
                 }
                 CellModule module = socket.InstalledModule;
                 string name = module.DisplayName;
+                // The game only takes apart a module with nothing in its item slots (a turret's ammo, a shield's battery), as
+                // a player would empty them first.
+                int emptied = 0;
+                foreach (CarryablesSocket slot in module.ConnectedSockets)
+                {
+                    CarryableObject item = slot != null ? slot.Payload : null;
+                    if (item == null || item.DestroyRequested) continue;
+                    item.Kill();
+                    emptied++;
+                }
+                if (emptied > 0)
+                {
+                    Log.Info("[autotest] Deconstruct: emptied " + emptied + " item slot(s) of " + name + " first.");
+                    yield return new WaitForSeconds(2f);
+                }
                 Log.Info("[autotest] Deconstruct: taking apart " + name + " on " + FleetShips.Describe(ship) + " (socket " + socket.Index + ").");
                 bool asked = false;
                 try
@@ -600,23 +616,43 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// A socket of a ship whose module can be taken apart now (allowed, not in use, its item sockets empty, undamaged),
-        /// a weapon if there is one; null if none.
+        /// A socket of a ship whose module can be taken apart (allowed, not in use, undamaged; its item slots are emptied
+        /// first), a weapon if there is one; null if none, with <paramref name="passedOver"/> saying why the others weren't.
         /// </summary>
-        private static BuildSocket TakeApartCandidate(PlayerControlledShip ship)
+        private static BuildSocket TakeApartCandidate(PlayerControlledShip ship, out string passedOver)
         {
+            passedOver = "no sockets";
             BuildSocketController sockets = ship != null ? ship.GetComponent<BuildSocketController>() : null;
             if (sockets == null || sockets.Sockets == null) return null;
             BuildSocket any = null;
+            int empty = 0, notAllowed = 0, inUse = 0, damaged = 0;
             foreach (BuildSocket socket in sockets.Sockets)
             {
                 CellModule module = socket != null ? socket.InstalledModule : null;
-                if (module == null || module is VoidDriveModule || module.BuildingConstraints == null || !module.BuildingConstraints.AllowDeconstruction) continue;
-                if (module.IsInUse || module.IsBeingDeconstructed || module.ConnectedSockets.Any(s => s != null && s.IsFull)) continue;
-                if (module.DefectSystem != null && module.DefectSystem.ActiveDefectAmount > 0) continue;
+                if (module == null)
+                {
+                    empty++;
+                    continue;
+                }
+                if (module is VoidDriveModule || module.BuildingConstraints == null || !module.BuildingConstraints.AllowDeconstruction)
+                {
+                    notAllowed++;
+                    continue;
+                }
+                if (module.IsInUse || module.IsBeingDeconstructed)
+                {
+                    inUse++;
+                    continue;
+                }
+                if (module.DefectSystem != null && module.DefectSystem.ActiveDefectAmount > 0)
+                {
+                    damaged++;
+                    continue;
+                }
                 if (module is Gameplay.CompositeWeapons.CompositeWeaponModule) return socket;
                 if (any == null) any = socket;
             }
+            passedOver = sockets.Sockets.Count + " sockets: " + empty + " empty, " + notAllowed + " can't be taken apart, " + inUse + " in use, " + damaged + " damaged";
             return any;
         }
 
