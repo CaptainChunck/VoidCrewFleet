@@ -7,9 +7,10 @@ namespace VoidCrewFleet
 {
     /// <summary>
     /// Which ship an event belongs to. Many of the game's events say nothing about the ship they come from ("a power
-    /// breaker flipped", "the jump drive is charging"), because the game has one ship; with two ships every listener
-    /// reacts to both. Patches around the code that raises such an event say which ship is raising it (Begin/End, in a
-    /// prefix and finalizer), and patches on the listeners skip events of another ship:
+    /// breaker flipped", "the jump drive is charging"), because the game has one ship; with several ships every listener
+    /// reacts to all of them. Patches around the code that raises such an event say which ship is raising it (Begin/End, in
+    /// a prefix and finalizer, the prefix telling its finalizer through __state that it began one), and patches on the
+    /// listeners skip events of another ship:
     /// - a listener that is part of a ship (lights, alarms, effects) reacts only to its own ship's events;
     /// - a listener for the local player's screen or ears (voice lines, HUD, 2D sounds) reacts only to the ship the local
     ///   player belongs to right now (FleetShips.ViewShip: in co-op the ship they are aboard or crew, in PvP their team's).
@@ -25,7 +26,10 @@ namespace VoidCrewFleet
             get { return Stack.Count > 0 ? Stack[Stack.Count - 1] : null; }
         }
 
-        /// <summary>The event raised from here on (until End) belongs to this ship. Always pair with End.</summary>
+        /// <summary>
+        /// The event raised from here on (until End) belongs to this ship; null when it can't be told (every listener then
+        /// reacts, as with one ship). Always pair with End, as ShipRedirect.BeginOverride is paired.
+        /// </summary>
         public static void Begin(PlayerControlledShip ship)
         {
             Stack.Add(ship);
@@ -46,9 +50,15 @@ namespace VoidCrewFleet
             Stack.Add(ship);
         }
 
+        /// <summary>Ends the latest Begin. One more than were begun (a patch out of step) is ignored, and logged once.</summary>
         public static void End()
         {
-            if (Stack.Count > 0) Stack.RemoveAt(Stack.Count - 1);
+            if (Stack.Count == 0)
+            {
+                Log.WarnOnce("ship event underflow", "A patch ended a ship's event it never began; ignored (a Fleet patch is out of step).");
+                return;
+            }
+            Stack.RemoveAt(Stack.Count - 1);
         }
 
         /// <summary>True when the event being raised belongs to another ship than this ship part's.</summary>
@@ -66,7 +76,7 @@ namespace VoidCrewFleet
             return ForeignToLocal(Current);
         }
 
-        /// <summary>True when a ship is not the one the local player belongs to right now (with two ships only).</summary>
+        /// <summary>True when a ship is not the one the local player belongs to right now (with several ships only).</summary>
         public static bool ForeignToLocal(PlayerControlledShip ship)
         {
             if (ship == null || !FleetShips.Active) return false;

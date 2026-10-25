@@ -19,7 +19,7 @@ namespace VoidCrewFleet
     /// The ship AI's voice lines and the ship sounds and effects stay with their own ship. The game has one voice-line
     /// controller, sets up one copy of its 102 ship status events for every ship that spawns, and reads "the player ship"
     /// while doing so; many of those events, and many sound and effect listeners, react to events that don't say which
-    /// ship they come from. With two ships:
+    /// ship they come from. With several ships:
     /// - each copy of the status events belongs to the ship it was set up for, and speaks only when that ship is the one
     ///   the local player belongs to (co-op: aboard, else crew; PvP: their team's), and only for that ship's own events
     ///   (the other ships' copies return at once); a lost ship's copies go with it;
@@ -27,7 +27,7 @@ namespace VoidCrewFleet
     ///   crew's);
     /// - a ship's alarms, engine parts, diodes, lights and storm sounds react only to their own ship;
     /// - music follows the local player's ship; camera shakes and hit effects only reach players aboard the ship;
-    /// - silent mode and the boost key act on their own ship only (the game applied them to both ships);
+    /// - silent mode and the boost key act on their own ship only (the game applied them to every ship);
     /// - stepping aboard the other player ship is not "boarding a wreck".
     /// </summary>
     internal static class ShipAudio
@@ -160,30 +160,39 @@ namespace VoidCrewFleet
         }
 
         // ---------------------------------------------------------------- one set of voice-line events per ship
+        // Each prefix in this class that pushes (a starting ship, a set-up, a "player ship", a ship's event) tells its
+        // finalizer through __state that it did, so a finalizer never pops what another call pushed.
 
         [GamePatch(Feature, "CG.Space.PlayerControlledShip", "Start", PatchKind.Prefix)]
-        private static void ShipStartPrefix(PlayerControlledShip __instance)
+        private static void ShipStartPrefix(PlayerControlledShip __instance, out bool __state)
         {
             StartingShips.Add(__instance);
+            __state = true;
         }
 
         [GamePatch(Feature, "CG.Space.PlayerControlledShip", "Start", PatchKind.Finalizer)]
-        private static void ShipStartFinalizer()
+        private static void ShipStartFinalizer(bool __state)
         {
-            if (StartingShips.Count > 0) StartingShips.RemoveAt(StartingShips.Count - 1);
+            if (__state && StartingShips.Count > 0) StartingShips.RemoveAt(StartingShips.Count - 1);
         }
 
         /// <summary>The status events set up while a ship starts read that ship (they read "the player ship").</summary>
         [GamePatch(Feature, "CG.Ship.Status.ShipStatusNotificationController", "InitializeShipStatusEvents", PatchKind.Prefix)]
-        private static void InitEventsPrefix(List<AbstractShipStatusEvent> ___activeEvents)
+        private static void InitEventsPrefix(List<AbstractShipStatusEvent> ___activeEvents, out bool __state)
         {
             SetupCounts.Add(___activeEvents != null ? ___activeEvents.Count : 0);
             ShipRedirect.BeginOverride(StartingShip);
+            __state = true;
         }
 
+        /// <summary>
+        /// The copies just set up belong to the starting ship. Without its prefix this does nothing: it wouldn't know which
+        /// copies are new, and the copies left untied speak as the game has them.
+        /// </summary>
         [GamePatch(Feature, "CG.Ship.Status.ShipStatusNotificationController", "InitializeShipStatusEvents", PatchKind.Finalizer)]
-        private static void InitEventsFinalizer(ShipStatusNotificationController __instance, List<AbstractShipStatusEvent> ___activeEvents)
+        private static void InitEventsFinalizer(ShipStatusNotificationController __instance, List<AbstractShipStatusEvent> ___activeEvents, bool __state)
         {
+            if (!__state) return;
             ShipRedirect.EndOverride();
             int start = 0;
             if (SetupCounts.Count > 0)
@@ -262,7 +271,8 @@ namespace VoidCrewFleet
         /// A lost ship goes while other ships fly on: its copies of the status events go with it, through the game's own
         /// way of removing one (they stop listening to the game's events, and are destroyed); they used to stay subscribed
         /// for the rest of the mission. This waits for the ship itself to go, not its death to start: some copies listen
-        /// to the ship's own parts, which still report while it dies. At the end of a mission the game removes them all.
+        /// to the ship's own parts, which still report while it dies. At the end of a mission the game removes them all, so
+        /// nothing is done while the mission closes (its ships go one by one then).
         /// </summary>
         [GamePatch(Feature, "CG.Space.PlayerControlledShip", "OnDestroy", PatchKind.Prefix, Optional = true)]
         private static void ShipDestroyPrefix(PlayerControlledShip __instance)
@@ -271,7 +281,7 @@ namespace VoidCrewFleet
             if (__instance == null || !CopiesByShip.TryGetValue(__instance.GetInstanceID(), out copies)) return;
             CopiesByShip.Remove(__instance.GetInstanceID());
             // Otherwise the copies stay tied to the lost ship, which keeps them silent until the game removes them.
-            if (copies.Controller == null || DestroyEvent == null || !AnotherShipLeft(__instance)) return;
+            if (copies.Controller == null || DestroyEvent == null || !FleetShips.AnotherLivingShip(__instance) || FleetShips.TearingDown) return;
             int removed = 0;
             try
             {
@@ -289,15 +299,6 @@ namespace VoidCrewFleet
             }
             ForgetEvents(copies);
             Log.Verbose(removed + " voice-line events of " + FleetShips.Describe(__instance) + " went with it.");
-        }
-
-        private static bool AnotherShipLeft(PlayerControlledShip ship)
-        {
-            foreach (PlayerControlledShip other in FleetShips.All)
-            {
-                if (other != null && other != ship && !other.StartedDeath) return true;
-            }
-            return false;
         }
 
         /// <summary>
@@ -340,9 +341,10 @@ namespace VoidCrewFleet
         // ---------------------------------------------------------------- who raised an event that carries no ship
 
         [GamePatch(Feature, "Gameplay.Ship.VoidJump.VoidJumpSystem", "ChangeActiveStateByIndex", PatchKind.Prefix)]
-        private static void JumpStatePrefix(VoidJumpSystem __instance)
+        private static void JumpStatePrefix(VoidJumpSystem __instance, out bool __state)
         {
             ShipEvents.Begin(FleetShips.Active ? __instance.PlayerShip : null);
+            __state = true;
         }
 
         [GamePatch(Feature, "CG.Ship.Modules.GravityScoopModule", "AttractorSocketsFull", PatchKind.Prefix)]
@@ -352,15 +354,17 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "VoidDriveEnginePart", "Update", PatchKind.Prefix)]
         [GamePatch(Feature, "Gameplay.Power.ProtectedPowerSystem", "NotifyForcedShutDown", PatchKind.Prefix)]
         [GamePatch(Feature, "SilentMode", "LocalOnlyStateSwitch", PatchKind.Prefix)]
-        private static void PartEventPrefix(Component __instance)
+        private static void PartEventPrefix(Component __instance, out bool __state)
         {
             ShipEvents.BeginFor(__instance);
+            __state = true;
         }
 
         [GamePatch(Feature, "ControllingHelm", "ActiveThrusters", PatchKind.Prefix)]
-        private static void BoostKeyPrefix(CG.Ship.Modules.Helm ____helm)
+        private static void BoostKeyPrefix(CG.Ship.Modules.Helm ____helm, out bool __state)
         {
             ShipEvents.BeginFor(____helm);
+            __state = true;
         }
 
         [GamePatch(Feature, "Gameplay.Ship.VoidJump.VoidJumpSystem", "ChangeActiveStateByIndex", PatchKind.Finalizer)]
@@ -372,9 +376,9 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "Gameplay.Power.ProtectedPowerSystem", "NotifyForcedShutDown", PatchKind.Finalizer)]
         [GamePatch(Feature, "SilentMode", "LocalOnlyStateSwitch", PatchKind.Finalizer)]
         [GamePatch(Feature, "ControllingHelm", "ActiveThrusters", PatchKind.Finalizer)]
-        private static void PartEventFinalizer()
+        private static void PartEventFinalizer(bool __state)
         {
-            ShipEvents.End();
+            if (__state) ShipEvents.End();
         }
 
         // ---------------------------------------------------------------- status events whose argument names the ship
@@ -485,23 +489,24 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// A ship's hull warnings react to that ship's hit points only. Every hit point change of anything reaches every
-        /// ship's copies of these events: those of the other ships, and all of them for anything but a player ship, return at
-        /// once (the game's handler does nothing either then); the ship's own copy compares against its own ship.
+        /// ship's copies of these events: for anything but a player ship they all return at once (the game's handler does
+        /// nothing for it either, with any number of ships; this cheapest test comes first), and so do the other ships'
+        /// copies; the ship's own copy compares against its own ship.
         /// </summary>
         [GamePatch(Feature, "CG.Ship.Status.ShipHullEvent", "OnHitpointsChanged", PatchKind.Prefix)]
         private static bool HullPrefix(AbstractShipStatusEvent __instance, IDamageable affectedObject, out bool __state)
         {
             __state = false;
+            var ship = affectedObject as PlayerControlledShip;
+            if (ship == null) return false;
             try
             {
                 if (!FleetShips.Active) return true;
-                var ship = affectedObject as PlayerControlledShip;
-                if (ship == null) return false;
                 PlayerControlledShip own;
                 if ((object)__instance == null || !EventShip.TryGetValue(__instance.GetInstanceID(), out own))
                 {
                     // A copy tied to no ship: the game's own comparison, with "the player ship" this screen's.
-                    ShipRedirect.BeginOverride(null);
+                    ShipRedirect.BeginOverride(FleetShips.ViewShip);
                     __state = true;
                     return true;
                 }
@@ -517,6 +522,7 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>A power breaker event reads its own ship's power (a copy tied to no live ship: this screen's ship's).</summary>
         [GamePatch(Feature, "CG.Ship.Status.PowerBreakerEvent", "BreakerFlipDown", PatchKind.Prefix)]
         [GamePatch(Feature, "CG.Ship.Status.PowerBreakerEvent", "OnPowerDrainChanged", PatchKind.Prefix)]
         [GamePatch(Feature, "CG.Ship.Status.PowerBreakerEvent", "SystemForcedShutdown", PatchKind.Prefix)]
@@ -525,7 +531,16 @@ namespace VoidCrewFleet
         {
             __state = false;
             if (!FleetShips.Active) return;
-            ShipRedirect.BeginOverride(EventShipOf(__instance));
+            PlayerControlledShip ship = null;
+            try
+            {
+                ship = EventShipOf(__instance) ?? FleetShips.ViewShip;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Checking whose power a voice line is about", e);
+            }
+            ShipRedirect.BeginOverride(ship);
             __state = true;
         }
 
@@ -578,7 +593,7 @@ namespace VoidCrewFleet
             return voidDriveModule == null || ___voidDriveModule == null || voidDriveModule == ___voidDriveModule;
         }
 
-        /// <summary>The void tunnel's state effects of a ship follow that ship's own jump (co-op: both ships jump).</summary>
+        /// <summary>The void tunnel's state effects of a ship follow that ship's own jump (co-op: every ship jumps).</summary>
         [GamePatch(Feature, "VoidJumpStateEvents", "OnPreviousStateRelevantJumpStateChanged", PatchKind.Prefix)]
         private static bool TunnelPrefix(PlayerControlledShip playerShip, VoidJumpSystem ___voidJumpSystem)
         {
@@ -640,7 +655,7 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// Storm sounds: each ship's ambience plays its storm sounds only for the ship the local player belongs to, and turns
-        /// them off when the storm ends (the game keeps one setting for all ships, so the other ship's stayed on).
+        /// them off when the storm ends (the game keeps one setting for all ships, so the other ships' stayed on).
         /// </summary>
         [GamePatch(Feature, "CG.Client.Audio.CalamityAmbienceController", "CheckConfig", PatchKind.Prefix)]
         private static bool CalamityPrefix(CalamityAmbienceController __instance, CalamityAudioConfig[] ___ConfigsPerSectorTwist)

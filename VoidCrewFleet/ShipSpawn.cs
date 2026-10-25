@@ -54,7 +54,8 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// Every player ship builds its interior physics scene named after its GameObject, and every player ship is
-        /// called "PlayerShip", so a second ship's scene would clash with the first one. Give the scene a unique name.
+        /// called "PlayerShip", so a second ship's scene would clash with the first one. Give the scene a unique name; the
+        /// ship gets its own name back afterwards (in a finalizer, so also when the game's set-up fails).
         /// </summary>
         [GamePatch(Feature, "Gameplay.SpacePlatforms.MovingSpacePlatform", "SetUpSimulationScene", PatchKind.Prefix)]
         private static void SimulationScenePrefix(MovingSpacePlatform __instance, out string __state)
@@ -72,8 +73,8 @@ namespace VoidCrewFleet
             }
         }
 
-        [GamePatch(Feature, "Gameplay.SpacePlatforms.MovingSpacePlatform", "SetUpSimulationScene", PatchKind.Postfix)]
-        private static void SimulationScenePostfix(MovingSpacePlatform __instance, string __state)
+        [GamePatch(Feature, "Gameplay.SpacePlatforms.MovingSpacePlatform", "SetUpSimulationScene", PatchKind.Finalizer)]
+        private static void SimulationSceneFinalizer(MovingSpacePlatform __instance, string __state)
         {
             try
             {

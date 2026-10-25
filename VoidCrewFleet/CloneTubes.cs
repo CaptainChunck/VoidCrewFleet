@@ -31,7 +31,7 @@ namespace VoidCrewFleet
 
         private const int SlotStride = 100;
 
-        private static readonly MethodInfo ListGetItem = Getter(GameMember.Property(typeof(List<CloneTube>), "Item"));
+        private static readonly MethodInfo ListGetItem = GameMember.Property(typeof(List<CloneTube>), "Item")?.GetGetMethod(true);
         private static readonly MethodInfo TubeAtMethod = new Func<List<CloneTube>, int, CloneTube>(TubeAt).Method;
         private static readonly MethodInfo SpawnTubeAtMethod = new Func<List<CloneTube>, int, CloneTube>(SpawnTubeAt).Method;
 
@@ -46,6 +46,9 @@ namespace VoidCrewFleet
         private static readonly List<ShipTubes> Registered = new List<ShipTubes>();
         private static CloneTubeModule _disabling;
         private static Photon.Realtime.Player _spawning;
+
+        /// <summary>How many times in a row this client has refused the clone tube the host sent (RespawnPrefix), for the log.</summary>
+        private static int _refused;
 
         /// <summary>When set (PvP before the teams are confirmed), the host holds every spawn request in the queue.</summary>
         public static Func<bool> HoldSpawns;
@@ -63,7 +66,7 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// A clone tube's synced state can name an occupant whose character this client hasn't loaded yet (someone was
-        /// in a tube while this player loaded in, more likely with more players and two ships). The game's healing state
+        /// in a tube while this player loaded in, more likely with more players and several ships). The game's healing state
         /// then throws, which cut the rest of the character set-up short. Without the occupant there is nothing to heal
         /// here yet: drop that one error and let the set-up carry on.
         /// </summary>
@@ -293,12 +296,6 @@ namespace VoidCrewFleet
             if (replaced == 0) Patcher.NothingReplaced(Feature, original, "looks a tube up by index");
         }
 
-        /// <summary>A property's getter, or null when the property is missing.</summary>
-        private static MethodInfo Getter(PropertyInfo property)
-        {
-            return property != null ? property.GetGetMethod(true) : null;
-        }
-
         /// <summary>A free tube of a ship (none: null; with orAny, then any of its tubes).</summary>
         private static CloneTube FreeTubeOf(PlayerControlledShip ship, bool orAny)
         {
@@ -348,8 +345,9 @@ namespace VoidCrewFleet
         /// from anywhere for a modified game); an unmodified game only asks when the character is dead or not there yet.
         /// </summary>
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "TrySpawnPlayer", PatchKind.Prefix)]
-        private static bool TrySpawnPrefix(Photon.Realtime.Player player)
+        private static bool TrySpawnPrefix(Photon.Realtime.Player player, out bool __state)
         {
+            __state = false;
             _spawning = player;
             PlayerControlledShip ship = null;
             bool refused = false;
@@ -375,6 +373,7 @@ namespace VoidCrewFleet
                 Log.Failure("Reading a spawn request", e);
             }
             ShipRedirect.BeginOverride(ship);
+            __state = true;
             return !refused;
         }
 
@@ -406,16 +405,18 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>Ends the "player ship" its prefix set (__state: these prefixes and finalizers are patched one by one).</summary>
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "TrySpawnPlayer", PatchKind.Finalizer)]
-        private static void TrySpawnFinalizer()
+        private static void TrySpawnFinalizer(bool __state)
         {
-            ShipRedirect.EndOverride();
+            if (__state) ShipRedirect.EndOverride();
             _spawning = null;
         }
 
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "CheckSpawningFromQueue", PatchKind.Prefix)]
-        private static void QueuePrefix(Queue<Photon.Realtime.Player> ___playersQueuedToSpawn)
+        private static void QueuePrefix(Queue<Photon.Realtime.Player> ___playersQueuedToSpawn, out bool __state)
         {
+            __state = false;
             _spawning = null;
             PlayerControlledShip ship = null;
             try
@@ -432,6 +433,7 @@ namespace VoidCrewFleet
                 Log.Failure("Reading the spawn queue", e);
             }
             ShipRedirect.BeginOverride(ship);
+            __state = true;
         }
 
         /// <summary>
@@ -458,9 +460,9 @@ namespace VoidCrewFleet
         }
 
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "CheckSpawningFromQueue", PatchKind.Finalizer)]
-        private static void QueueFinalizer()
+        private static void QueueFinalizer(bool __state)
         {
-            ShipRedirect.EndOverride();
+            if (__state) ShipRedirect.EndOverride();
             _spawning = null;
         }
 
@@ -489,8 +491,9 @@ namespace VoidCrewFleet
 
         /// <summary>The new character is placed on (and moves with) the ship of its tube.</summary>
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "SpawnPlayer", PatchKind.Prefix)]
-        private static void SpawnPlayerPrefix(CloneTube tube)
+        private static void SpawnPlayerPrefix(CloneTube tube, out bool __state)
         {
+            __state = false;
             PlayerControlledShip ship = null;
             try
             {
@@ -501,19 +504,21 @@ namespace VoidCrewFleet
                 Log.Failure("Reading which ship a new character spawns on", e);
             }
             ShipRedirect.BeginOverride(ship);
+            __state = true;
         }
 
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "SpawnPlayer", PatchKind.Finalizer)]
-        private static void SpawnPlayerFinalizer()
+        private static void SpawnPlayerFinalizer(bool __state)
         {
-            ShipRedirect.EndOverride();
+            if (__state) ShipRedirect.EndOverride();
         }
 
         /// <summary>
         /// A respawn message names a tube by its code; refuse codes this client doesn't know (its ship may be gone here, or
         /// its number not known yet), and in a fleet mission a tube of a ship that is being destroyed (the host chose it just
         /// before its pilot's game started the ship's death), and ask again a moment later. Asking again also frees that tube
-        /// on the host (ReleaseTubesOf), which closed it on this player when it sent them there.
+        /// on the host (ReleaseTubesOf), which closed it on this player when it sent them there. It may take several tries,
+        /// one a second: the first refusal is logged, then every tenth in a row.
         /// </summary>
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "RespawnPlayer", PatchKind.Prefix)]
         private static bool RespawnPrefix(int clonetubeIndex, List<CloneTube> ___clonetubes)
@@ -522,12 +527,22 @@ namespace VoidCrewFleet
             {
                 CloneTube tube = TubeAt(___clonetubes, clonetubeIndex);
                 PlayerControlledShip ship = tube != null && FleetMission ? FleetShips.OwnerOf(tube) : null;
-                if (tube != null && (ship == null || !ship.StartedDeath)) return true;
-                if (tube == null)
-                    Log.Warn("The host sent clone tube " + clonetubeIndex + " but this client knows " + (___clonetubes != null ? ___clonetubes.Count : 0) +
-                             " tubes and none with that number; asking to spawn again.");
-                else
-                    Log.Warn("The host sent clone tube " + clonetubeIndex + " of " + FleetShips.Describe(ship) + ", which is being destroyed; asking to spawn again.");
+                if (tube != null && (ship == null || !ship.StartedDeath))
+                {
+                    _refused = 0;
+                    return true;
+                }
+                _refused++;
+                if (_refused == 1 || _refused % 10 == 0)
+                {
+                    string again = _refused > 1 ? " (" + _refused + " times in a row)" : "";
+                    if (tube == null)
+                        Log.Warn("The host sent clone tube " + clonetubeIndex + " but this client knows " + (___clonetubes != null ? ___clonetubes.Count : 0) +
+                                 " tubes and none with that number; asking to spawn again" + again + ".");
+                    else
+                        Log.Warn("The host sent clone tube " + clonetubeIndex + " of " + FleetShips.Describe(ship) + ", which is being destroyed; asking to spawn again" +
+                                 again + ".");
+                }
                 if (FleetRuntime.Instance != null) FleetRuntime.Instance.StartCoroutine(RequestSpawnLater());
                 else if (SpawnSystem.Instance != null) SpawnSystem.Instance.RequestSpawn();
                 return false;

@@ -28,7 +28,7 @@ namespace VoidCrewFleet
 
         private static readonly FieldInfo ActiveScreenField = GameMember.Field(typeof(ClonetubeUIController), "_activeController");
         private static readonly FieldInfo TextTableField = GameMember.Field(typeof(UILocalizationProvider), "localizationData");
-        private static readonly MethodInfo GetBiomass = Getter(GameMember.Property(typeof(GameSessionSuppliesManager), "BiomassAmount"));
+        private static readonly MethodInfo GetBiomass = GameMember.Property(typeof(GameSessionSuppliesManager), "BiomassAmount")?.GetGetMethod(true);
         private static readonly MethodInfo ScreenBiomassMethod = new Func<GameSessionSuppliesManager, int>(ScreenBiomass).Method;
 
         /// <summary>The tubes of lost ships (instance IDs), until they are destroyed.</summary>
@@ -59,12 +59,6 @@ namespace VoidCrewFleet
             _mission = mission;
             LostTubes.Clear();
             HandedOver.Clear();
-        }
-
-        /// <summary>A property's getter, or null when the property is missing.</summary>
-        private static MethodInfo Getter(PropertyInfo property)
-        {
-            return property != null ? property.GetGetMethod(true) : null;
         }
 
         /// <summary>A ship is lost: its tubes are noted, and if one of them draws the screen, a tube of another ship takes over.</summary>
@@ -112,7 +106,7 @@ namespace VoidCrewFleet
                 ThisMission();
                 if (!FleetShips.Active || HandedOver.Contains(__instance.GetInstanceID()) || !ReferenceEquals(ActiveScreen, __instance)) return;
                 PlayerControlledShip own = FleetShips.OwnerOf(__instance);
-                if (own == null || !own.StartedDeath || !AnotherShipLeft(own)) return;
+                if (own == null || !own.StartedDeath || !FleetShips.AnotherLivingShip(own)) return;
                 HandOver(__instance, own, true);
             }
             catch (Exception e)
@@ -200,7 +194,7 @@ namespace VoidCrewFleet
                 bool lost = LostTubes.Remove(__instance.GetInstanceID());
                 PlayerControlledShip own = FleetShips.OwnerOf(__instance);
                 if (!lost) lost = own != null && own.StartedDeath;
-                if (!lost || !AnotherShipLeft(own)) return true;
+                if (!lost || !FleetShips.AnotherLivingShip(own)) return true;
                 if (____listeners != null) ____listeners.UnsubscribeAll();
                 return false;
             }
@@ -209,16 +203,6 @@ namespace VoidCrewFleet
                 Log.Failure("Removing a lost ship's clone tube", e);
                 return true;
             }
-        }
-
-        /// <summary>A ship other than this one (which may be unknown) that is not dying.</summary>
-        private static bool AnotherShipLeft(PlayerControlledShip ship)
-        {
-            foreach (PlayerControlledShip other in FleetShips.All)
-            {
-                if (other != null && other != ship && !other.StartedDeath) return true;
-            }
-            return false;
         }
 
         // ---------------------------------------------------------------- the biomass on the screen
