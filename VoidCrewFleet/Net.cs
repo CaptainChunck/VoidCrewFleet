@@ -38,7 +38,8 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// Attacker to the players around and the victim: a punch, to show on the attacker's model; the victim's client takes
-        /// the damage. Data: arm (byte, 0 left, 1 right), victim's actor number (-1 for none), damage, attacker position.
+        /// the damage. Data: arm (byte, 0 left, 1 right), victim's actor number (-1 for none), damage. (0.4.6 and older also
+        /// send the attacker's position, which nobody reads: every game goes by the attacker's character as it sees it.)
         /// </summary>
         FistSwing = 20,
 

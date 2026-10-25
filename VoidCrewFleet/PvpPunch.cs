@@ -41,8 +41,6 @@ namespace VoidCrewFleet
         /// <summary>Players this close see a punch (the victim always does).</summary>
         private const float WatchDistance = 30f;
 
-        private const int SightMask = (1 << 10) | (1 << 12) | (1 << 27);
-
         /// <summary>The height of the chest (from the feet), between which the punched player's game checks the line of sight.</summary>
         private const float ChestHeight = 1.2f;
 
@@ -53,6 +51,11 @@ namespace VoidCrewFleet
                                               InteractionMode.ControllingTurret | InteractionMode.Seated | InteractionMode.Cryptic | InteractionMode.InCloneTube |
                                               InteractionMode.UsingPeriscope | InteractionMode.WorldSpaceUI | InteractionMode.Build | InteractionMode.WaitingForRespawn |
                                               InteractionMode.SchematicView;
+
+        /// <summary>The gamepad's triggers: the left raises the fists, the right punches.</summary>
+        private const string PadStancePath = "<Gamepad>/leftTrigger";
+
+        private const string PadPunchPath = "<Gamepad>/rightTrigger";
 
         /// <summary>Weightless: the gamepad's triggers move the player up and down, so they don't fight with them there.</summary>
         private const InteractionMode WeightlessModes = InteractionMode.InSpace | InteractionMode.SwimZeroGrav | InteractionMode.FlyingJetpack;
@@ -87,18 +90,6 @@ namespace VoidCrewFleet
             get { return _stanceUp; }
         }
 
-        private static bool IsEnemyActor(int actor)
-        {
-            int mine = FleetShips.TeamOfActor(FleetShips.LocalActor);
-            int theirs = FleetShips.TeamOfActor(actor);
-            return mine >= 0 && theirs >= 0 && mine != theirs;
-        }
-
-        private static int ActorOf(Player player)
-        {
-            return player != null && player.photonView != null && player.photonView.Owner != null ? player.photonView.Owner.ActorNumber : -1;
-        }
-
         private static string NameOf(Player player)
         {
             Photon.Realtime.Player owner = player != null && player.photonView != null ? player.photonView.Owner : null;
@@ -126,7 +117,7 @@ namespace VoidCrewFleet
                 {
                     SetStance(false);
                     SendStance();
-                    ShowHint(null);
+                    ActionHint.Clear("punch");
                     SetPadActions(false);
                     if (Budgets.Count > 0) Budgets.Clear();
                     return;
@@ -198,21 +189,35 @@ namespace VoidCrewFleet
                 : null;
         }
 
-        internal static string FireName(InputAction fire)
+        /// <summary>
+        /// The control path of an action's binding for the keyboard and mouse or for a gamepad (the game's actions have both),
+        /// for a key prompt's icon (ActionHint); the fallback when it has none.
+        /// </summary>
+        internal static string KeyPath(InputAction action, bool gamepad, string fallback)
         {
-            string name = null;
+            if (action == null) return fallback;
             try
             {
-                name = fire != null ? fire.GetBindingDisplayString() : null;
+                var bindings = action.bindings;
+                for (int i = 0; i < bindings.Count; i++)
+                {
+                    InputBinding binding = bindings[i];
+                    if (binding.isComposite || binding.isPartOfComposite) continue;
+                    string path = binding.effectivePath;
+                    if (string.IsNullOrEmpty(path)) continue;
+                    bool pad = path.StartsWith("<Gamepad>", StringComparison.Ordinal);
+                    bool keyboardMouse = path.StartsWith("<Mouse>", StringComparison.Ordinal) || path.StartsWith("<Keyboard>", StringComparison.Ordinal);
+                    if (gamepad ? pad : keyboardMouse) return path;
+                }
             }
             catch
             {
-                // Just the label.
+                // the fallback then
             }
-            return string.IsNullOrEmpty(name) ? "FIRE" : name.ToUpperInvariant();
+            return fallback;
         }
 
-        private static bool UsingGamepad
+        internal static bool UsingGamepad
         {
             get
             {
@@ -251,8 +256,8 @@ namespace VoidCrewFleet
         /// </summary>
         private static void MakePadActions()
         {
-            _padStance = new InputAction("Fleet fist stance", InputActionType.Button, "<Gamepad>/leftTrigger");
-            _padPunch = new InputAction("Fleet fist punch", InputActionType.Button, "<Gamepad>/rightTrigger");
+            _padStance = new InputAction("Fleet fist stance", InputActionType.Button, PadStancePath);
+            _padPunch = new InputAction("Fleet fist punch", InputActionType.Button, PadPunchPath);
             _padStance.Enable();
             _padPunch.Enable();
         }
@@ -342,7 +347,7 @@ namespace VoidCrewFleet
             Vector3 aim;
             if (!Aim.Get(out eye, out aim)) aim = me.transform.forward;
             FistPose.Punch(me, arm, target, aim);
-            int victim = target != null ? ActorOf(target) : -1;
+            int victim = target != null ? PvpCombat.ActorOf(target) : -1;
             var watchers = new List<int>();
             ClientGame game = ClientGame.Current;
             if (game != null)
@@ -350,14 +355,14 @@ namespace VoidCrewFleet
                 foreach (Player player in game.Players)
                 {
                     if (player == null || player == me) continue;
-                    if ((player.transform.position - me.transform.position).sqrMagnitude <= WatchDistance * WatchDistance) watchers.Add(ActorOf(player));
+                    if ((player.transform.position - me.transform.position).sqrMagnitude <= WatchDistance * WatchDistance) watchers.Add(PvpCombat.ActorOf(player));
                 }
             }
             if (victim >= 0) watchers.Add(victim);
-            Net.ToOtherActors(watchers, Msg.FistSwing, (byte)arm, victim, victim >= 0 ? Damage : 0f, me.transform.position);
+            // Each player's game takes the puncher's position from their character as it sees it, never from the message.
+            Net.ToOtherActors(watchers, Msg.FistSwing, (byte)arm, victim, victim >= 0 ? Damage : 0f);
             Shake(0.15f);
-            if (target != null) Log.Info("PvP: punched " + NameOf(target) + " (" + (arm == 0 ? "left" : "right") + ").");
-            else Log.Verbose("PvP: punched the air (" + (arm == 0 ? "left" : "right") + ").");
+            Log.Verbose("PvP: punched " + (target != null ? NameOf(target) : "the air") + " (" + (arm == 0 ? "left" : "right") + ").");
         }
 
         /// <summary>The enemy player in front of the camera within reach and in plain sight, nearest to the aim first.</summary>
@@ -372,7 +377,7 @@ namespace VoidCrewFleet
             float bestScore = float.MaxValue;
             foreach (Player player in game.Players)
             {
-                if (player == null || (object)player == me || PlayerLife.IsDead(player) || !IsEnemyActor(ActorOf(player))) continue;
+                if (player == null || (object)player == me || PlayerLife.IsDead(player) || !PvpCombat.IsEnemyActor(PvpCombat.ActorOf(player))) continue;
                 Vector3 feet = player.transform.position;
                 Vector3 up = player.transform.up;
                 float score = float.MaxValue;
@@ -393,7 +398,7 @@ namespace VoidCrewFleet
                     aimPoint = point;
                 }
                 if (score >= bestScore) continue;
-                if (Physics.Linecast(eye, aimPoint, SightMask, QueryTriggerInteraction.Ignore)) continue;
+                if (Physics.Linecast(eye, aimPoint, PvpCombat.SightMask, QueryTriggerInteraction.Ignore)) continue;
                 bestScore = score;
                 best = player;
             }
@@ -402,27 +407,28 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- the hint
 
+        /// <summary>
+        /// The prompt: with the fists up, the punch key (the game's Fire, or the gamepad's right trigger) and who would be hit;
+        /// with an enemy in reach, the key to hold to raise them (the game's second fire, or the left trigger).
+        /// </summary>
         private static void UpdateHint(bool fight)
         {
             if (!fight)
             {
-                ShowHint(null);
+                ActionHint.Clear("punch");
                 return;
             }
             bool pad = UsingGamepad;
             Player target = FindTarget();
             if (_stanceUp)
             {
-                ShowHint((pad ? "RT" : "LMB") + "  PUNCH" + (target != null ? " " + NameOf(target).ToUpperInvariant() : ""));
+                ActionHint.Set("punch", ActionHint.PunchPriority, pad ? PadPunchPath : KeyPath(Fire(), false, "<Mouse>/leftButton"), false,
+                    "PUNCH" + (target != null ? " " + NameOf(target).ToUpperInvariant() : ""));
                 return;
             }
             if (pad && Weightless()) target = null;
-            ShowHint(target != null ? (pad ? "HOLD LT" : "HOLD RMB") + "  RAISE YOUR FISTS" : null);
-        }
-
-        private static void ShowHint(string text)
-        {
-            ActionHint.Set("punch", ActionHint.PunchPriority, text);
+            if (target == null) ActionHint.Clear("punch");
+            else ActionHint.Set("punch", ActionHint.PunchPriority, pad ? PadStancePath : KeyPath(Fire2(), false, "<Mouse>/rightButton"), true, "RAISE YOUR FISTS");
         }
 
         internal static void Shake(float intensity)
@@ -452,35 +458,35 @@ namespace VoidCrewFleet
                 Player target = victim < 0 ? null : (me != null && victim == FleetShips.LocalActor ? me : FleetShips.CharacterOf(victim));
                 if (attackerAlive) FistPose.Punch(attacker, arm, target, attacker.transform.forward);
                 if (victim != FleetShips.LocalActor || me == null) return;
-                if (!IsEnemyActor(sender))
+                if (!PvpCombat.IsEnemyActor(sender))
                 {
-                    Log.Warn("PvP: ignored a punch from player " + sender + ", who is not on the other team.");
+                    Ignored(sender, "team", "PvP: ignored a punch from player " + sender + ", who is not on the other team");
                     return;
                 }
                 if (PlayerLife.IsDead(me) || (me.InteractionState.ActiveModes & InteractionMode.InCloneTube) != 0) return;
                 // The puncher as this client sees them (never the position in the message): alive, free to punch and close by.
                 if (!attackerAlive)
                 {
-                    Log.Warn("PvP: ignored a punch from player " + sender + ", who has no living character here.");
+                    Ignored(sender, "dead", "PvP: ignored a punch from player " + sender + ", who has no living character here");
                     return;
                 }
                 if (SeatedOrInTube(attacker))
                 {
-                    Log.Warn("PvP: ignored a punch from " + NameOf(attacker) + ", who is seated or in a clone tube.");
+                    Ignored(sender, "seated", "PvP: ignored a punch from " + NameOf(attacker) + ", who is seated or in a clone tube");
                     return;
                 }
                 Vector3 from = attacker.transform.position;
                 float distance = Vector3.Distance(from, me.transform.position);
                 if (distance > Reach + 3f)
                 {
-                    Log.Warn("PvP: ignored a punch from " + distance.ToString("0.0") + " m away.");
+                    Ignored(sender, "far", "PvP: ignored a punch from " + NameOf(attacker) + ", " + distance.ToString("0.0") + " m away");
                     return;
                 }
                 // In sight: the puncher's chest to this player's chest, against the same walls as the puncher's own check.
-                if (Physics.Linecast(from + attacker.transform.up * ChestHeight, me.transform.position + me.transform.up * ChestHeight, SightMask,
+                if (Physics.Linecast(from + attacker.transform.up * ChestHeight, me.transform.position + me.transform.up * ChestHeight, PvpCombat.SightMask,
                         QueryTriggerInteraction.Ignore))
                 {
-                    Log.Warn("PvP: ignored a punch from " + NameOf(attacker) + ", who is behind a wall.");
+                    Ignored(sender, "wall", "PvP: ignored a punch from " + NameOf(attacker) + ", who is behind a wall");
                     return;
                 }
                 if (!TakeFromBudget(sender))
@@ -489,8 +495,18 @@ namespace VoidCrewFleet
                     return;
                 }
                 TakePunch(me, from, Mathf.Clamp(Net.Get(data, 2, Damage), 0f, Damage));
-                Log.Info("PvP: you were punched by " + NameOf(attacker) + ".");
+                Log.Verbose("PvP: you were punched by " + NameOf(attacker) + ".");
             });
+        }
+
+        /// <summary>
+        /// A punch this player's game refused (a modified game, or one that lagged behind): the first of each kind from each
+        /// player is logged, the rest only in verbose mode, so a player sending punches by the hundred can't fill the log.
+        /// </summary>
+        private static void Ignored(int sender, string kind, string message)
+        {
+            Log.WarnOnce("pvp ignored punch " + kind + " " + sender, message + " (further ones are only logged in verbose mode).");
+            Log.Verbose(message + ".");
         }
 
         /// <summary>

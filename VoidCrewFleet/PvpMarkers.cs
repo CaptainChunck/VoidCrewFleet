@@ -24,13 +24,18 @@ namespace VoidCrewFleet
         public const string Feature = "PvP enemy markers";
 
         private const float EnemyTagRange = 35f;
-        private const int SightMask = (1 << 10) | (1 << 12) | (1 << 27);
 
-        private static readonly MethodInfo AddMarkerMethod = AccessTools.Method(typeof(SectorMarkersProvider), "AddMarker");
+        /// <summary>
+        /// The marker list's own way to add a marker (protected, on its base class MarkerProvider), looked up through GameMember:
+        /// a lookup that fails (an overload a game update added makes the name ambiguous) only loses the enemy ship's marker,
+        /// and the offline checker finds the name exactly once in the game.
+        /// </summary>
+        private static readonly MethodInfo AddMarkerMethod = GameMember.Method(typeof(SectorMarkersProvider), "AddMarker");
+
         private static readonly FieldInfo SpeakingField = GameMember.Field(typeof(PlayerMarkerVE), "_speaking");
         private static readonly FieldInfo NameField = GameMember.Field(typeof(PlayerMarkerVE), "_playerName");
-        private static readonly AccessTools.FieldRef<PlayerMarkerVE, VisualElement> Speaking = FieldRef<PlayerMarkerVE, VisualElement>(SpeakingField);
-        private static readonly AccessTools.FieldRef<PlayerMarkerVE, Label> PlayerName = FieldRef<PlayerMarkerVE, Label>(NameField);
+        private static readonly AccessTools.FieldRef<PlayerMarkerVE, VisualElement> Speaking = PvpCombat.FieldRef<PlayerMarkerVE, VisualElement>(SpeakingField);
+        private static readonly AccessTools.FieldRef<PlayerMarkerVE, Label> PlayerName = PvpCombat.FieldRef<PlayerMarkerVE, Label>(NameField);
 
         /// <summary>A player's name tag: whose it is, its team badge, and what was last written to it (written again only on a change).</summary>
         private sealed class NameTag
@@ -55,36 +60,9 @@ namespace VoidCrewFleet
         private static readonly Dictionary<PlayerMarkerVE, NameTag> NameTags = new Dictionary<PlayerMarkerVE, NameTag>();
         private static readonly List<PlayerMarkerVE> GoneTags = new List<PlayerMarkerVE>();
 
-        private static int LocalTeam
-        {
-            get { return FleetShips.TeamOfActor(FleetShips.LocalActor); }
-        }
-
         private static bool Relative
         {
-            get { return PvpCombat.Active && LocalTeam >= 0; }
-        }
-
-        private static bool IsEnemyActor(int actor)
-        {
-            int mine = LocalTeam;
-            int theirs = FleetShips.TeamOfActor(actor);
-            return mine >= 0 && theirs >= 0 && mine != theirs;
-        }
-
-        /// <summary>A reader for a game's field (no reflection call per read); null when the field is missing.</summary>
-        private static AccessTools.FieldRef<T, F> FieldRef<T, F>(FieldInfo field) where T : class
-        {
-            if (field == null) return null;
-            try
-            {
-                return AccessTools.FieldRefAccess<T, F>(field);
-            }
-            catch (Exception e)
-            {
-                Log.Warn("Game field " + field.DeclaringType.Name + "." + field.Name + " can't be read directly (" + e.Message + "); the game may have changed.");
-                return null;
-            }
+            get { return PvpCombat.Active && PvpCombat.LocalTeam >= 0; }
         }
 
         // ---------------------------------------------------------------- friend or foe
@@ -94,7 +72,7 @@ namespace VoidCrewFleet
         private static void AffiliationPostfix(OrbitObject obj, ref ObjectMarkerData.EAffiliation __result)
         {
             if (obj == null || !Relative) return;
-            int own = PvpCombat.FactionOfTeam(LocalTeam);
+            int own = PvpCombat.FactionOfTeam(PvpCombat.LocalTeam);
             if (obj.faction == own) __result = ObjectMarkerData.EAffiliation.Ally;
             else if (obj.faction == 0) __result = ObjectMarkerData.EAffiliation.Neutral;
             else __result = ObjectMarkerData.EAffiliation.Enemy;
@@ -171,7 +149,7 @@ namespace VoidCrewFleet
             try
             {
                 NameTag tag;
-                if (!Relative || !NameTags.TryGetValue(__instance, out tag) || !IsEnemyActor(tag.Actor)) return;
+                if (!Relative || !NameTags.TryGetValue(__instance, out tag) || !PvpCombat.IsEnemyActor(tag.Actor)) return;
                 VisualElement speaking = Speaking != null ? Speaking(__instance) : null;
                 if (speaking != null) speaking.style.display = DisplayStyle.None;
             }
@@ -201,7 +179,7 @@ namespace VoidCrewFleet
         {
             if (NameTags.Count == 0) return;
             Camera camera = Camera.main;
-            int mine = LocalTeam;
+            int mine = PvpCombat.LocalTeam;
             bool relative = PvpCombat.Active && mine >= 0;
             bool teamMatch = FleetApi.IsTeamMatch;
             GoneTags.Clear();
@@ -274,7 +252,7 @@ namespace VoidCrewFleet
                 LocalPlayer me = LocalPlayer.Instance;
                 Vector3 view = camera.WorldToViewportPoint(me != null ? tag.Data.WorldPos + me.transform.rotation * tag.Offset : tag.Data.WorldPos);
                 if (view.z <= 0f || view.x < 0f || view.x > 1f || view.y < 0f || view.y > 1f) return false;
-                return !Physics.Linecast(eye, target, SightMask, QueryTriggerInteraction.Ignore);
+                return !Physics.Linecast(eye, target, PvpCombat.SightMask, QueryTriggerInteraction.Ignore);
             }
             catch
             {

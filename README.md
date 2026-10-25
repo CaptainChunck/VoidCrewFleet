@@ -156,8 +156,8 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
   2. **Hold Fire** on the panel to plug it in. The hack takes **1 minute**, and the defenders can **pull it out** (hold
      Fire on it for 3 seconds) until then.
   3. When it finishes, your whole team can **use every door of that ship for 5 minutes**, including the airlock's door
-     buttons and pressurise lever, but not the cockpit doors or the airlock's safety override. A countdown shows on
-     screen for both teams.
+     buttons and pressurise lever, but not the cockpit doors or the airlock's safety override. Both teams see the
+     countdowns with their objectives, in the top right corner.
 
 ## Installation
 1. Install **BepInEx 5** for Void Crew, with a Thunderstore mod manager (BepInExPack) or by hand.

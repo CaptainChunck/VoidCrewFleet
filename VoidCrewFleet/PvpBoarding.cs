@@ -92,17 +92,11 @@ namespace VoidCrewFleet
         private static float _lastWarning = -100f;
         private static GrapplingHookProjectile _hookToRestore;
 
-        /// <summary>The local player's team (0 BLUE, 1 RED), or -1 when not on a team.</summary>
-        private static int LocalTeam
-        {
-            get { return FleetShips.TeamOfActor(FleetShips.LocalActor); }
-        }
-
         /// <summary>True for a ship of the other team, seen from the local player (a team's own ships are friendly).</summary>
         public static bool IsEnemyShip(PlayerControlledShip ship)
         {
             if (ship == null || !PvpCombat.Active) return false;
-            int mine = LocalTeam;
+            int mine = PvpCombat.LocalTeam;
             if (mine < 0) return false;
             int slot = FleetShips.Slot(ship);
             return slot >= 0 && FleetShips.TeamOfSlot(slot) != mine;
@@ -497,7 +491,7 @@ namespace VoidCrewFleet
                 // Tell the requester the door's real state, which undoes its own early open.
                 if (____shipDoors != null && index >= 0 && index < ____shipDoors.Count)
                     __instance.GetComponent<PhotonView>().RPC("NotifyClientOfOutcome", info.Sender, ____shipDoors[index].IsOpen, index);
-                Log.Info("PvP: refused a door of " + FleetShips.Describe(FleetShips.OwnerOf(__instance)) + " to enemy player " + info.Sender.ActorNumber + ".");
+                LogRefusal("a door", ship, info.Sender.ActorNumber);
                 return false;
             }
             catch (Exception e)
@@ -530,7 +524,7 @@ namespace VoidCrewFleet
                 PlayerControlledShip ship = FleetShips.OwnerOf(__instance);
                 if (!IsEnemyOf(info.Sender.ActorNumber, ship)) return true;
                 if (accessAllows && PvpHack.HasAccess(FleetShips.TeamOfActor(info.Sender.ActorNumber), ship)) return true;
-                Log.Info("PvP: refused an airlock control of " + FleetShips.Describe(FleetShips.OwnerOf(__instance)) + " to enemy player " + info.Sender.ActorNumber + ".");
+                LogRefusal(accessAllows ? "an airlock control" : "an airlock's safety override", ship, info.Sender.ActorNumber);
                 return false;
             }
             catch (Exception e)
@@ -593,24 +587,33 @@ namespace VoidCrewFleet
         /// player without a team) are refused, unless the change is to something a boarder may use (holder: the power drain
         /// or the synced switch's component, else null), and they are alive, aboard that ship and next to it, as their own
         /// game requires before it asks. The room's host is never refused: its own game logic asks a pilot who owns the
-        /// part for changes. An item or a character goes with whoever has it, wherever it is.
+        /// part for changes. An item or a character goes with whoever has it, wherever it is. A request replayed from the
+        /// room after its sender left (the game sends these to the part's owner alone and never keeps them in the room, so
+        /// only a modified game's can be replayed) is refused, the way PvpMatch and RemoveModulePrefix refuse theirs: whose
+        /// team it came from can't be told any more.
         /// </summary>
         private static bool AllowRequest(Component part, PhotonView view, string what, Component holder)
         {
+            if (!PvpCombat.Active || part == null) return true;
             int actor;
-            if (!PvpCombat.Active || part == null || !RpcSender.Of(view, out actor)) return true;
+            bool known = RpcSender.Of(view, out actor);
+            if (!known && !RpcSender.FromAbsentPlayer(view)) return true;
             try
             {
-                if (actor == FleetShips.LocalActor || Net.FromHost(actor)) return true;
+                if (known && (actor == FleetShips.LocalActor || Net.FromHost(actor))) return true;
                 PlayerControlledShip ship = FleetShips.OwnerOf(part);
                 int slot = FleetShips.Slot(ship);
-                if (slot < 0 || FleetShips.TeamOfActor(actor) == FleetShips.TeamOfSlot(slot)) return true;
+                if (slot < 0 || (known && FleetShips.TeamOfActor(actor) == FleetShips.TeamOfSlot(slot))) return true;
                 if (Carried(part) || (holder != null && Carried(holder))) return true;
-                Component usable = UsableBy(holder);
-                if (usable != null && AtPart(actor, ship, usable)) return true;
-                Log.InfoOnce("pvp refused " + what + " " + actor, "PvP: refused a change to " + what + " of " + FleetShips.Describe(ship) + " asked by player " + actor +
-                                                                 ", who is not on its team (further ones are only logged in verbose mode).");
-                Log.Verbose("PvP: refused a change to " + what + " of " + FleetShips.Describe(ship) + " asked by player " + actor + ".");
+                if (known)
+                {
+                    Component usable = UsableBy(holder);
+                    if (usable != null && AtPart(actor, ship, usable)) return true;
+                }
+                string who = known ? "asked by player " + actor + ", who is not on its team" : "replayed from a player who has left the room";
+                Log.InfoOnce("pvp refused " + what + " " + actor, "PvP: refused a change to " + what + " of " + FleetShips.Describe(ship) + " " + who +
+                                                                 " (further ones are only logged in verbose mode).");
+                Log.Verbose("PvP: refused a change to " + what + " of " + FleetShips.Describe(ship) + " " + who + ".");
                 return false;
             }
             catch (Exception e)
