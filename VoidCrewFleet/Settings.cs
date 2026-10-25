@@ -31,6 +31,7 @@ namespace VoidCrewFleet
         public static ConfigEntry<bool> AutoTestReturn;
         public static ConfigEntry<bool> AutoTestFists;
         public static ConfigEntry<bool> AutoTestTour;
+        public static ConfigEntry<bool> AutoTestCruisers;
         public static ConfigEntry<bool> Profile;
 
         public static void Bind(ConfigFile config)
@@ -117,6 +118,10 @@ namespace VoidCrewFleet
             AutoTestTour = config.Bind("Diagnostics", "AutoTestTour", false,
                 "With AutoTest = PvP: a free camera tours the arena (above it, behind each team, its centre, every ship, every salvage spot and a " +
                 "supply drop called in for the tour), with a screenshot at each and the game's screens hidden.");
+            AutoTestCruisers = config.Bind("Diagnostics", "AutoTestCruisers", false,
+                "With AutoTest = FleetPilgrimage: the host brings in the Fleet Battle mission's HOLLOW Cruiser spawner near the fleet, destroys " +
+                "the first cruiser it sends and checks that the next one comes, as with one ship (one at a time, 30 s after the last one died). " +
+                "The log says PASSED or FAILED.");
         }
     }
 }
