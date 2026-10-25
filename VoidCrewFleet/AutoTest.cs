@@ -601,17 +601,23 @@ namespace VoidCrewFleet
                     continue;
                 }
                 Log.Info("[autotest] Deconstruct: " + name + " came out of its slot on " + FleetShips.Describe(ship) + " in " + (Time.unscaledTime - started).ToString("0") + " s.");
-                // The slot takes the module back from the build box it left there.
-                yield return new WaitForSeconds(2f);
+                // The slot takes the module back from the build box it left there, once the game is done with the slot (it
+                // keeps working on it for a few seconds after the module came out).
+                started = Time.unscaledTime;
+                while (Time.unscaledTime - started < 15f && builder.IsWorkingOnSocket(socket)) yield return new WaitForSeconds(0.5f);
                 var box = socket.Payload as BuildBox;
                 bool rebuilding = false;
-                try
+                for (int attempt = 0; attempt < 3 && box != null && !rebuilding; attempt++)
                 {
-                    rebuilding = box != null && builder.TryConstructModule(box);
-                }
-                catch (Exception e)
-                {
-                    Log.Failure("[autotest] building " + name + " again", e);
+                    if (attempt > 0) yield return new WaitForSeconds(2f);
+                    try
+                    {
+                        rebuilding = builder.TryConstructModule(box);
+                    }
+                    catch (Exception e)
+                    {
+                        Log.Failure("[autotest] building " + name + " again", e);
+                    }
                 }
                 started = Time.unscaledTime;
                 while (rebuilding && Time.unscaledTime - started < wait && socket.InstalledModule == null) yield return new WaitForSeconds(1f);
