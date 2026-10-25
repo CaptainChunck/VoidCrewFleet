@@ -32,18 +32,6 @@ namespace VoidCrewFleet
             return teamMatch ? slot % 2 : 0;
         }
 
-        /// <summary>A ship's number within its team in a team match (1-3), or its ship number (1-6) outside one.</summary>
-        public static int NumberInTeam(int slot, bool teamMatch)
-        {
-            return teamMatch ? slot / 2 + 1 : slot + 1;
-        }
-
-        /// <summary>The slot of a team's ship (number 1-3 within the team).</summary>
-        public static int SlotOf(int team, int numberInTeam)
-        {
-            return (numberInTeam - 1) * 2 + team;
-        }
-
         /// <summary>"SHIP 3" outside a team match, "BLUE 2" / "RED 1" in one.</summary>
         public static string Name(int slot, bool teamMatch)
         {

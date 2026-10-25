@@ -17,7 +17,7 @@ using UnityEngine;
 namespace VoidCrewFleet
 {
     /// <summary>
-    /// With two player ships, every ship part must find its own ship. The game finds "the" ship through the single
+    /// With several player ships, every ship part must find its own ship. The game finds "the" ship through the single
     /// ClientGame.PlayerShip, set by whichever ship woke last. This replaces those lookups, in the game's components that
     /// make them, with "the player ship this component is on, if any, otherwise the game's answer"; and the game's answer
     /// itself becomes the ship of the local player's crew. In co-op, things in space that pick a ship to go after (enemies
@@ -42,8 +42,8 @@ namespace VoidCrewFleet
     {
         public const string Feature = FleetShips.Feature;
 
-        private static readonly MethodInfo PlayerShipGetter = Getter(GameMember.Property(typeof(ClientGame), "PlayerShip"));
-        private static readonly MethodInfo SignatureShipGetter = Getter(GameMember.Property(typeof(SignatureComponent), "PlayerShip"));
+        private static readonly MethodInfo PlayerShipGetter = GameMember.Property(typeof(ClientGame), "PlayerShip")?.GetGetMethod(true);
+        private static readonly MethodInfo SignatureShipGetter = GameMember.Property(typeof(SignatureComponent), "PlayerShip")?.GetGetMethod(true);
         private static readonly FieldInfo ScannerShipField = GameMember.Field(typeof(ScanComponent), "_playerShip");
         private static readonly MethodInfo RedirectMethod = new Func<ClientGame, object, PlayerControlledShip>(Redirect).Method;
         private static readonly MethodInfo RedirectNearestMethod = new Func<ClientGame, object, PlayerControlledShip>(RedirectNearest).Method;
@@ -56,18 +56,27 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// While a game method runs for a known ship (spawning a player on a ship's clone tube, a quest check for one
-        /// crew), "the player ship" is that ship. Every call must be paired with <see cref="EndOverride"/> (in a
-        /// finalizer); null pushes "no override" so nesting stays balanced.
+        /// crew), "the player ship" is that ship. Every call is paired with <see cref="EndOverride"/>: in the same method
+        /// (try/finally), or in the finalizer of the prefix that made it. Such a prefix tells its finalizer through __state
+        /// that it did: the two are patched one by one, so a finalizer whose prefix isn't in (a game update renamed what the
+        /// prefix reads) then ends nothing, instead of someone else's. With no ship (null, or one that is gone) the ship an
+        /// outer caller chose stays "the player ship"; it is pushed again, so nesting stays balanced.
         /// </summary>
         public static void BeginOverride(PlayerControlledShip ship)
         {
+            if (ship == null) ship = _override;
             Overrides.Add(ship);
             _override = ship;
         }
 
+        /// <summary>Ends the latest BeginOverride. One more than were begun (a patch out of step) is ignored, and logged once.</summary>
         public static void EndOverride()
         {
-            if (Overrides.Count == 0) return;
+            if (Overrides.Count == 0)
+            {
+                Log.WarnOnce("override underflow", "A patch ended a \"player ship\" it never set; ignored (a Fleet patch is out of step).");
+                return;
+            }
             Overrides.RemoveAt(Overrides.Count - 1);
             _override = Overrides.Count > 0 ? Overrides[Overrides.Count - 1] : null;
         }
@@ -75,8 +84,8 @@ namespace VoidCrewFleet
         // ---------------------------------------------------------------- the game's own "player ship"
 
         /// <summary>
-        /// With two ships, "the player ship" of the local player's screen and logic is their crew's ship (FleetShips.ViewShip,
-        /// worked out once a frame: the game reads this getter tens of thousands of times a second).
+        /// With several ships, "the player ship" of the local player's screen and logic is their crew's ship
+        /// (FleetShips.ViewShip, worked out once a frame: the game reads this getter hundreds of times a second).
         /// </summary>
         [GamePatch(Feature, "CG.Game.ClientGame", "get_PlayerShip", PatchKind.Postfix)]
         private static void PlayerShipPostfix(ref PlayerControlledShip __result)
@@ -88,20 +97,13 @@ namespace VoidCrewFleet
                     __result = _override;
                     return;
                 }
-                if (!FleetShips.Active) return;
-                PlayerControlledShip view = FleetShips.ViewShip;
+                PlayerControlledShip view = FleetShips.ActiveViewShip;
                 if (view != null) __result = view;
             }
             catch (Exception e)
             {
                 Log.Failure("Choosing the player ship", e);
             }
-        }
-
-        /// <summary>A property's getter, or null when the property is missing.</summary>
-        private static MethodInfo Getter(PropertyInfo property)
-        {
-            return property != null ? property.GetGetMethod(true) : null;
         }
 
         // ---------------------------------------------------------------- ship parts find their own ship
@@ -218,6 +220,24 @@ namespace VoidCrewFleet
                 return null;
             }
         }
+
+        /// <summary>
+        /// A fast call to a game method (for an instance method the instance is the first argument), built once so there is
+        /// no reflection call each time; null when the method is missing or has changed. Shared by the ship classes.
+        /// </summary>
+        internal static T Bind<T>(MethodInfo method) where T : class
+        {
+            if (method == null) return null;
+            try
+            {
+                return Delegate.CreateDelegate(typeof(T), method, false) as T;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         // Required: without one of these a ship's part would act on another ship (register its modules, doors, airlocks or
         // boosters there, run its air, shields, tilt, steering or scans, add its hull visuals and colliders to it, count its
         // items, weapons and target locks as that ship's, or, dying, destroy it).
@@ -479,27 +499,22 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// When a module disabler ends, the game clears the malfunction effect on one ship's modules; the other ships' are
-        /// cleared here (the game's own pass then does the remaining ship).
+        /// cleared here (the game's own pass then does the remaining ship), with the game's own module lookup.
         /// </summary>
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ModuleDisabler", "OnDisable", PatchKind.Prefix, Optional = true)]
-        private static void ModuleDisablerOffPrefix(object ___moduleTarget)
+        private static void ModuleDisablerOffPrefix(CG.Client.Utils.CsObjectReference ___moduleTarget)
         {
             if (!FleetShips.Active || ___moduleTarget == null) return;
             try
             {
                 ClientGame game = ClientGame.Current;
                 PlayerControlledShip current = game != null ? game.PlayerShip : null;
-                MethodInfo getModules = typeof(PlayerControlledShip).GetMethod("GetModules", new[] { ___moduleTarget.GetType() });
-                if (getModules == null) return;
                 foreach (PlayerControlledShip ship in new List<PlayerControlledShip>(FleetShips.All))
                 {
                     if (ship == null || ship == current) continue;
-                    var modules = getModules.Invoke(ship, new[] { ___moduleTarget }) as System.Collections.IEnumerable;
-                    if (modules == null) continue;
-                    foreach (object module in modules)
+                    foreach (CellModule module in ship.GetModules(___moduleTarget))
                     {
-                        var component = module as Component;
-                        var effect = component != null ? component.GetComponent<VFX.MalfunctionEffect>() : null;
+                        var effect = module != null ? module.GetComponent<VFX.MalfunctionEffect>() : null;
                         if (effect != null) effect.ToggleMalfunctionEffect(false);
                     }
                 }
@@ -513,8 +528,8 @@ namespace VoidCrewFleet
         /// <summary>
         /// Host: a black hole pulls and damages the player ship nearest to it, each physics step. The game kept the ship the
         /// host was on when it spawned (and damaged whichever ship the host was on at the time). The black hole's own field
-        /// (the ship it pulls) is only set when the nearest ship changes. The prefix and finalizer go on the same method and go
-        /// in together; without them a black hole pulls the ship the host is on, as the game does.
+        /// (the ship it pulls) is only set when the nearest ship changes. The finalizer only ends a "player ship" its prefix
+        /// set (__state); without the prefix a black hole pulls the ship the host is on, as the game does.
         /// </summary>
         [GamePatch(Feature, "Gameplay.SectorGameplay.BlackHole", "FixedUpdate", PatchKind.Prefix, Optional = true)]
         private static void BlackHolePrefix(Component __instance, out bool __state)
@@ -570,8 +585,9 @@ namespace VoidCrewFleet
         /// </summary>
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.AsteroidRain", "SpawnAsteroid", PatchKind.Prefix, Optional = true)]
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.NearPlayerSpawner", "SpawnConfiguredObjects", PatchKind.Prefix, Optional = true)]
-        private static void TwistSpawnPrefix(Component __instance)
+        private static void TwistSpawnPrefix(Component __instance, out bool __state)
         {
+            __state = false;
             PlayerControlledShip ship = null;
             try
             {
@@ -582,13 +598,14 @@ namespace VoidCrewFleet
                 Log.Failure("Choosing the ship a sector twist spawns at", e);
             }
             BeginOverride(ship);
+            __state = true;
         }
 
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.AsteroidRain", "SpawnAsteroid", PatchKind.Finalizer, Optional = true)]
         [GamePatch(Feature, "CG.Client.Quests.SectorTwists.NearPlayerSpawner", "SpawnConfiguredObjects", PatchKind.Finalizer, Optional = true)]
-        private static void TwistSpawnFinalizer()
+        private static void TwistSpawnFinalizer(bool __state)
         {
-            EndOverride();
+            if (__state) EndOverride();
         }
 
         /// <summary>The living ship a twist's next spawn goes for (they take turns, lowest number first), or null.</summary>
@@ -648,20 +665,6 @@ namespace VoidCrewFleet
             return false;
         }
 
-        /// <summary>A fast call to a private game method, or null when it is missing or has changed.</summary>
-        private static T Bind<T>(MethodInfo method) where T : class
-        {
-            if (method == null) return null;
-            try
-            {
-                return Delegate.CreateDelegate(typeof(T), method, false) as T;
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
         // ---------------------------------------------------------------- the mission's scenario rules
 
         /// <summary>
@@ -689,8 +692,9 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "CG.Game.Scenarios.Actions.DamageShip", "Invoke", PatchKind.Prefix, Optional = true)]
         [GamePatch(Feature, "CG.Game.Scenarios.Actions.NpcCommandMove", "Invoke", PatchKind.Prefix, Optional = true)]
         [GamePatch(Feature, "CG.Game.Scenarios.Actions.PositioningModeExtensions", "GetPosition", PatchKind.Prefix, Optional = true)]
-        private static void ScenarioPrefix(Classifier.ClassifierContext context)
+        private static void ScenarioPrefix(Classifier.ClassifierContext context, out bool __state)
         {
+            __state = false;
             PlayerControlledShip ship = null;
             try
             {
@@ -701,12 +705,14 @@ namespace VoidCrewFleet
                 Log.Failure("Choosing the ship a scenario rule acts on", e);
             }
             BeginOverride(ship);
+            __state = true;
         }
 
         /// <summary>Something a scenario rule spawns "pointing at the player ship" points at the living ship nearest to it (co-op).</summary>
         [GamePatch(Feature, "CG.Game.Scenarios.Actions.OrientationModeExtensions", "GetRotation", PatchKind.Prefix, Optional = true)]
-        private static void PointAtPrefix(Vector3 spawnPosition)
+        private static void PointAtPrefix(Vector3 spawnPosition, out bool __state)
         {
+            __state = false;
             PlayerControlledShip ship = null;
             try
             {
@@ -717,15 +723,17 @@ namespace VoidCrewFleet
                 Log.Failure("Choosing the ship a spawned object points at", e);
             }
             BeginOverride(ship);
+            __state = true;
         }
 
+        /// <summary>Ends the "player ship" a prefix above set (these prefixes read the rule's arguments by name, which a game update can rename).</summary>
         [GamePatch(Feature, "CG.Game.Scenarios.Actions.DamageShip", "Invoke", PatchKind.Finalizer, Optional = true)]
         [GamePatch(Feature, "CG.Game.Scenarios.Actions.NpcCommandMove", "Invoke", PatchKind.Finalizer, Optional = true)]
         [GamePatch(Feature, "CG.Game.Scenarios.Actions.PositioningModeExtensions", "GetPosition", PatchKind.Finalizer, Optional = true)]
         [GamePatch(Feature, "CG.Game.Scenarios.Actions.OrientationModeExtensions", "GetRotation", PatchKind.Finalizer, Optional = true)]
-        private static void ScenarioFinalizer()
+        private static void ScenarioFinalizer(bool __state)
         {
-            EndOverride();
+            if (__state) EndOverride();
         }
 
         // ---------------------------------------------------------------- building and taking apart modules
@@ -768,8 +776,9 @@ namespace VoidCrewFleet
         /// off the ship's list of modules all go to that ship, not to whichever ship the host is on.
         /// </summary>
         [GamePatch(Feature, "CG.Client.Player.Interactions.Build.BuildProcess", "Run", PatchKind.Prefix, Optional = true)]
-        private static void BuildProcessPrefix(BuildProcess __instance)
+        private static void BuildProcessPrefix(BuildProcess __instance, out bool __state)
         {
+            __state = false;
             PlayerControlledShip ship = null;
             try
             {
@@ -780,12 +789,13 @@ namespace VoidCrewFleet
                 Log.Failure("Choosing the ship a module is built on", e);
             }
             BeginOverride(ship);
+            __state = true;
         }
 
         [GamePatch(Feature, "CG.Client.Player.Interactions.Build.BuildProcess", "Run", PatchKind.Finalizer, Optional = true)]
-        private static void BuildProcessFinalizer()
+        private static void BuildProcessFinalizer(bool __state)
         {
-            EndOverride();
+            if (__state) EndOverride();
         }
     }
 }

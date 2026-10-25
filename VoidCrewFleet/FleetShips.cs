@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using CG.Game;
 using CG.Game.Player;
+using CG.GameLoopStateMachine;
 using CG.Objects;
 using CG.Ship.Hull;
 using CG.Space;
@@ -23,7 +24,7 @@ namespace VoidCrewFleet
     /// </summary>
     internal static class FleetShips
     {
-        public const string Feature = "Two player ships";
+        public const string Feature = "Several player ships";
 
         private const string KeyShips = "VCF_Ships";
         private const string KeyCrew = "VCF_Crew";
@@ -39,9 +40,10 @@ namespace VoidCrewFleet
         private static int _prunedFrame = -1;
 
         /// <summary>
-        /// True when more than one player ship exists: only then does anything here differ from the game. The game's busiest
-        /// getter asks this tens of thousands of times a second, so the list is only checked for ships that are gone once a
-        /// frame (ships leave it through Unregister as they are destroyed; the check is a safety net).
+        /// True when more than one player ship exists: only then does anything here differ from the game. It is asked many
+        /// times a frame (the game's "player ship" getter, hundreds of times a second, and every ship part that finds its own
+        /// ship), so the list is only checked for ships that are gone once a frame (ships leave it through Unregister as they
+        /// are destroyed; the check is a safety net).
         /// </summary>
         public static bool Active
         {
@@ -64,7 +66,12 @@ namespace VoidCrewFleet
 
         private static void PruneOncePerFrame()
         {
-            int frame = Time.frameCount;
+            PruneAt(Time.frameCount);
+        }
+
+        /// <summary>PruneOncePerFrame with the frame number already read (it is a call into the engine).</summary>
+        private static void PruneAt(int frame)
+        {
             if (frame == _prunedFrame) return;
             _prunedFrame = frame;
             Prune();
@@ -108,17 +115,55 @@ namespace VoidCrewFleet
                 KnownSlots.Clear();
                 Assigned.Clear();
             }
-            // One ship left: the game's own "player ship" becomes that ship (it may still point at the lost one).
+            // One ship left: the game's own "player ship" becomes that ship (it may still point at the lost one), also while
+            // the mission closes (the game's own clean-up may read it). Then its ships go one by one and the last of them
+            // isn't "left", so that isn't logged.
             if (!hadTwo || Registered.Count != 1) return;
             try
             {
                 if (CG.Game.ClientGame.Current != null) CG.Game.ClientGame.Current.PlayerShip = Registered[0];
-                Log.Info("Only " + Describe(Registered[0]) + " is left; it is everyone's ship now.");
+                if (!TearingDown) Log.Info("Only " + Describe(Registered[0]) + " is left; it is everyone's ship now.");
             }
             catch (Exception e)
             {
                 Log.Failure("Making the remaining ship everyone's ship", e);
             }
+        }
+
+        /// <summary>
+        /// True while the mission closes, so its ships go because it is over, not because one is lost: the mission has
+        /// ended (on to the results screen), the local player is leaving it (for the main menu, or the connection was lost),
+        /// or the game is closing. False when that can't be read (as before: every ship that goes counts as lost).
+        /// </summary>
+        public static bool TearingDown
+        {
+            get
+            {
+                try
+                {
+                    return MissionClosing();
+                }
+                catch
+                {
+                    // A game update changed what MissionClosing reads (it then fails as it is first called): as before.
+                    return false;
+                }
+            }
+        }
+
+        /// <summary>
+        /// TearingDown's reading of the game, in a method of its own (never inlined) so a game update that renames what it
+        /// reads only fails here, inside TearingDown's try. The game states are compared by name, as FleetRuntime does.
+        /// </summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static bool MissionClosing()
+        {
+            if (GameExitController.IsExiting) return true;
+            GameSession session = GameSessionManager.ActiveSession;
+            if (session != null && session.IsEnding) return true;
+            GameStateMachine machine = GameStateMachine.Instance;
+            string state = machine != null && machine.CurrentState != null ? machine.CurrentState.GetType().Name : null;
+            return state == "GSQuitFromMenu" || state == "GSPhotonDisconnected";
         }
 
         public static int ViewId(PlayerControlledShip ship)
@@ -224,16 +269,17 @@ namespace VoidCrewFleet
             if (ship == null) return -1;
             int view = ViewId(ship);
             int[] published = PublishedShips();
+            int known;
             if (published != null)
             {
                 int index = Array.IndexOf(published, view);
                 if (index >= 0)
                 {
-                    KnownSlots[view] = index;
+                    // Asked many times a frame: written only when it changes.
+                    if (!KnownSlots.TryGetValue(view, out known) || known != index) KnownSlots[view] = index;
                     return index;
                 }
             }
-            int known;
             if (KnownSlots.TryGetValue(view, out known)) return known;
             // Not published yet (or a client ahead of the room property): spawn order.
             PruneOncePerFrame();
@@ -268,6 +314,18 @@ namespace VoidCrewFleet
             {
                 return false;
             }
+        }
+
+        /// <summary>Whether a player ship other than this one (which may be unknown, or gone) exists and isn't dying.</summary>
+        public static bool AnotherLivingShip(PlayerControlledShip ship)
+        {
+            PruneOncePerFrame();
+            for (int i = 0; i < Registered.Count; i++)
+            {
+                PlayerControlledShip other = Registered[i];
+                if (other != null && other != ship && !other.StartedDeath) return true;
+            }
+            return false;
         }
 
         /// <summary>The slots whose ships exist and aren't dying, lowest first.</summary>
@@ -599,22 +657,37 @@ namespace VoidCrewFleet
         /// - in PvP: always their own ship, so a boarder doesn't see an enemy ship's state; without one, their team's first
         ///   living ship;
         /// - then the lowest living slot, then whichever ship is left.
-        /// The game reads it (through its own "player ship") tens of thousands of times a second, so it is worked out once a
-        /// frame, and again at once when the ships, the crews or the watched ship change.
+        /// The game reads it (through its own "player ship") hundreds of times a second, so it is worked out once a frame,
+        /// and again at once when the ships, the crews or the watched ship change.
         /// </summary>
         public static PlayerControlledShip ViewShip
+        {
+            get { return ViewShipAt(Time.frameCount); }
+        }
+
+        /// <summary>
+        /// ViewShip while Active, else null: the question the game's "player ship" getter asks on every read, with the frame
+        /// number read once.
+        /// </summary>
+        public static PlayerControlledShip ActiveViewShip
         {
             get
             {
                 int frame = Time.frameCount;
-                // A ship that was destroyed since (it reads as null) is replaced at once.
-                if (frame != _viewFrame || (!ReferenceEquals(_view, null) && _view == null))
-                {
-                    _viewFrame = frame;
-                    _view = FindViewShip();
-                }
-                return _view;
+                PruneAt(frame);
+                return Registered.Count > 1 ? ViewShipAt(frame) : null;
             }
+        }
+
+        private static PlayerControlledShip ViewShipAt(int frame)
+        {
+            // A ship that was destroyed since (it reads as null) is replaced at once.
+            if (frame != _viewFrame || (!ReferenceEquals(_view, null) && _view == null))
+            {
+                _viewFrame = frame;
+                _view = FindViewShip();
+            }
+            return _view;
         }
 
         /// <summary>ViewShip is worked out again when next read (the ships, the crews or the watched ship changed).</summary>
@@ -688,16 +761,9 @@ namespace VoidCrewFleet
         /// </summary>
         public static PlayerControlledShip OwnerOf(Component component)
         {
+            // Alive (Unity's null check), so its instance ID reads (a destroyed object's reads as 0).
             if (component == null) return null;
-            int id;
-            try
-            {
-                id = component.GetInstanceID();
-            }
-            catch
-            {
-                return null;
-            }
+            int id = component.GetInstanceID();
             PlayerControlledShip cached;
             if (Assigned.TryGetValue(id, out cached) && cached != null) return cached;
             if (OwnerCache.TryGetValue(id, out cached) && cached != null) return cached;
@@ -715,15 +781,14 @@ namespace VoidCrewFleet
                 ShipHull hull = component.GetComponentInParent<ShipHull>();
                 if (hull != null) ship = hull.Ship;
             }
-            if (ship == null)
-            {
-                var carryable = component as CarryableObject;
-                if (carryable != null && carryable.ParentPlatform != null) ship = carryable.ParentPlatform.GetComponent<PlayerControlledShip>();
-            }
-            // Carryables move between ships, so only fixed parts are remembered. "Not on a ship" is only remembered for a
-            // second: a part can be looked up before it is attached to its ship.
-            if (ship != null && !(component is CarryableObject)) OwnerCache[id] = ship;
-            if (ship == null && !(component is CarryableObject))
+            // An item, or a part of one (its ping label, an upgrader's effects): on the ship the item rests on.
+            CarryableObject carryable = component as CarryableObject ?? component.GetComponentInParent<CarryableObject>();
+            if (ship == null && carryable != null && carryable.ParentPlatform != null) ship = carryable.ParentPlatform.GetComponent<PlayerControlledShip>();
+            // Items move between ships, and their parts with them, so only fixed parts are remembered (a part of an item
+            // kept the ship the item was on when first asked). "Not on a ship" is only remembered for a second: a part can
+            // be looked up before it is attached to its ship.
+            if (ship != null && carryable == null) OwnerCache[id] = ship;
+            if (ship == null && carryable == null)
             {
                 if (NotOnShip.Count > 4096) NotOnShip.Clear();
                 NotOnShip[id] = Time.unscaledTime + 1f;

@@ -64,7 +64,7 @@ namespace VoidCrewFleet
 
         private static readonly List<ShipCopy> Copies = new List<ShipCopy>();
 
-        /// <summary>The game's assembly: rules whose types come from it are the game's own (GameRules).</summary>
+        /// <summary>The game's assembly: stat mods and rules whose types come from it are the game's own (GameRules).</summary>
         private static readonly Assembly GameAssembly = typeof(ModDynamicCondition).Assembly;
 
         /// <summary>Marks the copies (they are never shared, so never copied or set up again).</summary>
@@ -96,11 +96,14 @@ namespace VoidCrewFleet
         }
 
         // ---------------------------------------------------------------- whose stats are being changed
+        // Each prefix here tells its finalizer through __state that it pushed (onto Changing, or a "player ship"): they are
+        // patched one by one and read the game's arguments by name, so a finalizer whose prefix isn't in pops nothing.
 
         [GamePatch(Feature, "Gameplay.Utilities.StatTagCollection", "ApplyModifier", PatchKind.Prefix, Optional = true)]
-        private static void ApplyOnePrefix(StatTagCollection __instance, ref StatMod mod)
+        private static void ApplyOnePrefix(StatTagCollection __instance, ref StatMod mod, out bool __state)
         {
             Changing.Add(__instance);
+            __state = true;
             if (mod == null || !mod.IsDynamic || FleetSession.ShipCount < 2) return;
             try
             {
@@ -115,9 +118,10 @@ namespace VoidCrewFleet
         }
 
         [GamePatch(Feature, "Gameplay.Utilities.StatTagCollection", "ApplyModifiers", PatchKind.Prefix, Optional = true)]
-        private static void ApplyManyPrefix(StatTagCollection __instance, ref IEnumerable<StatMod> mods)
+        private static void ApplyManyPrefix(StatTagCollection __instance, ref IEnumerable<StatMod> mods, out bool __state)
         {
             Changing.Add(__instance);
+            __state = true;
             if (mods == null || FleetSession.ShipCount < 2) return;
             try
             {
@@ -131,43 +135,46 @@ namespace VoidCrewFleet
 
         [GamePatch(Feature, "Gameplay.Utilities.StatTagCollection", "ApplyModifier", PatchKind.Finalizer, Optional = true)]
         [GamePatch(Feature, "Gameplay.Utilities.StatTagCollection", "ApplyModifiers", PatchKind.Finalizer, Optional = true)]
-        private static void ApplyFinalizer()
+        private static void ApplyFinalizer(bool __state)
         {
-            if (Changing.Count > 0) Changing.RemoveAt(Changing.Count - 1);
+            if (__state && Changing.Count > 0) Changing.RemoveAt(Changing.Count - 1);
         }
 
         // ---------------------------------------------------------------- a rule is set up for its own ship
 
         [GamePatch(Feature, "Gameplay.Utilities.ModDynamicCondition", "Init", PatchKind.Prefix, Optional = true)]
-        private static void ConditionInitPrefix(ModDynamicCondition __instance, StatMod mod)
+        private static void ConditionInitPrefix(ModDynamicCondition __instance, StatMod mod, out bool __state)
         {
             ShipRedirect.BeginOverride(__instance != null && !__instance.IsInitialized ? Choose(__instance, mod) : null);
+            __state = true;
         }
 
         [GamePatch(Feature, "Gameplay.Utilities.ModDynamicValue", "Init", PatchKind.Prefix, Optional = true)]
-        private static void ValueInitPrefix(ModDynamicValue __instance, StatMod statMod)
+        private static void ValueInitPrefix(ModDynamicValue __instance, StatMod statMod, out bool __state)
         {
             ShipRedirect.BeginOverride(__instance != null && !__instance.IsInitialized ? Choose(__instance, statMod) : null);
+            __state = true;
         }
 
         [GamePatch(Feature, "Gameplay.Utilities.ModDynamicCondition", "Init", PatchKind.Finalizer, Optional = true)]
         [GamePatch(Feature, "Gameplay.Utilities.ModDynamicValue", "Init", PatchKind.Finalizer, Optional = true)]
-        private static void InitFinalizer()
+        private static void InitFinalizer(bool __state)
         {
-            ShipRedirect.EndOverride();
+            if (__state) ShipRedirect.EndOverride();
         }
 
         /// <summary>A speed rule measures its own ship (the game reads "the player ship" every second).</summary>
         [GamePatch(Feature, "Gameplay.Utilities.ModValueShipSpeed", "SpeedCheck", PatchKind.Prefix, Optional = true)]
-        private static void SpeedCheckPrefix(object __instance)
+        private static void SpeedCheckPrefix(object __instance, out bool __state)
         {
             ShipRedirect.BeginOverride(FleetShips.Active ? RuleShip(__instance) : null);
+            __state = true;
         }
 
         [GamePatch(Feature, "Gameplay.Utilities.ModValueShipSpeed", "SpeedCheck", PatchKind.Finalizer, Optional = true)]
-        private static void SpeedCheckFinalizer()
+        private static void SpeedCheckFinalizer(bool __state)
         {
-            ShipRedirect.EndOverride();
+            if (__state) ShipRedirect.EndOverride();
         }
 
         /// <summary>
@@ -284,7 +291,7 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// The stat mod to apply to a collection, for one with rules (in a fleet mission):
-        /// - with a rule another mod wrote: itself, left as that mod made it (GameRules);
+        /// - made with another mod's own kind of stat mod, modifier or rule: itself, left as that mod made it (GameRules);
         /// - not set up yet: itself, kept as it is now first, so copies can be made of it later;
         /// - set up for this collection's ship, applied again where it was set up, applied to a collection of no player ship,
         ///   or set up before the mission had several ships: itself;
@@ -330,15 +337,19 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// Whether a stat mod's rules are all the game's own. Only those are kept, copied or set up again. A rule another mod
-        /// writes can hold live game objects before it is set up (Ectype Skirmisher's Get Out and Push keeps its player,
-        /// their atmosphere tracker and the ship), and the game's deep copy then copies everything they lead to, recursing
-        /// until the stack runs out: the game closed at once, with no crash report, as such a player arrived in a fleet
-        /// mission.
+        /// Whether a stat mod is all the game's own: the mod itself, its modifier, its tag settings and its rules. Only those
+        /// are kept, copied or set up again. Something another mod writes can hold live game objects before it is set up
+        /// (Ectype Skirmisher's Get Out and Push rule keeps its player, their atmosphere tracker and the ship), and the game's
+        /// deep copy then copies everything they lead to, recursing until the stack runs out: the game closed at once, with no
+        /// crash report, as such a player arrived in a fleet mission. The copy goes through the whole stat mod, so a mod's own
+        /// kind of stat mod or modifier is left alone too, not only its own rules.
         /// </summary>
         private static bool GameRules(StatMod mod)
         {
-            return (mod.DynamicCondition == null || mod.DynamicCondition.GetType().Assembly == GameAssembly) &&
+            return mod.GetType().Assembly == GameAssembly &&
+                (mod.Mod == null || mod.Mod.GetType().Assembly == GameAssembly) &&
+                (mod.TagConfiguration == null || mod.TagConfiguration.GetType().Assembly == GameAssembly) &&
+                (mod.DynamicCondition == null || mod.DynamicCondition.GetType().Assembly == GameAssembly) &&
                 (mod.DynamicValue == null || mod.DynamicValue.GetType().Assembly == GameAssembly);
         }
 

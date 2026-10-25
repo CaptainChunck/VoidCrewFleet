@@ -74,8 +74,8 @@ namespace VoidCrewFleet
         private static readonly AccessTools.FieldRef<CloneTubeState, CloneTube> StateTube =
             InstanceRef<CloneTubeState, CloneTube>(GameMember.Field(typeof(CloneTubeState), "CloneTube"));
 
-        private static readonly MethodInfo GetAlloy = Getter(GameMember.Property(typeof(GameSessionSuppliesManager), "AlloyAmount"));
-        private static readonly MethodInfo GetBiomass = Getter(GameMember.Property(typeof(GameSessionSuppliesManager), "BiomassAmount"));
+        private static readonly MethodInfo GetAlloy = GameMember.Property(typeof(GameSessionSuppliesManager), "AlloyAmount")?.GetGetMethod(true);
+        private static readonly MethodInfo GetBiomass = GameMember.Property(typeof(GameSessionSuppliesManager), "BiomassAmount")?.GetGetMethod(true);
         private static readonly MethodInfo ModAlloy = GameMember.Method(typeof(GameSessionSuppliesManager), "ModifyAlloyCount");
         private static readonly MethodInfo ModBiomass = GameMember.Method(typeof(GameSessionSuppliesManager), "ModifyBiomassCount");
         private static readonly MethodInfo PlayerBiomass = GameMember.Method(typeof(GameSessionSuppliesManager), "PlayerBiomassBonus");
@@ -84,9 +84,9 @@ namespace VoidCrewFleet
         private static readonly MethodInfo ModifyAlloyForMethod = AccessTools.Method(typeof(ShipResources), nameof(ModifyAlloyFor));
         private static readonly MethodInfo ModifyBiomassForMethod = AccessTools.Method(typeof(ShipResources), nameof(ModifyBiomassFor));
         private static readonly Action<ModDynamicCondition> RuleCheck =
-            Bind<Action<ModDynamicCondition>>(GameMember.Method(typeof(ModDynamicCondition), "CheckIfActive"));
+            ShipRedirect.Bind<Action<ModDynamicCondition>>(GameMember.Method(typeof(ModDynamicCondition), "CheckIfActive"));
         private static readonly Action<ModValueResourceCount, int> RuleAmountChanged =
-            Bind<Action<ModValueResourceCount, int>>(GameMember.Method(typeof(ModValueResourceCount), "OnResourceChanged"));
+            ShipRedirect.Bind<Action<ModValueResourceCount, int>>(GameMember.Method(typeof(ModValueResourceCount), "OnResourceChanged"));
 
         /// <summary>A direct reader of a game's instance field; null when the field is missing or has changed.</summary>
         private static AccessTools.FieldRef<T, F> InstanceRef<T, F>(FieldInfo field)
@@ -103,25 +103,6 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>A fast call to a game method (the instance is the first argument); null when it is missing or has changed.</summary>
-        private static T Bind<T>(MethodInfo method) where T : class
-        {
-            if (method == null) return null;
-            try
-            {
-                return Delegate.CreateDelegate(typeof(T), method, false) as T;
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private static MethodInfo Getter(PropertyInfo property)
-        {
-            return property != null ? property.GetGetMethod(true) : null;
-        }
-
         /// <summary>An item rule that counts a ship's alloys or biomass.</summary>
         private sealed class ResourceRule
         {
@@ -132,9 +113,22 @@ namespace VoidCrewFleet
 
         private static readonly List<ResourceRule> Rules = new List<ResourceRule>();
 
+        /// <summary>Whether this feature's patches are in: 0 not asked yet, 1 in, -1 not (Active).</summary>
+        private static int _ready;
+
+        /// <summary>
+        /// A fleet mission with this feature on. Asked for every occupied clone tube each frame, every shop item a terminal
+        /// lists and every rule check, so whether the feature is on is looked up once: it is settled before any fleet
+        /// mission (the late patches go in as the game finishes loading), and only asked once there are several ships.
+        /// </summary>
         public static bool Active
         {
-            get { return FleetShips.Active && Patcher.IsReady(Feature); }
+            get
+            {
+                if (!FleetShips.Active) return false;
+                if (_ready == 0) _ready = Patcher.IsReady(Feature) ? 1 : -1;
+                return _ready > 0;
+            }
         }
 
         /// <summary>For reports: "ship 1 120 alloys / 50 biomass, ship 2 ...".</summary>
@@ -485,7 +479,7 @@ namespace VoidCrewFleet
             return bonus is int ? (int)bonus : 0;
         }
 
-        /// <summary>Host: a player joining gets both ships' counts (the game has every client send its one count).</summary>
+        /// <summary>Host: a player joining gets every ship's counts (the game has every client send its one count).</summary>
         [GamePatch(Feature, "GameSessionSuppliesManager", "OnPlayerEnteredRoom", PatchKind.Prefix)]
         private static bool PlayerEnteredPrefix(GameSessionSuppliesManager __instance, Photon.Realtime.Player newPlayer)
         {
@@ -523,7 +517,7 @@ namespace VoidCrewFleet
             }
             catch (Exception e)
             {
-                Log.Failure("Refreshing the other ship's fabricator", e);
+                Log.Failure("Refreshing another ship's fabricator", e);
             }
             return false;
         }
@@ -544,9 +538,9 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// A count without a ship while this client still counts per ship: the host lost the other ship first and counts
-        /// with one ship already, so it is the remaining ship's count. It is kept for that ship too, so switching back to
-        /// the game's own count can't bring an older one back.
+        /// A count without a ship while this client still counts per ship: the host saw the fleet come down to one ship first
+        /// and counts with one ship already, so it is the remaining ship's count. It is kept for that ship too, so switching
+        /// back to the game's own count can't bring an older one back.
         /// </summary>
         private static void KeepSurvivorCount(bool alloy, int value)
         {
@@ -663,6 +657,19 @@ namespace VoidCrewFleet
             _pinned = -1;
             _survivor = -1;
             _wasActive = false;
+            ForgetGoneRules();
+        }
+
+        /// <summary>
+        /// The item rules whose item or ship is gone (an earlier mission's, as a new one starts). Only those: a rule of this
+        /// mission's ships may already be set up before its resources are (the ships and their items can come first).
+        /// </summary>
+        private static void ForgetGoneRules()
+        {
+            for (int i = Rules.Count - 1; i >= 0; i--)
+            {
+                if (Rules[i].Rule.Target == null || Rules[i].Ship == null) Rules.RemoveAt(i);
+            }
         }
 
         // ---------------------------------------------------------------- fabricator terminals show their own ship's count
@@ -729,17 +736,21 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- blueprints are learned per ship
 
-        /// <summary>"Already learned?" is checked against this fabricator's own blueprints (the game asks "the" ship's).</summary>
+        /// <summary>
+        /// "Already learned?" is checked against this fabricator's own blueprints (the game asks "the" ship's). As with every
+        /// prefix and finalizer pair here, the prefix tells its finalizer through __state that it set something to end.
+        /// </summary>
         [GamePatch(Feature, "CG.Ship.Modules.FabricatorModule", "TryAddItemToSharedUnlockPool", PatchKind.Prefix)]
-        private static void LearnPrefix(Component __instance)
+        private static void LearnPrefix(Component __instance, out bool __state)
         {
             ShipRedirect.BeginOverride(FleetShips.Active ? FleetShips.OwnerOf(__instance) : null);
+            __state = true;
         }
 
         [GamePatch(Feature, "CG.Ship.Modules.FabricatorModule", "TryAddItemToSharedUnlockPool", PatchKind.Finalizer)]
-        private static void LearnFinalizer()
+        private static void LearnFinalizer(bool __state)
         {
-            ShipRedirect.EndOverride();
+            if (__state) ShipRedirect.EndOverride();
         }
 
         /// <summary>Each crew's perk blueprints go to their own ship's fabricator.</summary>
@@ -752,15 +763,16 @@ namespace VoidCrewFleet
         }
 
         [GamePatch(Feature, "CG.Ship.Modules.FabricatorModule", "ItemAddedToSharedUnlockPool", PatchKind.Prefix)]
-        private static void LearnedPrefix(Component __instance)
+        private static void LearnedPrefix(Component __instance, out bool __state)
         {
             ShipEvents.BeginFor(__instance);
+            __state = true;
         }
 
         [GamePatch(Feature, "CG.Ship.Modules.FabricatorModule", "ItemAddedToSharedUnlockPool", PatchKind.Finalizer)]
-        private static void LearnedFinalizer()
+        private static void LearnedFinalizer(bool __state)
         {
-            ShipEvents.End();
+            if (__state) ShipEvents.End();
         }
 
         /// <summary>"New blueprint" only for the ship the local player belongs to.</summary>
@@ -891,8 +903,9 @@ namespace VoidCrewFleet
 
         /// <summary>The tally counts the player's own crew's ship (in PvP their team's).</summary>
         [GamePatch(Feature, "CG.GameLoopStateMachine.GameStates.GSIngame", "OnGameEnded", PatchKind.Prefix)]
-        private static void GameEndedPrefix(ClientGameState state)
+        private static void GameEndedPrefix(ClientGameState state, out bool __state)
         {
+            __state = false;
             PlayerControlledShip own = null;
             try
             {
@@ -914,13 +927,14 @@ namespace VoidCrewFleet
                 Log.Failure("Tallying the player's own ship", e);
             }
             ShipRedirect.BeginOverride(own);
+            __state = true;
         }
 
         [GamePatch(Feature, "CG.GameLoopStateMachine.GameStates.GSIngame", "OnGameEnded", PatchKind.Finalizer)]
-        private static void GameEndedFinalizer()
+        private static void GameEndedFinalizer(bool __state)
         {
             _tallySlot = -1;
-            ShipRedirect.EndOverride();
+            if (__state) ShipRedirect.EndOverride();
         }
 
         /// <summary>

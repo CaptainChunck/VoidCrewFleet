@@ -54,6 +54,8 @@ internal static class Program
             CheckMemberLookups(plugin);
             Console.WriteLine("Game members named in the patch methods' code and their classes' static set-up:");
             CheckHookCode();
+            Console.WriteLine("State a prefix hands its postfix or finalizer (__state):");
+            CheckStatePairs(plugin);
         }
         catch (Exception e)
         {
@@ -485,5 +487,99 @@ internal static class Program
             int count = level == null ? 0 : level.Methods.Count(m => m.Name == member);
             Check(count == 1, what + " exists exactly once (found " + count + ")" + where);
         }
+    }
+
+    // ------------------------------------------------------------------ 4. __state between a prefix and its finalizer
+
+    /// <summary>
+    /// Harmony keeps one __state per patch class and game method, typed by the first of that class's patch methods there
+    /// that names it. So:
+    /// - a postfix or finalizer that reads __state needs a prefix of its class on the same method that sets it (out or ref)
+    ///   with the same type, or it always reads the type's default;
+    /// - an optional finalizer (or postfix) that ends a "player ship" (ShipRedirect.EndOverride) or a ship's event
+    ///   (ShipEvents.End) must take __state, so it ends only what its own prefix began. Patches go in one by one, so an
+    ///   optional prefix can be missing (a game update renamed an argument it reads) while its finalizer is in; a missing
+    ///   required patch switches its whole feature off instead.
+    /// </summary>
+    private static void CheckStatePairs(ModuleDefinition plugin)
+    {
+        var groups = new Dictionary<string, List<KeyValuePair<MethodDefinition, int>>>();
+        var labels = new Dictionary<string, string>();
+        foreach (TypeDefinition host in plugin.GetTypes())
+        {
+            foreach (MethodDefinition hook in host.Methods)
+            {
+                foreach (CustomAttribute attribute in hook.CustomAttributes.Where(a => a.AttributeType.FullName == AttributeName))
+                {
+                    string feature = (string)attribute.ConstructorArguments[0].Value;
+                    int kind = Convert.ToInt32(attribute.ConstructorArguments[3].Value);
+                    bool optional = false;
+                    string arguments = "", body = "";
+                    foreach (Mono.Cecil.CustomAttributeNamedArgument property in attribute.Properties)
+                    {
+                        var values = property.Argument.Value as CustomAttributeArgument[];
+                        if (property.Name == "Optional") optional = (bool)property.Argument.Value;
+                        else if (property.Name == "Coroutine" && (bool)property.Argument.Value) body = " (coroutine)";
+                        else if (property.Name == "Lambda") body = " (lambda " + property.Argument.Value + ")";
+                        else if (property.Name == "Arguments" && values != null) arguments = "(" + string.Join(", ", values.Select(v => (string)v.Value)) + ")";
+                    }
+                    if (kind == 3) continue;
+                    // The game method and the patch class (Harmony's __state is per both), written the same way whatever the
+                    // order of the attribute's settings.
+                    string key = (string)attribute.ConstructorArguments[1].Value + "." + (string)attribute.ConstructorArguments[2].Value + arguments + body +
+                                 " <- " + host.Name;
+                    if (!labels.ContainsKey(key)) labels[key] = "[" + feature + "] " + key;
+                    List<KeyValuePair<MethodDefinition, int>> group;
+                    if (!groups.TryGetValue(key, out group)) groups[key] = group = new List<KeyValuePair<MethodDefinition, int>>();
+                    group.Add(new KeyValuePair<MethodDefinition, int>(hook, kind));
+                    if (optional && kind != 0 && EndsWhatAPrefixBegan(hook))
+                        Check(StateOf(hook) != null,
+                            "[" + feature + "] " + key + "." + hook.Name + ": an optional finalizer that ends a \"player ship\" or a ship's event takes __state");
+                }
+            }
+        }
+        foreach (KeyValuePair<string, List<KeyValuePair<MethodDefinition, int>>> group in groups)
+        {
+            List<KeyValuePair<MethodDefinition, int>> withState = group.Value.Where(p => StateOf(p.Key) != null).ToList();
+            if (withState.Count == 0) continue;
+            List<string> types = withState.Select(p => Unref(StateOf(p.Key).ParameterType).FullName).Distinct().ToList();
+            bool prefixSets = withState.Any(p => p.Value == 0 && StateOf(p.Key).ParameterType is ByReferenceType);
+            bool prefixReadsOnly = withState.Any(p => p.Value == 0 && !(StateOf(p.Key).ParameterType is ByReferenceType));
+            List<string> readers = withState.Where(p => p.Value != 0).Select(p => p.Key.Name).ToList();
+            Check(types.Count == 1 && prefixSets && !prefixReadsOnly, labels[group.Key] + ": __state (" + string.Join(" / ", types) + ") set by a prefix, read by " +
+                                                                    (readers.Count > 0 ? string.Join(", ", readers) : "none"));
+        }
+    }
+
+    private static ParameterDefinition StateOf(MethodDefinition hook)
+    {
+        return hook.Parameters.FirstOrDefault(p => p.Name == "__state");
+    }
+
+    private static TypeReference Unref(TypeReference type)
+    {
+        var byRef = type as ByReferenceType;
+        return byRef != null ? byRef.ElementType : type;
+    }
+
+    /// <summary>
+    /// Whether a patch method's own code ends a "player ship" (ShipRedirect.EndOverride) or a ship's event (ShipEvents.End)
+    /// that it doesn't begin itself (a try/finally pair in one method is no prefix's).
+    /// </summary>
+    private static bool EndsWhatAPrefixBegan(MethodDefinition hook)
+    {
+        if (!hook.HasBody) return false;
+        int overrides = 0, events = 0;
+        foreach (Instruction instruction in hook.Body.Instructions)
+        {
+            var call = instruction.Operand as MethodReference;
+            if (call == null) continue;
+            string owner = call.DeclaringType.FullName;
+            if (owner == "VoidCrewFleet.ShipRedirect" && call.Name == "BeginOverride") overrides++;
+            else if (owner == "VoidCrewFleet.ShipRedirect" && call.Name == "EndOverride") overrides--;
+            else if (owner == "VoidCrewFleet.ShipEvents" && (call.Name == "Begin" || call.Name == "BeginFor")) events++;
+            else if (owner == "VoidCrewFleet.ShipEvents" && call.Name == "End") events--;
+        }
+        return overrides < 0 || events < 0;
     }
 }

@@ -230,14 +230,7 @@ namespace VoidCrewFleet
 
         private static bool AnotherShipSurvives
         {
-            get
-            {
-                foreach (PlayerControlledShip ship in FleetShips.All)
-                {
-                    if (ship != null && ship != Dying && !ship.StartedDeath) return true;
-                }
-                return false;
-            }
+            get { return FleetShips.AnotherLivingShip(Dying); }
         }
 
         /// <summary>
@@ -353,8 +346,9 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// The game's death sequence (one per mission: the local player's view of a ship's death) as it starts up: its timings are
-        /// kept, so a ship's death doesn't search the whole scene for them (15-20 ms in a fleet mission).
+        /// A ship's death sequence (every ship has one: the local player's view of that ship's death) as it starts up: its
+        /// timings, the game's same ones on every ship, are kept, so a ship's death doesn't search the whole scene for them
+        /// (15-20 ms in a fleet mission).
         /// </summary>
         [GamePatch(Feature, "PlayerShipDeathSequence", "Awake", PatchKind.Postfix, Optional = true)]
         private static void SequenceAwakePostfix(PlayerShipDeathSequence __instance)
@@ -536,11 +530,7 @@ namespace VoidCrewFleet
                 var ship = orbitObject as PlayerControlledShip;
                 if (ship == null || FleetSession.ShipCount < 2) return true;
                 if (FleetSession.IsPvP) return false;
-                foreach (PlayerControlledShip other in FleetShips.All)
-                {
-                    if (other != null && other != ship && !other.StartedDeath) return false;
-                }
-                return true;
+                return !FleetShips.AnotherLivingShip(ship);
             }
             catch (Exception e)
             {
