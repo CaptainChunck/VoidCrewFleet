@@ -230,23 +230,27 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>The fabricator, recycler, upgrade, bioport and clone tube code reads and spends its own ship's count.</summary>
+        /// <summary>
+        /// The fabricator, recycler, upgrade, bioport and clone tube code reads and spends its own ship's count. The spending
+        /// and the host's checks are required; a fabricator terminal's tabs only check what they show (the host checks a print
+        /// again, FabricatorData), so without one of those the feature still runs (and its start-up report line says so).
+        /// </summary>
         [GamePatch(Feature, "Gameplay.Factory.CarryableFactoryLogic", "Print", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Gameplay.Factory.CarryableFactoryLogic+<DoPrintProcess>d__47", "MoveNext", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Gameplay.Factory.CarryableFactoryLogic+<>c__DisplayClass47_0", "<DoPrintProcess>b__1", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Gameplay.Factory.CarryableFactoryLogic+<DoRecycleProcess>d__50", "MoveNext", PatchKind.Transpiler)]
+        [GamePatch(Feature, "Gameplay.Factory.CarryableFactoryLogic", "DoPrintProcess", PatchKind.Transpiler, Coroutine = true)]
+        [GamePatch(Feature, "Gameplay.Factory.CarryableFactoryLogic", "DoPrintProcess", PatchKind.Transpiler, Lambda = 1)]
+        [GamePatch(Feature, "Gameplay.Factory.CarryableFactoryLogic", "DoRecycleProcess", PatchKind.Transpiler, Coroutine = true)]
         [GamePatch(Feature, "CG.Ship.Modules.FabricatorModule", "Upgrade", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.Modules.FabricatorModule", "UpgradeInternal", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Hull.HomunculusAndBiomassSocket", "<Start>b__12_0", PatchKind.Transpiler)]
+        [GamePatch(Feature, "CG.Ship.Hull.HomunculusAndBiomassSocket", "Start", PatchKind.Transpiler, Lambda = 0)]
         [GamePatch(Feature, "CloneTubeHealing", "RemainingBiomass", PatchKind.Transpiler)]
         [GamePatch(Feature, "CloneTubeHealing", "DeductBiomass", PatchKind.Transpiler)]
         [GamePatch(Feature, "FabricatorData", "CanPrint", PatchKind.Transpiler)]
         [GamePatch(Feature, "FabricatorData", "PrintNow", PatchKind.Transpiler)]
-        [GamePatch(Feature, "FabricationTab", ".ctor", PatchKind.Transpiler)]
-        [GamePatch(Feature, "FabricationTab", "CheckErrors", PatchKind.Transpiler)]
-        [GamePatch(Feature, "FabricationTab", "CanAfford", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UpgradeTab", ".ctor", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UpgradeTab", "CheckErrors", PatchKind.Transpiler)]
+        [GamePatch(Feature, "FabricationTab", ".ctor", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "FabricationTab", "CheckErrors", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "FabricationTab", "CanAfford", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "UpgradeTab", ".ctor", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "UpgradeTab", "CheckErrors", PatchKind.Transpiler, Optional = true)]
         private static IEnumerable<CodeInstruction> ResourceTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
         {
             int replaced = 0;
@@ -274,8 +278,7 @@ namespace VoidCrewFleet
                 yield return new CodeInstruction(OpCodes.Call, helper);
                 replaced++;
             }
-            if (replaced == 0)
-                Log.Warn("Per-ship resources: " + original.DeclaringType.FullName + "." + original.Name + " no longer uses the resources; the game may have changed.");
+            if (replaced == 0) Patcher.NothingReplaced(Feature, original, "uses the resources");
         }
 
         // ---------------------------------------------------------------- the host changes a ship's count
@@ -690,7 +693,7 @@ namespace VoidCrewFleet
             return true;
         }
 
-        [GamePatch(Feature, "FabricationTab", "UpdateAlloyLabel", PatchKind.Prefix)]
+        [GamePatch(Feature, "FabricationTab", "UpdateAlloyLabel", PatchKind.Prefix, Optional = true)]
         private static bool FabricationLabelPrefix(FabricatorActionTab __instance, ref int obj)
         {
             try
@@ -706,7 +709,7 @@ namespace VoidCrewFleet
             }
         }
 
-        [GamePatch(Feature, "UpgradeTab", "OnAlloysUpdated", PatchKind.Prefix)]
+        [GamePatch(Feature, "UpgradeTab", "OnAlloysUpdated", PatchKind.Prefix, Optional = true)]
         private static bool UpgradeLabelPrefix(FabricatorActionTab __instance, FabricatorModule ____module, ref int alloys)
         {
             try
@@ -771,8 +774,11 @@ namespace VoidCrewFleet
         // The tally only changes the numbers on the results screen: a mission with several ships gives no rewards or XP
         // (ProgressionGuard blocks them).
 
-        /// <summary>Host: each ship's starting value (what its modules and items would recycle for), for the tally.</summary>
-        [GamePatch(Feature, "GameSessionSuppliesManager", "Start", PatchKind.Postfix)]
+        /// <summary>
+        /// Host: each ship's starting value (what its modules and items would recycle for), for the tally. Without it the tally
+        /// takes the game's own starting value, so it may miss.
+        /// </summary>
+        [GamePatch(Feature, "GameSessionSuppliesManager", "Start", PatchKind.Postfix, Optional = true)]
         private static void ManagerStartPostfix(GameSessionSuppliesManager __instance)
         {
             try
@@ -786,7 +792,7 @@ namespace VoidCrewFleet
                     ShipRedirect.BeginOverride(ship);
                     try
                     {
-                        start[slot] = RecycledValue(__instance);
+                        start[slot] = __instance.GetPlayerShipRecycledAlloyValue();
                     }
                     finally
                     {
@@ -804,20 +810,31 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// What "the player ship" would recycle for: the game's own count, unless an item on board has no crafting data at
-        /// all (another mod's part that was never made craftable, such as Ectype Skirmisher's micromissile payload). The
-        /// game's count then throws, and the same count is made here with such items as 0.
+        /// What "the player ship" would recycle for (the game's GetPlayerShipRecycledAlloyValue). The game's count throws when
+        /// an item on board has no crafting data at all (another mod's part that was never made craftable, such as Ectype
+        /// Skirmisher's micromissile payload). The game counts at the start of a mission and again for the end-of-mission
+        /// tally (GSIngame.OnGameEnded), which then stopped before it ended the session: no results screen, and everyone stayed
+        /// in the ended mission. For every caller (those two, and the per-ship start values above) the count is then made again
+        /// here with such items as 0, inside the same call, so "the player ship" is the ship the game was counting (the ship
+        /// a caller set with BeginOverride, else the local player's). Only the results screen and its XP use the number, so a
+        /// count that fails again is 0 rather than an end of mission that never comes. With one ship too.
         /// </summary>
-        private static int RecycledValue(GameSessionSuppliesManager manager)
+        [GamePatch(Feature, "GameSessionSuppliesManager", "GetPlayerShipRecycledAlloyValue", PatchKind.Finalizer, Optional = true)]
+        private static Exception RecycledValueFinalizer(Exception __exception, ref int __result)
         {
+            if (__exception == null) return null;
             try
             {
-                return manager.GetPlayerShipRecycledAlloyValue();
+                __result = RecycledValueSkippingUnknown();
+                Log.WarnOnce("recycled value", "The game could not count what the player ship would recycle for (" + __exception.GetType().Name + ": " +
+                                               __exception.Message + "); it is counted with items that have no crafting data as 0 alloys.");
             }
-            catch (NullReferenceException)
+            catch (Exception e)
             {
-                return RecycledValueSkippingUnknown();
+                __result = 0;
+                Log.Failure("Counting what the player ship would recycle for", e);
             }
+            return null;
         }
 
         /// <summary>GameSessionSuppliesManager.GetPlayerShipRecycledAlloyValue, with items that have no crafting data counted as 0.</summary>

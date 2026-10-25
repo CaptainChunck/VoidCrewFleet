@@ -639,7 +639,9 @@ namespace VoidCrewFleet
         /// step, which the game takes right after this check.
         /// On the puller's screen the game checks the drive's charge before it sends the pull on; a copy of a drive run on
         /// another player's game can read a hair short of full (<see cref="ChargedCopy"/>), so such a pull goes on to the
-        /// drive's own game, which checks the charge exactly.
+        /// drive's own game, which checks the charge exactly. A charged drive's engines all keep charging (each lever stays
+        /// locked until a player lets it go), so for such a copy the game answers "partially charging"; "not charging" only
+        /// once an engine has let go. Both go on.
         /// </summary>
         [GamePatch(Feature, "CG.Ship.Modules.VoidDriveModule", "TryStartJumpEngine", PatchKind.Postfix)]
         private static void TryStartJumpPostfix(VoidDriveModule __instance, ref ImpulseJumpOutcome __result)
@@ -655,8 +657,8 @@ namespace VoidCrewFleet
                     if (deciding && slot >= 0) SetLead(slot);
                     return;
                 }
-                if (!deciding && __result == ImpulseJumpOutcome.CantFlyImpulseNotCharging && __instance.photonView != null && !__instance.photonView.AmOwner &&
-                    __instance.JumpCharge >= ChargedCopy)
+                bool notCharged = __result == ImpulseJumpOutcome.CantFlyImpulsePartiallyCharging || __result == ImpulseJumpOutcome.CantFlyImpulseNotCharging;
+                if (!deciding && notCharged && __instance.photonView != null && !__instance.photonView.AmOwner && __instance.JumpCharge >= ChargedCopy)
                 {
                     Log.Info("Void jump: " + FleetShips.Describe(ship) + "'s drive reads " + (__instance.JumpCharge * 100f).ToString("0.0") +
                              " % here; the pull goes on to the game that runs it, which checks its charge exactly.");
@@ -676,11 +678,12 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// How charged a copy of a drive run on another player's game must read to count as charged here. Photon leaves out a
-        /// change of 0.01 or less, so a copy can stop just short of full; the drive's own game sends its whole state once it
-        /// is full (SendWholeState), but a player on an older Fleet doesn't, and their drive would otherwise hold every
-        /// jump up. The drive's own game still checks its own charge exactly.
+        /// change of less than 0.01 since the update before, so a full drive's copy can stop just short of full, but always
+        /// above 0.99; the drive's own game sends its whole state once it is full (SendWholeState), but a player on an older
+        /// Fleet doesn't, and their drive would otherwise hold every jump up. The drive's own game still checks its own charge
+        /// exactly.
         /// </summary>
-        private const float ChargedCopy = 0.98f;
+        private const float ChargedCopy = 0.99f;
 
         /// <summary>
         /// "Ship 2", "Ship 3": the living ships whose void drive isn't fully charged, among those with a crew member in the room.

@@ -29,6 +29,14 @@ namespace VoidCrewFleet
     /// ClientGame.PlayerShip), leaving out the systems that get their own dedicated patches: spawning, sector changes,
     /// the playable area, the local player's own checks, EVA inertia zones, ship death, saves and combat; and below it, the
     /// ship parts that keep their ship themselves (the scanner, the signature) and the sector twists that spawn at a ship.
+    /// Also left out: the components that are never on a player ship (sector twists, black holes, void rifts, sector
+    /// effects, NPCs, mines, the game's managers, the HUD, the voice-line and audio-snapshot controllers), where the game's
+    /// own answer is already the one this would give.
+    /// A ship part whose redirect a game update breaks then reads the game's answer, as with one ship. Where that only
+    /// affects the part itself (a sound, an effect, a display, a part's own reading) the patch is optional: the feature runs
+    /// without it, and its start-up report line names it. Where it would let one ship's part act on another ship (its
+    /// modules, power, air, shields, doors and airlocks, colliders and hull visuals, items, weapons, locks, its death) the
+    /// patch is required, and without it every mission has one ship.
     /// </summary>
     internal static class ShipRedirect
     {
@@ -210,162 +218,118 @@ namespace VoidCrewFleet
                 return null;
             }
         }
-        [GamePatch(Feature, "AbstractOrbitObjectEffect", "GetObjectOwner", PatchKind.Transpiler)]
-        [GamePatch(Feature, "AreasOfEffectPlayershipMaterialApplier", "Start", PatchKind.Transpiler)]
-        [GamePatch(Feature, "AudioAlarmTrigger", "OnDangerProximity", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CameraShakeEffectTrigger", "TriggerCameraShake", PatchKind.Transpiler, Arguments = new string[] { "System.Single" })]
-        [GamePatch(Feature, "CentralComputerPoweredEvents", "OnDestroy", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CentralComputerPoweredEvents", "Start", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Audio.ShipAmbienceController", "OnDestroy", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Audio.SnapshotController", "OnPlatformSet", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Audio.VoiceController", "FindHomunculusCarryable", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Audio.VoiceController+<PlayMessageRoutine>d__23", "MoveNext", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Player.HUD.HUD_WeaponControlScreen", "Update", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Player.Interactions.Build.BuildProcessController", "get_BuildSocketController", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Player.Interactions.Build.BuildProcessController", "Update", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ApplyPlayerShipModifier", "RemovePlayerShipModifier", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ApplyPlayerShipModifier", "RunModifierToPlayerShip", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.AsteroidRain", "GetVolumetricNoiseDirection", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.AsteroidRain", "SetRandomSpawnDirection", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.AsteroidRain", "UpdateConstantTwist", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.Interference", "GetModuleTargets", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.Interference", "Start", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ModuleDisabler", "DeactivateAllModulesOfType", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ModuleDisabler", "OnDisable", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.NearPlayerSpawner", "FixedUpdate", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.NearPlayerSpawner", "OnDrawGizmos", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ScorchingPulse", "RemovePlayerShipModifier", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ScorchingPulse", "RunModifierToPlayerShip", PatchKind.Transpiler)]
+        // Required: without one of these a ship's part would act on another ship (register its modules, doors, airlocks or
+        // boosters there, run its air, shields, tilt, steering or scans, add its hull visuals and colliders to it, count its
+        // items, weapons and target locks as that ship's, or, dying, destroy it).
         [GamePatch(Feature, "CG.Client.Ship.Airlock", "Awake", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Client.Ship.AirlockButtonPanel", "Initialize", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Client.Ship.Modules.Mediators.HelmMediator", "OnChairFreed", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Client.Ship.Modules.Mediators.TacticalScannerMediator", "Awake", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Ship.Views.AbstractModuleDiodes", "get_playerShip", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Ship.Views.DefenceTerminalDiodes", "UpdateDiodes", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Client.Ship.Views.WindowBlindsEffect", "Start", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.OrbitEffect.LimitedVerticalMovementOrbitEffect", "TriggerLowerLimitDamage", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.OrbitEffect.LimitedVerticalMovementOrbitEffect", "Update", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.OrbitEffect.NearSunOrbitEffect", "CheckAndTriggerTemperatureWarnings", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.OrbitEffect.NearSunOrbitEffect", "Update", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.Scenarios.WavesSpawnManager", "Update", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.ImpulseJumping.NpcImpulseJumper", "JumpToPlayerSectorPosition", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.ImpulseJumping.NpcImpulseJumper", "TEST_SetCommand_PingPongToPlayerSector", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.ProximityMineController", "NetworkNotifyTargetSet", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.ReinforcementCalling.NpcReinforcementCaller", "OnEnable", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Objects.AbstractEnvironmentalObject", "get_Ship", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Objects.CarryableObject", "get_Ship", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Objects.CarryableObject", "UpdateSector", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.Hull.AbstractDoor", "Awake", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.Hull.BuildSocket", "SetModule", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.Hull.CarryablesSocket", "get_Ship", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Hull.CarryablesSocket", "Start", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.Modules.AutoMechanicModule", "Awake", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Modules.CentralShipComputerModule", "EnterStateOff", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Modules.CentralShipComputerModule", "EnterStateOn", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Modules.Helm", "HandleAnalytics", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Modules.JammerModule", "LaunchFromOwner", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.Modules.LifeSupportModule", "Start", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.Modules.Shield.ShieldModule", "ToggleShield", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.Modules.ThrusterBooster", "Awake", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.Modules.ThrusterBooster", "Start", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Modules.ThrusterBoosterController", "OnThrusterBoostActivatePressed", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Modules.ThrusterBoosterController", "UpdateBoosters", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Modules.ThrusterBoosterControllerPun", "Awake", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Modules.ThrusterStationModule", "get_IsInUse", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.Modules.VoidDriveModule", "GetReferences", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Modules.VoidDriveModule", "UpdateSignatureAmount", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.Object.InteractiveCarryableModuleUpgrader", "Start", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.PlayerShipCollider", "get_MyObject", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.PlayerShipCollider", "Start", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Scanning.EnemyScanComponent", "OnOrbitObjectArrivedAtDestination", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Shield.Effects.ShieldEmitterAnimatorEffect", "OnShieldDirectionChanged", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.Status.ShipStatusNotificationController", "InitializeShipStatusEvents", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.TargetLocking.TargetLockComponent", "Awake", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.TargetLocking.TargetLockComponent", "CanBeTargetLocked", PatchKind.Transpiler)]
         [GamePatch(Feature, "CG.Ship.TargetLocking.TargetLockComponent", "IsTargetLockValidMissileTarget", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.TargetLocking.TargetLockComponent", "OnOrbitObjectScanChanged", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.TargetLocking.TargetLockComponent", "OnSpaceObjectDestroyed", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Ship.TargetLocking.TargetLockComponent", "OnWarp", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Space.Bombs.TimedBombEffects", "Update", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Client.Player.Interactions.ModuleStatsContextModifierData", "GetTarget", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CoopBuddyStatsSync", "ChairFreed", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CoopBuddyStatsSync", "ChairTaken", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Gameplay.AstralMap.AstralMapPUN", "Start", PatchKind.Transpiler)]
         [GamePatch(Feature, "Gameplay.CompositeWeapons.CompositeWeaponModule", "get_Ship", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Gameplay.Defects.PlayerShipDefectDamageController", "GetHullHealthFraction", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Gameplay.Helm.ShipExternalCamera", "Start", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Gameplay.Loot.LootManager", "SectorOrbitObjectAdded", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Gameplay.NPC.AI.Spawner", "SpawnUnitEntry", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Gameplay.SectorGameplay.BlackHole", "Awake", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Gameplay.SectorGameplay.BlackHole", "FixedUpdate", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Gameplay.SectorGameplay.BlackHole", "PointHasLOSToPlayerShip", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Gameplay.SectorGameplay.BlackHoleCalamity", "FindPointWithLOS", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Gameplay.SectorGameplay.VoidRift", "DamagePlayers", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Gameplay.SectorGameplay.VoidRift", "OnDestroy", PatchKind.Transpiler)]
-        [GamePatch(Feature, "Gameplay.SectorGameplay.VoidRift", "OnTriggerEnter", PatchKind.Transpiler)]
         [GamePatch(Feature, "Gameplay.Ship.ShipAutoTilt", "Awake", PatchKind.Transpiler)]
-        [GamePatch(Feature, "ModuleUpgraderEffects", "StartBeingCarried", PatchKind.Transpiler)]
-        [GamePatch(Feature, "MovementSpeedParticleScaler", "Update", PatchKind.Transpiler)]
-        [GamePatch(Feature, "PlayerShipMovementAudio", "Start", PatchKind.Transpiler)]
-        [GamePatch(Feature, "PlayerShipMovementEffects", "GetModules", PatchKind.Transpiler)]
-        [GamePatch(Feature, "PlayerShipMovementEffects", "Update", PatchKind.Transpiler)]
         [GamePatch(Feature, "RuntimeAssets.PlayerShipVisualsLoader", "OnPlayerShipSet", PatchKind.Transpiler)]
         [GamePatch(Feature, "RuntimeAssets.PlayerShipVisualsLoader", "TryLoadVisuals", PatchKind.Transpiler)]
-        [GamePatch(Feature, "SilentMode", "Awake", PatchKind.Transpiler)]
-        [GamePatch(Feature, "SpaceObjectDangerDetector", "Awake", PatchKind.Transpiler)]
-        [GamePatch(Feature, "SpaceObjectDangerDetector", "OnSpaceObjectDestroyed", PatchKind.Transpiler)]
-        [GamePatch(Feature, "SpaceObjectDangerDetector", "OnSpaceObjectSectorChanged", PatchKind.Transpiler)]
-        [GamePatch(Feature, "SpaceObjectDangerDetector", "OnSpaceObjectSpawned", PatchKind.Transpiler)]
-        [GamePatch(Feature, "SpaceObjectDangerDetector", "Update", PatchKind.Transpiler)]
-        [GamePatch(Feature, "SpaceObjectDangerDetector", "UpdateDangerFactor", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.AimAssist.AimAssistMarkerViewer", "OnLocalWeaponControlToggled", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.AstralMap.AstralMapController", "Start", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.MainHUD.ShipInfoHUD", "OnEnable", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.MainHUD.ShipInfoHUD", "Start", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.MainHUD.ThreatPanelController", "CanDisplay", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.MainHUD.ThreatPanelController+<Start>d__20", "MoveNext", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.ObjectMarker.ExitMarkerProvider", "ExitVectorChanged", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.ObjectMarker.ExitMarkerProvider", "ShipCreated", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.ObjectMarker.ObjectMarkerViewer", "get_shouldShowLocksBasedOnPlatform", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.ObjectMarker.ObjectMarkerViewer", "ModeChanged", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.ObjectMarker.ObjectMarkerViewer", "OnLocalGameStateChanged", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.ObjectMarker.ObjectMarkerViewer+<Start>d__37", "MoveNext", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.ObjectMarker.UrgencyMarkerProvider", "Init", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.ObjectMarker.UrgencyMarkerProvider", "OnDisable", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.ObjectMarker.UrgencyMarkerProvider", "SubscribeToEvents", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.PilotHUD.LaunchersDisplayer+<Start>d__8", "MoveNext", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.PilotHUD.PilotHUD", "Awake", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.PilotHUD.ShieldAbsorptionDisplay", "OnEnable", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.PilotHUD.ShieldDisplayer+<Start>d__12", "MoveNext", PatchKind.Transpiler)]
-        [GamePatch(Feature, "UI.Ping.PingableItem", "get_DisplayText", PatchKind.Transpiler)]
-        [GamePatch(Feature, "VFX.Calamities.BlackHoleAudioController", "EnsureSharedLoopStarted", PatchKind.Transpiler)]
-        [GamePatch(Feature, "VFX.Calamities.BlackHoleAudioController", "ResolveLocalIntensity", PatchKind.Transpiler)]
-        [GamePatch(Feature, "VFX.Calamities.BlackHoleCameraShake", "Update", PatchKind.Transpiler)]
-        [GamePatch(Feature, "VFX.ImpulsePreArrivalEffect", "Start", PatchKind.Transpiler)]
-        [GamePatch(Feature, "VFX.OrbitObjectDeathEffect", "OnTriggerDestroyEffects", PatchKind.Transpiler)]
-        [GamePatch(Feature, "VFX.OrbitObjectSpawnSimpleDebrisOnDeath", "OnTriggerDestroyEffects", PatchKind.Transpiler)]
-        [GamePatch(Feature, "VFX.PlayerShipHitEffectObserver", "SubscribeToPlayerShipLoop", PatchKind.Transpiler)]
-        [GamePatch(Feature, "VFX.ThrusterEffectPlayerInput", "InitializeBoosterEffect", PatchKind.Transpiler)]
-        [GamePatch(Feature, "VoidDriveEnginePart", "Awake", PatchKind.Transpiler)]
-        [GamePatch(Feature, "VoidDriveEnginePart", "OnImpulseDriveEngineStateChanged", PatchKind.Transpiler)]
-        [GamePatch(Feature, "VoidDriveEnginePart", "Update", PatchKind.Transpiler)]
-        [GamePatch(Feature, "VoidJumpChargeMeter", "Start", PatchKind.Transpiler)]
-        [GamePatch(Feature, "VoidJumpFlow", "SetUp", PatchKind.Transpiler)]
-        [GamePatch(Feature, "VolumetricEffectApplier", "GetVolumetricNoiseDirection", PatchKind.Transpiler)]
         // A ship's own death sequence destroys its own ship (ShipDeath decides which sequence plays).
-        [GamePatch(Feature, "PlayerShipDeathSequence+<DeathRoutine>d__23", "MoveNext", PatchKind.Transpiler)]
+        [GamePatch(Feature, "PlayerShipDeathSequence", "DeathRoutine", PatchKind.Transpiler, Coroutine = true)]
         [GamePatch(Feature, "PlayerShipDeathSequence", "DisableShipShields", PatchKind.Transpiler)]
+        // Optional: without one of these only that part reads the game's answer (the local player's ship): a sound, an
+        // effect, a light, a display or a part's own reading of its ship.
+        [GamePatch(Feature, "AbstractOrbitObjectEffect", "GetObjectOwner", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "AreasOfEffectPlayershipMaterialApplier", "Start", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "AudioAlarmTrigger", "OnDangerProximity", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CameraShakeEffectTrigger", "TriggerCameraShake", PatchKind.Transpiler, Arguments = new string[] { "System.Single" }, Optional = true)]
+        [GamePatch(Feature, "CentralComputerPoweredEvents", "OnDestroy", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CentralComputerPoweredEvents", "Start", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Client.Audio.ShipAmbienceController", "OnDestroy", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Client.Ship.Views.AbstractModuleDiodes", "get_playerShip", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Client.Ship.Views.DefenceTerminalDiodes", "UpdateDiodes", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Client.Ship.Views.WindowBlindsEffect", "Start", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.Hull.CarryablesSocket", "Start", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.Modules.CentralShipComputerModule", "EnterStateOff", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.Modules.CentralShipComputerModule", "EnterStateOn", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.Modules.Helm", "HandleAnalytics", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.Modules.JammerModule", "LaunchFromOwner", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.Modules.ThrusterBoosterController", "OnThrusterBoostActivatePressed", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.Modules.ThrusterBoosterController", "UpdateBoosters", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.Modules.ThrusterBoosterControllerPun", "Awake", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.Modules.ThrusterStationModule", "get_IsInUse", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.Modules.VoidDriveModule", "UpdateSignatureAmount", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.Scanning.EnemyScanComponent", "OnOrbitObjectArrivedAtDestination", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.Shield.Effects.ShieldEmitterAnimatorEffect", "OnShieldDirectionChanged", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.Status.ShipStatusNotificationController", "InitializeShipStatusEvents", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.TargetLocking.TargetLockComponent", "OnOrbitObjectScanChanged", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.TargetLocking.TargetLockComponent", "OnSpaceObjectDestroyed", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Ship.TargetLocking.TargetLockComponent", "OnWarp", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Space.Bombs.TimedBombEffects", "Update", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "Client.Player.Interactions.ModuleStatsContextModifierData", "GetTarget", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CoopBuddyStatsSync", "ChairFreed", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CoopBuddyStatsSync", "ChairTaken", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "Gameplay.AstralMap.AstralMapPUN", "Start", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "Gameplay.Defects.PlayerShipDefectDamageController", "GetHullHealthFraction", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "Gameplay.Helm.ShipExternalCamera", "Start", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "ModuleUpgraderEffects", "StartBeingCarried", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "MovementSpeedParticleScaler", "Update", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "PlayerShipMovementAudio", "Start", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "PlayerShipMovementEffects", "GetModules", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "PlayerShipMovementEffects", "Update", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "SilentMode", "Awake", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "SpaceObjectDangerDetector", "Awake", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "SpaceObjectDangerDetector", "OnSpaceObjectDestroyed", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "SpaceObjectDangerDetector", "OnSpaceObjectSectorChanged", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "SpaceObjectDangerDetector", "OnSpaceObjectSpawned", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "SpaceObjectDangerDetector", "Update", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "SpaceObjectDangerDetector", "UpdateDangerFactor", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "UI.AstralMap.AstralMapController", "Start", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "UI.ObjectMarker.UrgencyMarkerProvider", "Init", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "UI.ObjectMarker.UrgencyMarkerProvider", "OnDisable", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "UI.ObjectMarker.UrgencyMarkerProvider", "SubscribeToEvents", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "UI.PilotHUD.LaunchersDisplayer", "Start", PatchKind.Transpiler, Coroutine = true, Optional = true)]
+        [GamePatch(Feature, "UI.PilotHUD.PilotHUD", "Awake", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "UI.PilotHUD.ShieldAbsorptionDisplay", "OnEnable", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "UI.PilotHUD.ShieldDisplayer", "Start", PatchKind.Transpiler, Coroutine = true, Optional = true)]
+        [GamePatch(Feature, "UI.Ping.PingableItem", "get_DisplayText", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "VFX.OrbitObjectDeathEffect", "OnTriggerDestroyEffects", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "VFX.OrbitObjectSpawnSimpleDebrisOnDeath", "OnTriggerDestroyEffects", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "VFX.PlayerShipHitEffectObserver", "SubscribeToPlayerShipLoop", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "VFX.ThrusterEffectPlayerInput", "InitializeBoosterEffect", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "VoidDriveEnginePart", "Awake", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "VoidDriveEnginePart", "OnImpulseDriveEngineStateChanged", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "VoidDriveEnginePart", "Update", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "VoidJumpChargeMeter", "Start", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "VoidJumpFlow", "SetUp", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "VolumetricEffectApplier", "GetVolumetricNoiseDirection", PatchKind.Transpiler, Optional = true)]
         private static IEnumerable<CodeInstruction> RedirectTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
         {
             return ReplacePlayerShip(instructions, original, RedirectMethod);
         }
 
-        /// <summary>Things in space that pick a player ship to go after: in co-op the living one nearest to them (RedirectNearest).</summary>
-        [GamePatch(Feature, "CarryableSummonConsumptionEffect", "SummonUnits", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.AimForShipSpaceCraftController", "Start", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.ScanningEnemyController", "get_playerShip", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.Scout.ScoutController", "get_PlayerShip", PatchKind.Transpiler)]
-        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.SwarmController", "DroneShouldBreakAttack", PatchKind.Transpiler)]
+        /// <summary>
+        /// Things in space that pick a player ship to go after: in co-op the living one nearest to them (RedirectNearest).
+        /// Without one, that kind of enemy goes after the game's answer (the host's ship), as with one ship.
+        /// </summary>
+        [GamePatch(Feature, "CarryableSummonConsumptionEffect", "SummonUnits", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.AimForShipSpaceCraftController", "Start", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.ScanningEnemyController", "get_playerShip", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.Scout.ScoutController", "get_PlayerShip", PatchKind.Transpiler, Optional = true)]
+        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.SwarmController", "DroneShouldBreakAttack", PatchKind.Transpiler, Optional = true)]
         private static IEnumerable<CodeInstruction> NearestTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
         {
             return ReplacePlayerShip(instructions, original, RedirectNearestMethod);
@@ -436,7 +400,7 @@ namespace VoidCrewFleet
                 }
                 yield return instruction;
             }
-            if (replaced == 0) Log.Warn("Two ships: " + original.DeclaringType.FullName + "." + original.Name + " no longer reads " + what + "; the game may have changed.");
+            if (replaced == 0) Patcher.NothingReplaced(Feature, original, "reads " + what);
         }
 
         // ---------------------------------------------------------------- sector twists and hazards act on every ship
@@ -451,14 +415,14 @@ namespace VoidCrewFleet
         /// A world effect's method that acts on "the player ship" (a sector twist's stat modifiers, a module disabler, an
         /// interference event) runs once per player ship, each in turn as "the player ship", so every client changes every
         /// ship alike. Without this each client changed only the ship its own player was on (the stats are local to each
-        /// client, and the host decides damage from them).
+        /// client, and the host decides damage from them). Without one of these that effect reaches one ship only.
         /// </summary>
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ApplyPlayerShipModifier", "RunModifierToPlayerShip", PatchKind.Prefix)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ApplyPlayerShipModifier", "RemovePlayerShipModifier", PatchKind.Prefix)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ScorchingPulse", "RunModifierToPlayerShip", PatchKind.Prefix)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ScorchingPulse", "RemovePlayerShipModifier", PatchKind.Prefix)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ModuleDisabler", "DeactivateAllModulesOfType", PatchKind.Prefix)]
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.Interference", "ToggleRandomSystem", PatchKind.Prefix)]
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ApplyPlayerShipModifier", "RunModifierToPlayerShip", PatchKind.Prefix, Optional = true)]
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ApplyPlayerShipModifier", "RemovePlayerShipModifier", PatchKind.Prefix, Optional = true)]
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ScorchingPulse", "RunModifierToPlayerShip", PatchKind.Prefix, Optional = true)]
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ScorchingPulse", "RemovePlayerShipModifier", PatchKind.Prefix, Optional = true)]
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ModuleDisabler", "DeactivateAllModulesOfType", PatchKind.Prefix, Optional = true)]
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.Interference", "ToggleRandomSystem", PatchKind.Prefix, Optional = true)]
         private static bool EveryShipPrefix(object __instance, MethodBase __originalMethod, object[] __args)
         {
             if (_everyShip || !FleetShips.Active) return true;
@@ -492,7 +456,7 @@ namespace VoidCrewFleet
         }
 
         /// <summary>An interference event's random defect hits every ship (the game kept the defect controller of one).</summary>
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.Interference", "ActivateRandomDefect", PatchKind.Prefix)]
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.Interference", "ActivateRandomDefect", PatchKind.Prefix, Optional = true)]
         private static bool InterferenceDefectPrefix(Component __instance)
         {
             if (!FleetShips.Active) return true;
@@ -517,7 +481,7 @@ namespace VoidCrewFleet
         /// When a module disabler ends, the game clears the malfunction effect on one ship's modules; the other ships' are
         /// cleared here (the game's own pass then does the remaining ship).
         /// </summary>
-        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ModuleDisabler", "OnDisable", PatchKind.Prefix)]
+        [GamePatch(Feature, "CG.Client.Quests.SectorTwists.ModuleDisabler", "OnDisable", PatchKind.Prefix, Optional = true)]
         private static void ModuleDisablerOffPrefix(object ___moduleTarget)
         {
             if (!FleetShips.Active || ___moduleTarget == null) return;
@@ -549,9 +513,10 @@ namespace VoidCrewFleet
         /// <summary>
         /// Host: a black hole pulls and damages the player ship nearest to it, each physics step. The game kept the ship the
         /// host was on when it spawned (and damaged whichever ship the host was on at the time). The black hole's own field
-        /// (the ship it pulls) is only set when the nearest ship changes.
+        /// (the ship it pulls) is only set when the nearest ship changes. The prefix and finalizer go on the same method and go
+        /// in together; without them a black hole pulls the ship the host is on, as the game does.
         /// </summary>
-        [GamePatch(Feature, "Gameplay.SectorGameplay.BlackHole", "FixedUpdate", PatchKind.Prefix)]
+        [GamePatch(Feature, "Gameplay.SectorGameplay.BlackHole", "FixedUpdate", PatchKind.Prefix, Optional = true)]
         private static void BlackHolePrefix(Component __instance, out bool __state)
         {
             __state = false;
@@ -578,7 +543,7 @@ namespace VoidCrewFleet
             }
         }
 
-        [GamePatch(Feature, "Gameplay.SectorGameplay.BlackHole", "FixedUpdate", PatchKind.Finalizer)]
+        [GamePatch(Feature, "Gameplay.SectorGameplay.BlackHole", "FixedUpdate", PatchKind.Finalizer, Optional = true)]
         private static void BlackHoleFinalizer(bool __state)
         {
             if (__state) EndOverride();

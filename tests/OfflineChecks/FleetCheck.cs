@@ -8,8 +8,13 @@ using Mono.Cecil.Cil;
 // Offline checks for Void Crew Fleet (no game running). Everything is read with Mono.Cecil, nothing is executed:
 //  1. every [GamePatch] in the plugin names a type and method that exist in the game's assemblies, with exactly one
 //     method of that name unless the attribute lists the argument types, and every injected parameter of the patch
-//     method (__instance, __result, ___field, argument names) fits that target;
-//  2. every GameMember.Type/Field/Method/Property call in the plugin passes constant names that exist in the game.
+//     method (__instance, __result, ___field, argument names) fits that target; a patch on a coroutine finds the
+//     coroutine's body from the method ([IteratorStateMachine]), a patch on a lambda exactly one lambda with that number;
+//     every patch method is static and not generic (the plugin compiles each one at start-up, Patcher.Prepare);
+//  2. every GameMember.Type/Field/Method/Property call in the plugin passes constant names that exist in the game;
+//  3. every game member a patch method's code names, and every one its class's static fields and static set-up name,
+//     exists in the game: what the start-up compile would refuse. A build against the game already ensures it; this
+//     shows it for a built plugin against another game version (FleetCheck.exe <old dll> <new game's Managed>).
 // Run it with tests\build-and-test.ps1, which builds the plugin first.
 // Usage: FleetCheck.exe <plugin dll> <game Managed dir>
 internal static class Program
@@ -18,6 +23,13 @@ internal static class Program
     private const string MemberHelper = "VoidCrewFleet.GameMember";
 
     private static readonly Dictionary<string, TypeDefinition> Types = new Dictionary<string, TypeDefinition>();
+
+    /// <summary>The names of the assemblies in the game's Managed folder (the game's, Unity's, the class libraries).</summary>
+    private static readonly HashSet<string> GameAssemblies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Every patch method, once, for check 3.</summary>
+    private static readonly List<MethodDefinition> Hooks = new List<MethodDefinition>();
+
     private static int _failures;
     private static int _checks;
 
@@ -40,6 +52,8 @@ internal static class Program
             CheckPatches(plugin);
             Console.WriteLine("Game members looked up by name (GameMember):");
             CheckMemberLookups(plugin);
+            Console.WriteLine("Game members named in the patch methods' code and their classes' static set-up:");
+            CheckHookCode();
         }
         catch (Exception e)
         {
@@ -74,6 +88,7 @@ internal static class Program
             {
                 continue; // native or unreadable
             }
+            GameAssemblies.Add(module.Assembly.Name.Name);
             foreach (TypeDefinition type in module.GetTypes())
             {
                 string name = Normalize(type.FullName);
@@ -130,6 +145,8 @@ internal static class Program
                     int kind = Convert.ToInt32(attribute.ConstructorArguments[3].Value);
                     string[] arguments = null;
                     bool optional = false;
+                    bool coroutine = false;
+                    int lambda = -1;
                     foreach (Mono.Cecil.CustomAttributeNamedArgument property in attribute.Properties)
                     {
                         if (property.Name == "Arguments")
@@ -141,18 +158,29 @@ internal static class Program
                         {
                             optional = (bool)property.Argument.Value;
                         }
+                        else if (property.Name == "Coroutine")
+                        {
+                            coroutine = (bool)property.Argument.Value;
+                        }
+                        else if (property.Name == "Lambda")
+                        {
+                            lambda = Convert.ToInt32(property.Argument.Value);
+                        }
                     }
-                    CheckPatch(feature, typeName, methodName, kind, arguments, optional, hook);
+                    if (!Hooks.Contains(hook)) Hooks.Add(hook);
+                    CheckPatch(feature, typeName, methodName, kind, arguments, optional, coroutine, lambda, hook);
                 }
             }
         }
     }
 
-    private static void CheckPatch(string feature, string typeName, string methodName, int kind, string[] arguments, bool optional, MethodDefinition hook)
+    private static void CheckPatch(string feature, string typeName, string methodName, int kind, string[] arguments, bool optional, bool coroutine, int lambda,
+        MethodDefinition hook)
     {
         string what = "[" + feature + (optional ? ", optional" : "") + "] " + typeName + "." + methodName +
-                      (arguments != null ? "(" + string.Join(", ", arguments) + ")" : "") + " <- " + hook.DeclaringType.Name + "." + hook.Name;
-        Check(hook.IsStatic, what + ": patch method is static");
+                      (arguments != null ? "(" + string.Join(", ", arguments) + ")" : "") + (coroutine ? " (coroutine)" : lambda >= 0 ? " (lambda " + lambda + ")" : "") +
+                      " <- " + hook.DeclaringType.Name + "." + hook.Name;
+        Check(hook.IsStatic && !hook.HasGenericParameters && !hook.DeclaringType.HasGenericParameters, what + ": patch method is static and not generic");
         TypeDefinition type = FindType(typeName);
         if (type == null)
         {
@@ -193,6 +221,16 @@ internal static class Program
             return;
         }
         Check(target.HasBody || target.IsAbstract == false, what + ": method found in " + target.DeclaringType.FullName);
+        if (coroutine)
+        {
+            target = CoroutineBody(target, what);
+            if (target == null) return;
+        }
+        else if (lambda >= 0)
+        {
+            target = LambdaIn(target.DeclaringType, methodName, lambda, what);
+            if (target == null) return;
+        }
         if (kind == 3)
         {
             // Transpilers get their arguments by type (instructions, ILGenerator, original), not by name.
@@ -222,6 +260,151 @@ internal static class Program
             {
                 Check(target.Parameters.Any(p => p.Name == name), what + ": target has a parameter named " + name);
             }
+        }
+    }
+
+    /// <summary>
+    /// The coroutine body Patcher.CoroutineBody finds: the MoveNext of the class the method's [IteratorStateMachine] names,
+    /// which must be nested in the method's class.
+    /// </summary>
+    private static MethodDefinition CoroutineBody(MethodDefinition method, string what)
+    {
+        CustomAttribute mark = method.CustomAttributes.FirstOrDefault(a => a.AttributeType.FullName == "System.Runtime.CompilerServices.IteratorStateMachineAttribute");
+        var machineRef = mark != null && mark.ConstructorArguments.Count == 1 ? mark.ConstructorArguments[0].Value as TypeReference : null;
+        TypeDefinition machine = machineRef != null ? FindType(Normalize(machineRef.FullName)) : null;
+        bool nested = machine != null && machine.DeclaringType != null && Normalize(machine.DeclaringType.FullName) == Normalize(method.DeclaringType.FullName);
+        MethodDefinition body = nested ? machine.Methods.FirstOrDefault(m => m.Name == "MoveNext" && m.HasBody) : null;
+        Check(body != null, what + ": a coroutine, its body " + (machine != null ? Normalize(machine.FullName) + ".MoveNext" : "not named by the method"));
+        return body;
+    }
+
+    /// <summary>The lambda Patcher.LambdaIn finds: exactly one method named &lt;Method&gt;b__N or &lt;Method&gt;b__P_N on the class or a class nested in it.</summary>
+    private static MethodDefinition LambdaIn(TypeDefinition type, string method, int number, string what)
+    {
+        string prefix = "<" + method + ">b__";
+        var found = new List<MethodDefinition>();
+        foreach (TypeDefinition candidate in new[] { type }.Concat(type.NestedTypes))
+        {
+            foreach (MethodDefinition lambda in candidate.Methods)
+            {
+                if (lambda.Name.StartsWith(prefix, StringComparison.Ordinal) && LambdaNumber(lambda.Name.Substring(prefix.Length)) == number) found.Add(lambda);
+            }
+        }
+        Check(found.Count == 1 && found[0].HasBody, what + ": exactly one lambda numbered " + number + " (found " +
+                                                    (found.Count == 0 ? "none" : string.Join(", ", found.Select(f => Normalize(f.DeclaringType.FullName) + "." + f.Name))) + ")");
+        return found.Count == 1 ? found[0] : null;
+    }
+
+    /// <summary>As Patcher.LambdaNumber: the lambda's own number from the end of its compiler name ("1" or "12_1"), or -1.</summary>
+    private static int LambdaNumber(string suffix)
+    {
+        int cut = suffix.LastIndexOf('_');
+        int number;
+        return int.TryParse(cut >= 0 ? suffix.Substring(cut + 1) : suffix, out number) ? number : -1;
+    }
+
+    // ------------------------------------------------------------------ 3. game members named in the patch methods' code
+
+    private static void CheckHookCode()
+    {
+        foreach (MethodDefinition hook in Hooks)
+        {
+            List<string> missing = MissingGameMembers(hook);
+            Check(missing.Count == 0, hook.DeclaringType.Name + "." + hook.Name + ": its code names only game members that exist" +
+                                      (missing.Count > 0 ? " (missing: " + string.Join("; ", missing) + ")" : ""));
+        }
+        foreach (TypeDefinition host in Hooks.Select(h => h.DeclaringType).Distinct())
+        {
+            var missing = new List<string>();
+            foreach (FieldDefinition field in host.Fields)
+            {
+                if (!Resolves(field.FieldType)) missing.Add(field.FieldType.FullName + " (field " + field.Name + ")");
+            }
+            MethodDefinition setUp = host.Methods.FirstOrDefault(m => m.IsConstructor && m.IsStatic);
+            if (setUp != null) missing.AddRange(MissingGameMembers(setUp));
+            Check(missing.Count == 0, host.Name + ": its static fields and static set-up name only game members that exist" +
+                                      (missing.Count > 0 ? " (missing: " + string.Join("; ", missing.Distinct()) + ")" : ""));
+        }
+    }
+
+    /// <summary>The game types, fields and methods a method's code, locals, parameters and return type name that the game doesn't have.</summary>
+    private static List<string> MissingGameMembers(MethodDefinition method)
+    {
+        var missing = new List<string>();
+        var types = new List<TypeReference> { method.ReturnType };
+        types.AddRange(method.Parameters.Select(p => p.ParameterType));
+        if (method.HasBody)
+        {
+            types.AddRange(method.Body.Variables.Select(v => v.VariableType));
+            types.AddRange(method.Body.ExceptionHandlers.Where(h => h.CatchType != null).Select(h => h.CatchType));
+            foreach (Instruction instruction in method.Body.Instructions)
+            {
+                var type = instruction.Operand as TypeReference;
+                if (type != null)
+                {
+                    types.Add(type);
+                    continue;
+                }
+                var genericMethod = instruction.Operand as GenericInstanceMethod;
+                if (genericMethod != null) types.AddRange(genericMethod.GenericArguments);
+                var member = instruction.Operand as MemberReference;
+                if (member == null || member.DeclaringType == null) continue;
+                // A member of another library's generic type (a BepInEx setting, a Harmony field reader): its game type arguments.
+                types.Add(member.DeclaringType);
+                if (!FromGame(member.DeclaringType) || member.DeclaringType is ArrayType) continue;
+                bool found;
+                try
+                {
+                    var asMethod = member as MethodReference;
+                    var asField = member as FieldReference;
+                    found = asMethod != null ? asMethod.Resolve() != null : asField == null || asField.Resolve() != null;
+                }
+                catch
+                {
+                    found = false;
+                }
+                if (!found) missing.Add(member.FullName);
+            }
+        }
+        foreach (TypeReference type in types)
+        {
+            if (!Resolves(type)) missing.Add(type.FullName);
+        }
+        return missing.Distinct().ToList();
+    }
+
+    /// <summary>
+    /// Whether a type is defined in one of the game's assemblies (for an array, pointer, by-ref or generic type: whether
+    /// its element type is; generic arguments are checked on their own).
+    /// </summary>
+    private static bool FromGame(TypeReference type)
+    {
+        if (type == null || type is GenericParameter) return false;
+        var specification = type as TypeSpecification;
+        if (specification != null) return FromGame(specification.ElementType);
+        IMetadataScope scope = type.Scope;
+        var assembly = scope as AssemblyNameReference;
+        var module = scope as ModuleDefinition;
+        string name = assembly != null ? assembly.Name : module != null ? module.Assembly.Name.Name : null;
+        return name != null && GameAssemblies.Contains(name);
+    }
+
+    /// <summary>Whether every part of a type that comes from the game (the type itself, its element type, its generic arguments) exists there.</summary>
+    private static bool Resolves(TypeReference type)
+    {
+        if (type == null || type is GenericParameter) return true;
+        var generic = type as GenericInstanceType;
+        if (generic != null) return Resolves(generic.ElementType) && generic.GenericArguments.All(Resolves);
+        var specification = type as TypeSpecification;
+        if (specification != null) return Resolves(specification.ElementType);
+        if (!FromGame(type)) return true;
+        try
+        {
+            return type.Resolve() != null;
+        }
+        catch
+        {
+            return false;
         }
     }
 

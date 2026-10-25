@@ -241,7 +241,7 @@ namespace VoidCrewFleet
                 }
                 yield return instruction;
             }
-            if (replaced == 0) Log.Warn("Clone tube screen: " + original.DeclaringType.FullName + "." + original.Name + " no longer reads the biomass; the game may have changed.");
+            if (replaced == 0) Patcher.NothingReplaced(ShipResources.Feature, original, "reads the biomass");
         }
 
         /// <summary>Put in by the transpiler: the biomass of the local player's tube's ship, else the game's count.</summary>

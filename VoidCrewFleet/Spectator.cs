@@ -791,7 +791,7 @@ namespace VoidCrewFleet
         /// be switched on for the host. The call goes through EnteredRoom, which raises the same event without a character.
         /// </summary>
         [GamePatch(Feature, "CG.Game.Player.SpawnSystem", "SpawnPlayer", PatchKind.Transpiler, Optional = true)]
-        private static IEnumerable<CodeInstruction> EnteredRoomTranspiler(IEnumerable<CodeInstruction> instructions)
+        private static IEnumerable<CodeInstruction> EnteredRoomTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
         {
             int replaced = 0;
             foreach (CodeInstruction instruction in instructions)
@@ -808,7 +808,7 @@ namespace VoidCrewFleet
                 }
                 yield return instruction;
             }
-            if (replaced == 0) Log.Warn("Spectators: SpawnSystem.SpawnPlayer no longer passes a newcomer to the local character; the game may have changed.");
+            if (replaced == 0) Patcher.NothingReplaced(Feature, original, "passes a newcomer to the local character");
         }
 
         /// <summary>LocalPlayer.PlayerEnteredRoom, also for a host without a character (all it does is raise the Opsive event).</summary>
