@@ -20,7 +20,8 @@ namespace VoidCrewFleet
     /// - PvP: anyone who joins while there is room plays: they join the team with fewer active players, on its ship with the
     ///   smallest crew, so the teams stay at most one apart. A player who leaves keeps their place for 3 minutes. Free places
     ///   go to the waiting players (WAITING), each team's own first, before anyone who joins.
-    /// - Co-op: a newcomer joins the living ship with the smallest crew.
+    /// - Co-op: a newcomer joins the living ship with the smallest crew while one has room (CrewRules.MaxCrew); when every
+    ///   crew is full they wait (WAITING) and get the first free place, as in PvP.
     /// A player's ID is their PlayFab account ID, which the game itself publishes; without one, their Steam ID or an ID this
     /// plugin keeps in its settings, published as a player property. An ID is whatever a player's game publishes, so a
     /// place stays with the player who has it while they are in the room, even when someone else shows the same ID.
@@ -225,7 +226,7 @@ namespace VoidCrewFleet
                         Notice.ShowAll(seat.Name + " lost their connection: their place on the " + PvpTeams.TeamName(seat.Team) + " team is held for " + HoldSeconds / 60 + " minutes.");
                 }
                 // Seats freed since the last look go to the players already waiting, before anyone who arrives now.
-                if (pvp && FillSeats(alive, now)) changed = true;
+                if (FillSeats(alive, now, pvp)) changed = true;
 
                 // In join order (actor number): of two players new to the roster with one ID, the first one gets the place.
                 foreach (Player player in Players)
@@ -260,9 +261,9 @@ namespace VoidCrewFleet
                     seat = RosterRules.Arrive(_seats, id, player.ActorNumber, name, alive, pvp, now);
                     ById[id] = seat;
                     changed = true;
-                    if (pvp || seat.State == CrewState.Dead) Announce(player.ActorNumber, seat.Name, was, seat);
+                    if (pvp || seat.State != CrewState.Playing) Announce(player.ActorNumber, seat.Name, was, seat);
                 }
-                if (pvp && FillSeats(alive, now)) changed = true;
+                if (FillSeats(alive, now, pvp)) changed = true;
                 if (changed) Publish();
                 Apply(changed);
             }
@@ -336,15 +337,15 @@ namespace VoidCrewFleet
             return machine != null && machine.CurrentState is GSIngame;
         }
 
-        /// <summary>PvP: free seats to the waiting players in the room (RosterRules.FillSeats), with a notice for each who got one.</summary>
-        private static bool FillSeats(List<int> alive, int now)
+        /// <summary>Free seats to the waiting players in the room (RosterRules.FillSeats), with a notice for each who got one.</summary>
+        private static bool FillSeats(List<int> alive, int now, bool pvp)
         {
             WaitingBefore.Clear();
             foreach (RosterSeat seat in _seats)
             {
                 if (!seat.Away && seat.State == CrewState.Waiting) WaitingBefore.Add(seat.Clone());
             }
-            if (WaitingBefore.Count == 0 || !RosterRules.FillSeats(_seats, alive, now)) return false;
+            if (WaitingBefore.Count == 0 || !RosterRules.FillSeats(_seats, alive, now, pvp)) return false;
             foreach (RosterSeat was in WaitingBefore)
             {
                 RosterSeat seat;
@@ -369,7 +370,9 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// Host: the crew list says what the roster says. Both are only made and compared when the roster changed, and every
-        /// few seconds besides in case anything else wrote the crew list (making them on every tick showed up).
+        /// few seconds besides in case anything else wrote the crew list (making them on every tick showed up). This is the
+        /// host's own crew list; the room's copy, which every other player reads, is kept equal to it by
+        /// FleetShips.KeepRoomCopies, so a crew list someone else wrote into the room is put back too.
         /// </summary>
         private static void Apply(bool changed)
         {
@@ -385,8 +388,10 @@ namespace VoidCrewFleet
             List<RosterSeat> inherited = Read();
             if (inherited != null)
             {
-                // Its own copy: the roster as read is shared with every reader.
+                // Its own copy: the roster as read is shared with every reader. The room holds it as published (KeepRoomCopy).
                 _seats = inherited.Select(s => s.Clone()).ToList();
+                _published = _readValue as string;
+                _publishedAt = Time.realtimeSinceStartup;
                 Log.Info("Fleet roster taken over: " + string.Join(", ", _seats.Select(s => s.ToString()).ToArray()) + ".");
                 return true;
             }
@@ -425,9 +430,18 @@ namespace VoidCrewFleet
                     Net.ToActor(actor, Msg.Notice, "You're back. Your ship was destroyed in this mission, so you watch the rest of it.");
                 return;
             }
+            bool pvp = FleetSession.IsPvP;
             if (seat.State == CrewState.Waiting)
             {
-                Notice.ShowAll(name + " is waiting for a free place" + (seat.Team >= 0 ? " on the " + PvpTeams.TeamName(seat.Team) + " team." : "."));
+                Notice.ShowAll(name + " is waiting for a free place" + (!pvp
+                    ? ": every ship's crew is full (" + CrewRules.MaxCrew + " a ship)."
+                    : seat.Team >= 0 ? " on the " + PvpTeams.TeamName(seat.Team) + " team." : "."));
+                return;
+            }
+            if (!pvp)
+            {
+                // Co-op: a newcomer or a player back on their ship is no news; a waiting player who gets a place is.
+                if (before != null && before.State == CrewState.Waiting) Notice.ShowAll(name + " gets a free place, on " + FleetSlots.Name(seat.Slot, false) + ".");
                 return;
             }
             if (before == null) Notice.ShowAll(name + " joins the " + PvpTeams.TeamName(seat.Team) + " team, on " + FleetSlots.Name(seat.Slot, true) + ".");
@@ -489,7 +503,31 @@ namespace VoidCrewFleet
             }.ToString(Newtonsoft.Json.Formatting.None);
             if (json == _published) return;
             _published = json;
+            _publishedAt = Time.realtimeSinceStartup;
             PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyRoster, json } });
+        }
+
+        /// <summary>When the host last wrote the roster (the room's copy changes a round trip later).</summary>
+        private static float _publishedAt = -100f;
+
+        private static readonly RoomCopyCheck RosterCopy = new RoomCopyCheck();
+
+        /// <summary>
+        /// Host, a few times a second (PvpTeams.KeepRoomCopies): the room's roster stays the one the host last published. Any
+        /// player can write a room property; a roster that keeps differing once the host's own has had time to come back
+        /// (RoomCopyCheck) was written by someone else and is put back, so a player who takes over as host carries on with the
+        /// real one.
+        /// </summary>
+        public static void KeepRoomCopy()
+        {
+            Room room = PhotonNetwork.CurrentRoom;
+            bool ours = PhotonNetwork.IsMasterClient && room != null && _seats != null && _published != null && ReferenceEquals(_session, GameSessionManager.ActiveSession);
+            object value = null;
+            if (ours) room.CustomProperties.TryGetValue(KeyRoster, out value);
+            if (!RosterCopy.PutBack(ours && value as string != _published, _publishedAt, Time.realtimeSinceStartup, !PhotonNetwork.IsMessageQueueRunning)) return;
+            _publishedAt = Time.realtimeSinceStartup;
+            room.SetCustomProperties(new Hashtable { { KeyRoster, _published } });
+            Log.WarnOnce("room roster " + room.Name, "The room's fleet roster differed from the host's (another player changed it?); the host put its own back.");
         }
 
         /// <summary>

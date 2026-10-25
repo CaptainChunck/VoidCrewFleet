@@ -18,12 +18,14 @@ namespace VoidCrewFleet
     /// - Fleet Battle: each team has one to three ships; a player picks a ship, and with it the team (BLUE has ships 1, 3
     ///   and 5, RED ships 2, 4 and 6). Teams must be even (with an odd number of players one team has one extra), crews stay
     ///   even and every ship needs a crew. The host may move anyone, then confirms. The host starts the match by sitting in
-    ///   the ready room, and everyone spawns aboard their ship. Without teams from the hub (an older host flow), the team
-    ///   screen shows at the start of the match instead and holds every spawn until confirmed. Players who join later go to
-    ///   the smaller team.
-    /// Players who join the hub after the confirmation go to the smallest crew (of the smaller team). In Fleet Battle a crew
-    /// takes CrewRules.MaxCrew at most: who finds every crew full waits for a free place (in the hub, and in the match the
-    /// roster gives them one).
+    ///   the ready room, and everyone spawns aboard their ship. Without teams from the hub (an older host flow, or a start
+    ///   that skipped the hub's confirm, as the self-test's can), the team screen shows at the start of the match instead and
+    ///   holds every spawn until confirmed. A forged room lock can't bring that back mid-match: the host goes by its own lock.
+    ///   Players who join later go to the smaller team.
+    /// Players who join the hub after the confirmation go to the smallest crew (of the smaller team). A crew takes
+    /// CrewRules.MaxCrew at most, in co-op too (its three ships seat CrewRules.CoopSeats): who finds every crew full waits
+    /// for a free place (in the hub, and in the mission the roster gives them one).
+    /// The lock (confirmed or not) is the host's own while it hosts; the room only carries a copy for the other players.
     /// </summary>
     internal static class PvpTeams
     {
@@ -74,12 +76,24 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// The host's own latest confirm or reopen, for a few seconds: the room's property only changes here once the server
-        /// has sent it back, and the host acts on the lock right after changing it (late joiners, ship requests).
+        /// The host's own lock: what it last confirmed or reopened in this room or, for a player who took over as host, the
+        /// room's lock as it was then (AdoptRoomLock). While it hosts that room this is the truth, not the room's copy: the
+        /// room's property only changes a round trip after the host's own change, and any player can write it, so a forged
+        /// one must not reopen the picking or hold every spawn in the middle of a match (KeepRoomCopies puts it back).
         /// </summary>
         private static bool _hostLocked;
-        private static float _hostLockedAt = -100f;
         private static string _hostLockedRoom;
+
+        /// <summary>When the host last wrote the room's lock (its copy there changes a round trip later).</summary>
+        private static float _hostLockedAt = -100f;
+
+        /// <summary>
+        /// Every other player: the Fleet Battle (its session) in which they saw the teams confirmed. Nothing reopens the teams
+        /// in the middle of a match, so for them the teams stay confirmed until it ends: a forged room lock doesn't open their
+        /// lobby screen (which takes the controls) or switch their roster and spectator views off while the host puts the
+        /// room's copy back.
+        /// </summary>
+        private static object _lockedMatch;
 
         /// <summary>True once the host has confirmed the teams (Fleet Battle) or the crews (co-op) for this mission.</summary>
         public static bool Locked
@@ -87,19 +101,109 @@ namespace VoidCrewFleet
             get
             {
                 if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return false;
-                if (PhotonNetwork.IsMasterClient && Time.unscaledTime - _hostLockedAt < 3f && PhotonNetwork.CurrentRoom.Name == _hostLockedRoom) return _hostLocked;
-                object value;
-                return PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeyLocked, out value) && value is bool && (bool)value;
+                if (!PhotonNetwork.IsMasterClient)
+                {
+                    // Should this player become host, it starts from the room's lock as it is then (AdoptRoomLock).
+                    _hostLockedRoom = null;
+                    object match = MatchSession();
+                    if (!RoomLocked()) return match != null && ReferenceEquals(match, _lockedMatch);
+                    _lockedMatch = match;
+                    return true;
+                }
+                if (PhotonNetwork.CurrentRoom.Name != _hostLockedRoom) AdoptRoomLock();
+                return _hostLocked;
             }
+        }
+
+        /// <summary>The room's copy of the lock, which every player but the host goes by.</summary>
+        private static bool RoomLocked()
+        {
+            object value;
+            return PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(KeyLocked, out value) && value is bool && (bool)value;
+        }
+
+        /// <summary>The Fleet Battle under way (its session), or null: the hub, co-op, a one-ship mission.</summary>
+        private static object MatchSession()
+        {
+            try
+            {
+                return FleetSession.IsPvP && !GameSessionManager.InHub ? GameSessionManager.ActiveSession : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// A player who has just become host (or hosts a new room) takes the room's lock as its own. A Fleet Battle under way
+        /// stays locked whatever the room says when this player saw it locked, or its roster exists (only once the teams were
+        /// confirmed, PvpRoster): since 0.4.4 a match only starts with them confirmed.
+        /// </summary>
+        private static void AdoptRoomLock()
+        {
+            bool locked = RoomLocked();
+            bool underWay = false;
+            try
+            {
+                object match = MatchSession();
+                underWay = !locked && match != null && (ReferenceEquals(match, _lockedMatch) || PvpRoster.Seats() != null);
+            }
+            catch
+            {
+                // the room's lock then
+            }
+            _hostLocked = locked || underWay;
+            _hostLockedRoom = PhotonNetwork.CurrentRoom.Name;
+            _hostLockedAt = -100f;
+            if (underWay) Log.Warn("This player hosts the match now; the room said its teams weren't confirmed, but the match is under way, so they stay confirmed.");
         }
 
         /// <summary>Host: confirm (or reopen) the picks: here at once, in the room after a round trip.</summary>
         private static void SetLocked(bool locked)
         {
             _hostLocked = locked;
-            _hostLockedAt = Time.unscaledTime;
+            _hostLockedAt = Time.realtimeSinceStartup;
             _hostLockedRoom = PhotonNetwork.CurrentRoom.Name;
             PhotonNetwork.CurrentRoom.SetCustomProperties(new Hashtable { { KeyLocked, locked ? (object)true : null } });
+        }
+
+        private static readonly RoomCopyCheck LockCopy = new RoomCopyCheck();
+
+        /// <summary>
+        /// Host, a few times a second (from KeepHubTeamsComplete): the room's copies of what the host decides stay the host's
+        /// own: the lock (here), the crew and ship lists (FleetShips) and the mission's roster (PvpRoster). Any player can
+        /// write a room property; a copy that keeps differing once the host's own write has had time to come back
+        /// (RoomCopyCheck) was written by someone else (a modified game), and the host's goes back in. So a forged lock no
+        /// longer opens the lobby screen for everyone, or switches their roster, spectator and forfeit views off, for more than
+        /// a moment, and the host itself never goes by it.
+        /// </summary>
+        private static void KeepRoomCopies()
+        {
+            try
+            {
+                // FleetShips forgets its own host copies when this player isn't the host.
+                FleetShips.KeepRoomCopies();
+                Room room = PhotonNetwork.CurrentRoom;
+                if (!PhotonNetwork.InRoom || room == null || !PhotonNetwork.IsMasterClient)
+                {
+                    _hostLockedRoom = null;
+                    return;
+                }
+                bool locked = Locked;
+                if (LockCopy.PutBack(RoomLocked() != locked, _hostLockedAt, Time.realtimeSinceStartup, !PhotonNetwork.IsMessageQueueRunning))
+                {
+                    _hostLockedAt = Time.realtimeSinceStartup;
+                    room.SetCustomProperties(new Hashtable { { KeyLocked, locked ? (object)true : null } });
+                    Log.WarnOnce("room lock " + room.Name, "The room's copy of whether the teams (or crews) are confirmed differed from the host's (another player " +
+                                                          "changed it?); the host put its own back (" + (locked ? "confirmed" : "not confirmed") + ").");
+                }
+                PvpRoster.KeepRoomCopy();
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Keeping the room's copies of the host's choices", e);
+            }
         }
 
         /// <summary>While true (a PvP match before the teams are confirmed) the host holds every spawn request.</summary>
@@ -322,15 +426,17 @@ namespace VoidCrewFleet
         private static readonly List<int> HubActors = new List<int>();
 
         /// <summary>
-        /// Host, a few times a second: in the hub, once the teams (or co-op crews) are confirmed, a player who joins later goes
-        /// to the smallest crew (of the smaller team), as in a mission, so they can set up their ship without the host
-        /// reopening the picking. In Fleet Battle a crew takes CrewRules.MaxCrew at most: a player who finds every crew full
-        /// stays without a ship and is told why (the host too), gets the first place a leaving player frees, and otherwise
-        /// waits in the match like a player who joins it then (the roster gives them a free place). Not while the hub loads:
-        /// the last mission's crews and lock are only cleared once it has.
+        /// Host, a few times a second: first the room's copies of the host's choices are kept (KeepRoomCopies). Then in the
+        /// hub, once the teams (or co-op crews) are confirmed, a player who joins later goes to the smallest crew (of the
+        /// smaller team), as in a mission, so they can set up their ship without the host reopening the picking. A crew takes
+        /// CrewRules.MaxCrew at most (co-op too): a player who finds every crew full stays without a ship and is told why (the
+        /// host too), gets the first place a leaving player frees, and otherwise waits in the mission like a player who joins
+        /// it then (the roster gives them a free place). Not while the hub loads: the last mission's crews and lock are only
+        /// cleared once it has.
         /// </summary>
         public static void KeepHubTeamsComplete()
         {
+            KeepRoomCopies();
             try
             {
                 if (!PhotonNetwork.IsMasterClient || !HubFleetPlanned || HubShipManager.Instance == null || !Locked)
@@ -362,7 +468,7 @@ namespace VoidCrewFleet
                     int slot = CrewRules.PlaceFor(crews, HubActors, slots, teams);
                     if (slot < 0)
                     {
-                        if (HubWaiting.Add(actor)) TellCrewsFull(player);
+                        if (HubWaiting.Add(actor)) TellCrewsFull(player, teams, ships, HubActors.Count);
                         continue;
                     }
                     HubWaiting.Remove(actor);
@@ -392,15 +498,22 @@ namespace VoidCrewFleet
             return true;
         }
 
-        /// <summary>Fleet Battle, teams confirmed: a player who joined found every crew full. They and the host learn why, and what helps.</summary>
-        private static void TellCrewsFull(Player player)
+        /// <summary>
+        /// Teams (or co-op crews) confirmed: a player who joined found every crew full. They and the host learn why, and what
+        /// helps. In co-op with fewer than three ships the mission adds one for the room's size as it starts (TransitionToPrefix).
+        /// </summary>
+        private static void TellCrewsFull(Player player, bool teams, int ships, int players)
         {
             Net.ToActor(player.ActorNumber, Msg.Notice, "Every crew is full (" + CrewRules.MaxCrew + " players a ship), so you wait for a free place: " +
-                                                        "you get the first one that opens, here or in the match.");
+                                                        "you get the first one that opens, here or in the " + (teams ? "match." : "mission."));
             if (player.IsLocal) return;
             string name = string.IsNullOrEmpty(player.NickName) ? "Player " + player.ActorNumber : player.NickName;
-            Notice.Show(name + " joined, but every crew is full (" + CrewRules.MaxCrew + " players a ship), so they wait for a free place. " +
-                        "More ships per team (TEAMS & RULES on the FLEET panel) would give them one.");
+            string helps = teams
+                ? "More ships per team (TEAMS & RULES on the FLEET panel) would give them one."
+                : ships < CrewRules.MaxCoopShips && players <= CrewRules.CoopSeats
+                    ? "The mission adds a ship for them when it starts."
+                    : "Co-op takes " + CrewRules.CoopSeats + " players at most.";
+            Notice.Show(name + " joined, but every crew is full (" + CrewRules.MaxCrew + " players a ship), so they wait for a free place. " + helps);
         }
 
         /// <summary>

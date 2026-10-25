@@ -20,7 +20,8 @@ namespace VoidCrewFleet
     /// room property keeps a copy for players who join later, and for a player who takes over as host while the match ends
     /// (only when it checks out: any player can write a room property). The host ends the game a few seconds after the last
     /// ship starts to explode, and each player's end screen says Victory or Defeat for their own team (the game sends one
-    /// result for everyone; a player who was never on a team gets Defeat).
+    /// result for everyone; a player who was never on a team gets Defeat). Nobody else can end a fleet mission through the
+    /// game's EndGame network call or its "game ended" event (EndGamePrefix, GameEventPrefix).
     /// </summary>
     internal static class PvpMatch
     {
@@ -331,13 +332,30 @@ namespace VoidCrewFleet
             return mine < 0 || mine == loser ? QuestResult.Defeat : QuestResult.Victory;
         }
 
-        /// <summary>The host's own end screen shows its own team's result (from its own decision, never the room's copy).</summary>
+        /// <summary>
+        /// ClientGame.EndGame is a network call (a PunRPC) the game never sends itself: called on the host it ends the mission for
+        /// everyone, called on another player it ends it for them. In a fleet mission only the host's own call counts (and the
+        /// game event it sends everyone: GameEventPrefix): a call another player sent (a modified game, to end a Fleet Battle
+        /// with the result it chooses), or one replayed from the room after its sender left, is refused on every player's
+        /// game. When RpcSender isn't in, the call counts as the game would count it. In PvP the host's own end screen shows
+        /// its own team's result (from its own decision, never the room's copy).
+        /// </summary>
         [GamePatch(Feature, "CG.Game.ClientGame", "EndGame", PatchKind.Prefix)]
-        private static void EndGamePrefix(ref byte playerQuestResult)
+        private static bool EndGamePrefix(ClientGame __instance, ref byte playerQuestResult)
         {
             try
             {
-                if (!FleetSession.IsPvP) return;
+                if (FleetSession.Mode == FleetMode.OneShip) return true;
+                PhotonView view = __instance != null ? __instance.photonView : null;
+                int actor;
+                bool fromOther = RpcSender.Of(view, out actor) ? actor != FleetShips.LocalActor && !Net.FromHost(actor) : RpcSender.FromAbsentPlayer(view);
+                if (fromOther)
+                {
+                    Log.WarnOnce("end game from " + actor, (actor >= 0 ? "Player " + actor : "A player who has left") +
+                                                           " sent the end of the mission, which only the host's game may end; ignored.");
+                    return false;
+                }
+                if (!FleetSession.IsPvP) return true;
                 int loser = LoserTeam;
                 if (loser >= 0) playerQuestResult = (byte)LocalResult(loser);
             }
@@ -345,20 +363,32 @@ namespace VoidCrewFleet
             {
                 Log.Failure("Setting the PvP result", e);
             }
+            return true;
         }
 
         /// <summary>
-        /// Every other player's end screen shows their own team's result, whatever result the host sent: by the host's
-        /// decision (its message, or the room's copy for a player who joined after it).
+        /// The game's state events (ready, running, ended) come from the host's game alone, and set the state of every other
+        /// player's game. In a fleet mission one that another player in the room sent (a modified game, to end the mission for
+        /// everyone) is ignored, on every player's game. Events the room keeps for players who join later, the host's (who may
+        /// have left since), count as before. In PvP every other player's end screen shows their own team's result, whatever
+        /// result the host sent: by the host's decision (its message, or the room's copy for a player who joined after it).
         /// </summary>
         [GamePatch(Feature, "CG.Game.ClientGame", "OnEvent", PatchKind.Prefix)]
-        private static void GameEventPrefix(EventData photonEvent)
+        private static bool GameEventPrefix(EventData photonEvent)
         {
             try
             {
-                if (photonEvent == null || photonEvent.Code != 2 || !FleetSession.IsPvP) return;
+                if (photonEvent == null || photonEvent.Code != 2 || FleetSession.Mode == FleetMode.OneShip) return true;
+                int sender = photonEvent.Sender;
+                Photon.Realtime.Room room = PhotonNetwork.CurrentRoom;
+                if (sender > 0 && !Net.FromHost(sender) && room != null && room.GetPlayer(sender) != null)
+                {
+                    Log.WarnOnce("game state from " + sender, "Player " + sender + " sent a change of the mission's state, which only the host's game sends; ignored.");
+                    return false;
+                }
+                if (!FleetSession.IsPvP) return true;
                 var data = photonEvent.CustomData as object[];
-                if (data == null || data.Length < 2 || Convert.ToInt32(data[0]) != (int)ClientGameState.Ended) return;
+                if (data == null || data.Length < 2 || Convert.ToInt32(data[0]) != (int)ClientGameState.Ended) return true;
                 int loser = LoserTeam;
                 if (loser >= 0) data[1] = (byte)LocalResult(loser);
             }
@@ -366,6 +396,7 @@ namespace VoidCrewFleet
             {
                 Log.Failure("Setting the PvP result", e);
             }
+            return true;
         }
 
         /// <summary>Host: a new match has no result yet.</summary>

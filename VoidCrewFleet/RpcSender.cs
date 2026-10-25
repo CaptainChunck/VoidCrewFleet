@@ -53,5 +53,15 @@ namespace VoidCrewFleet
             actor = sender.ActorNumber;
             return true;
         }
+
+        /// <summary>
+        /// Whether the RPC running now on this network object was sent by a player who isn't in the room any more: the game's
+        /// rooms keep a leaver's buffered RPCs, and PUN replays them to every player who joins later without a sender. False
+        /// outside such an RPC, and when this feature isn't in.
+        /// </summary>
+        public static bool FromAbsentPlayer(PhotonView view)
+        {
+            return _current.Sender == null && view != null && _current.View != 0 && _current.View == view.ViewID;
+        }
     }
 }
