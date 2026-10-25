@@ -24,8 +24,11 @@ namespace VoidCrewFleet
     ///   charge). During the jump any ship's lever acts as the lead ship's.
     /// The game runs each ship's jump on one client: the host's, or that of the player at its helm (sitting there hands the
     /// ship's network objects to the pilot). A lever pull is decided where its ship's void drive is run: that client makes
-    /// the ship the lead at once and, when it isn't the host, tells the host, who shares the lead ship as a room property.
-    /// Before the first jump (and while it is lost) the lead is the living ship with the lowest number.
+    /// the ship the lead at once and, when it isn't the host, tells every other player at once (the host then shares the
+    /// lead ship as a room property). Before the first jump (and while it is lost) the lead is the living ship with the
+    /// lowest number.
+    /// A drive is charged where it is run, and the other players get its charge through the game's own updates; when a drive
+    /// becomes fully charged its whole state is sent again, so it reads as charged on every player's game, not only there.
     ///
     /// Each ship has its own VoidJumpSystem. The followers' follow the leader's: on the client that runs a follower's jump
     /// system, every state change of the leader is applied to it too, and the game's own sync carries its state to everyone
@@ -66,7 +69,8 @@ namespace VoidCrewFleet
             get { return _followerDepth > 0; }
         }
 
-        private static bool Linked
+        /// <summary>A co-op mission with more than one ship: the ships jump together and share one astral map choice.</summary>
+        internal static bool Linked
         {
             get { return FleetSession.Mode == FleetMode.Coop && FleetShips.Active; }
         }
@@ -180,17 +184,16 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// The ship whose lever was pulled leads the jump. On the host it becomes the room's lead ship. Elsewhere (the client
-        /// running that ship's drive is its pilot's) it leads here at once, and the host is told so it becomes the room's.
+        /// running that ship's drive is its pilot's) it leads here at once, and every other player is told: the host makes it
+        /// the room's, the others go by it until the room's catches up.
         /// </summary>
         private static void SetLead(int slot)
         {
             if (!PhotonNetwork.IsMasterClient)
             {
-                _pendingLead = slot;
-                _pendingRoomLead = RoomLead();
-                _pendingUntil = Time.unscaledTime + PendingSeconds;
-                Net.ToHost(Msg.JumpLead, slot);
-                Log.Info("Ship " + (slot + 1) + " leads the void jump (its lever was pulled here; the host is told).");
+                HoldPendingLead(slot);
+                Net.ToOthers(Msg.JumpLead, slot);
+                Log.Info("Ship " + (slot + 1) + " leads the void jump (its lever was pulled here; the other players are told).");
                 return;
             }
             _hostLead = slot;
@@ -205,19 +208,35 @@ namespace VoidCrewFleet
             Log.Info("Ship " + (slot + 1) + " leads the void jump.");
         }
 
+        /// <summary>A client that isn't the host goes by this lead ship until the room's lead catches up (or a few seconds pass).</summary>
+        private static void HoldPendingLead(int slot)
+        {
+            _pendingLead = slot;
+            _pendingRoomLead = RoomLead();
+            _pendingUntil = Time.unscaledTime + PendingSeconds;
+        }
+
         /// <summary>
-        /// The jump's messages: the host takes the lead ship chosen where a lever pull was decided (a ship's pilot); the player
-        /// who pulled a lever hears why the jump didn't start.
+        /// The jump's messages: the lead ship chosen where a lever pull was decided (a ship's pilot), which the host makes the
+        /// room's and everyone else goes by at once; and, for the player who pulled a lever, why the jump didn't start.
         /// </summary>
         public static void Listen()
         {
             Net.On(Msg.JumpLead, (sender, data) =>
             {
-                if (!PhotonNetwork.IsMasterClient || !Linked) return;
+                if (!Linked) return;
                 int slot = Net.Get(data, 0, -1);
                 if (slot < 0 || !FleetShips.IsAlive(slot)) return;
-                // Taken from whoever sends it: a lead ship can change at any point of a jump, as the ships are in the same state.
-                if (slot != _hostLead) SetLead(slot);
+                if (PhotonNetwork.IsMasterClient)
+                {
+                    // Taken from whoever sends it: a lead ship can change at any point of a jump, as the ships are in the same state.
+                    if (slot != _hostLead) SetLead(slot);
+                    return;
+                }
+                // The lead ship's first steps of the jump come straight from the player whose client runs it, and reach this
+                // client before the host's room value could: a pilot here whose ship follows must already know which ship
+                // leads, or that ship misses the start of the jump. (Players on an older version only tell the host.)
+                if (RunsADrive(sender)) HoldPendingLead(slot);
             });
             Net.On(Msg.JumpRefused, (sender, data) =>
             {
@@ -592,14 +611,15 @@ namespace VoidCrewFleet
                     string text = "Void drive not charged on " + string.Join(" and ", uncharged.ToArray()) + ": every crewed ship's void drive must be charged to jump.";
                     if (deciding)
                     {
-                        Log.Info("Void jump refused (" + FleetShips.Describe(ship) + "'s lever): " + text);
+                        Log.Info("Void jump refused (" + FleetShips.Describe(ship) + "'s lever): " + text + " Drives as seen here: " + DescribeCharges() + ".");
                         // The player who pulled it hears why (on this client, their own check already told them).
                         if (_startRequestFrom != FleetShips.LocalActor)
                             Net.ToActor(_startRequestFrom, PhotonNetwork.IsMasterClient ? Msg.Notice : Msg.JumpRefused, text);
                     }
-                    else
+                    else if (Warn(text))
                     {
-                        Warn(text);
+                        Log.Info("Void jump refused on this player's screen (" + FleetShips.Describe(ship) + "'s lever): " + text + " Drives as seen here: " +
+                                 DescribeCharges() + ".");
                     }
                     return false;
                 }
@@ -614,17 +634,39 @@ namespace VoidCrewFleet
 
         /// <summary>
         /// A lever pull that starts the jump, where its ship's drive is run, makes that ship the lead ship; one the game
-        /// refuses (no escape vector, no power, the helm off, not charged) changes nothing. The lead is set before the jump's
-        /// first step, which the game takes right after this check.
+        /// refuses (no escape vector, no power, the helm off, not charged) changes nothing, and is logged with the drives as
+        /// this client has them (Fleet's own refusals are logged where they are made). The lead is set before the jump's first
+        /// step, which the game takes right after this check.
+        /// On the puller's screen the game checks the drive's charge before it sends the pull on; a copy of a drive run on
+        /// another player's game can read a hair short of full (<see cref="ChargedCopy"/>), so such a pull goes on to the
+        /// drive's own game, which checks the charge exactly.
         /// </summary>
         [GamePatch(Feature, "CG.Ship.Modules.VoidDriveModule", "TryStartJumpEngine", PatchKind.Postfix)]
-        private static void TryStartJumpPostfix(VoidDriveModule __instance, ImpulseJumpOutcome __result)
+        private static void TryStartJumpPostfix(VoidDriveModule __instance, ref ImpulseJumpOutcome __result)
         {
             try
             {
-                if (__result != ImpulseJumpOutcome.ImpulseFlightStarted || _startRequestFrom < 0 || !Linked) return;
-                int slot = FleetShips.Slot(FleetShips.OwnerOf(__instance));
-                if (slot >= 0) SetLead(slot);
+                if (!Linked) return;
+                bool deciding = _startRequestFrom >= 0;
+                PlayerControlledShip ship = FleetShips.OwnerOf(__instance);
+                if (__result == ImpulseJumpOutcome.ImpulseFlightStarted)
+                {
+                    int slot = FleetShips.Slot(ship);
+                    if (deciding && slot >= 0) SetLead(slot);
+                    return;
+                }
+                if (!deciding && __result == ImpulseJumpOutcome.CantFlyImpulseNotCharging && __instance.photonView != null && !__instance.photonView.AmOwner &&
+                    __instance.JumpCharge >= ChargedCopy)
+                {
+                    Log.Info("Void jump: " + FleetShips.Describe(ship) + "'s drive reads " + (__instance.JumpCharge * 100f).ToString("0.0") +
+                             " % here; the pull goes on to the game that runs it, which checks its charge exactly.");
+                    __result = ImpulseJumpOutcome.ImpulseFlightStarted;
+                    return;
+                }
+                // The game never answers CantFlyNoImpulse itself: that is Fleet's own refusal. InTransit is a pull mid-jump.
+                if (__result == ImpulseJumpOutcome.InTransit || __result == ImpulseJumpOutcome.CantFlyNoImpulse) return;
+                Log.Info("Void jump refused by the game (" + FleetShips.Describe(ship) + "'s lever" + (deciding ? "" : ", on this player's screen") + "): " + __result +
+                         ". Drives as seen here: " + DescribeCharges() + ".");
             }
             catch (Exception e)
             {
@@ -633,9 +675,18 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
+        /// How charged a copy of a drive run on another player's game must read to count as charged here. Photon leaves out a
+        /// change of 0.01 or less, so a copy can stop just short of full; the drive's own game sends its whole state once it
+        /// is full (SendWholeState), but a player on an older Fleet doesn't, and their drive would otherwise hold every
+        /// jump up. The drive's own game still checks its own charge exactly.
+        /// </summary>
+        private const float ChargedCopy = 0.98f;
+
+        /// <summary>
         /// "Ship 2", "Ship 3": the living ships whose void drive isn't fully charged, among those with a crew member in the room.
         /// A ship nobody crews (co-op with fewer players than ships, or its crew left) doesn't hold the jump up: the lead ship's
-        /// jump carries it along whatever its charge.
+        /// jump carries it along whatever its charge. A drive run on another player's game counts as charged a hair short of
+        /// full (<see cref="ChargedCopy"/>).
         /// </summary>
         private static List<string> UnchargedShips()
         {
@@ -645,14 +696,39 @@ namespace VoidCrewFleet
                 if (!FleetShips.HasCrewInRoom(slot)) continue;
                 PlayerControlledShip ship = FleetShips.BySlot(slot);
                 VoidDriveModule drive = ship != null ? ship.GetModule<VoidDriveModule>() : null;
-                if (drive == null || !drive.IsFullyCharged) names.Add("Ship " + (slot + 1));
+                if (drive == null) names.Add("Ship " + (slot + 1));
+                else if (!drive.IsFullyCharged && (drive.photonView == null || drive.photonView.AmOwner || drive.JumpCharge < ChargedCopy)) names.Add("Ship " + (slot + 1));
             }
             return names;
         }
 
-        private static void Warn(string text)
+        /// <summary>
+        /// For the log: each living ship's void drive charge as this client has it, and where the drive is run (its charge is
+        /// only worked out there): "ship 1 100.0 % (run here), ship 2 99.4 % (run by player 3)".
+        /// </summary>
+        private static string DescribeCharges()
         {
-            if (Time.unscaledTime < _nextWarning) return;
+            var parts = new List<string>();
+            foreach (int slot in FleetShips.AliveSlots())
+            {
+                PlayerControlledShip ship = FleetShips.BySlot(slot);
+                VoidDriveModule drive = ship != null ? ship.GetModule<VoidDriveModule>() : null;
+                if (drive == null)
+                {
+                    parts.Add("ship " + (slot + 1) + " has no drive");
+                    continue;
+                }
+                PhotonView view = drive.photonView;
+                string runner = view == null ? "not networked" : (view.AmOwner ? "run here" : "run by player " + view.OwnerActorNr);
+                parts.Add("ship " + (slot + 1) + " " + (drive.JumpCharge * 100f).ToString("0.0") + " % (" + runner + (FleetShips.HasCrewInRoom(slot) ? "" : ", no crew") + ")");
+            }
+            return string.Join(", ", parts.ToArray());
+        }
+
+        /// <summary>Shows a warning on this player's screen, at most every 3 seconds; true when it was shown.</summary>
+        private static bool Warn(string text)
+        {
+            if (Time.unscaledTime < _nextWarning) return false;
             _nextWarning = Time.unscaledTime + 3f;
             try
             {
@@ -661,6 +737,54 @@ namespace VoidCrewFleet
             catch
             {
                 Notice.Show(text);
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------- every player's copy of a charged drive
+
+        /// <summary>What Photon last sent of a network object (it compares the next update with this).</summary>
+        private static readonly FieldInfo LastSentField = GameMember.Field(typeof(PhotonView), "lastOnSerializeDataSent");
+
+        /// <summary>
+        /// A drive's charge is worked out only where the drive is run (the host, or the ship's pilot); everyone else gets it
+        /// through Photon's updates, which leave out a number that has changed by less than 0.01 since the update before
+        /// (Photon's float precision). The last step up to a full charge is often that small, so on the other players' games
+        /// the drive could stop at 99 % (or show 100 % without being full) until it was charged again: it read as not charged
+        /// there, so a lever pulled there, and every "each crewed ship's drive is charged" check made there, was refused. The
+        /// host runs the drive of every ship nobody sits at the helm of, which is why the host's own pulls went through and
+        /// other players' didn't. So when a drive run here becomes fully charged, Photon sends its whole state with the next
+        /// update (as Photon does itself for every object when a player joins), and every copy reads exactly full.
+        /// </summary>
+        [GamePatch(Feature, "CG.Ship.Modules.VoidDriveModule", "UpdateOn", PatchKind.Prefix, Optional = true)]
+        private static void ChargePrefix(VoidDriveModule __instance, out float __state)
+        {
+            __state = __instance.JumpCharge;
+        }
+
+        [GamePatch(Feature, "CG.Ship.Modules.VoidDriveModule", "UpdateOn", PatchKind.Postfix, Optional = true)]
+        private static void ChargePostfix(VoidDriveModule __instance, float __state)
+        {
+            // Every physics step while the drive is powered: only the step that fills it up goes further.
+            if (__state >= 1f || !__instance.IsFullyCharged || FleetSession.Mode != FleetMode.Coop) return;
+            SendWholeState(__instance);
+        }
+
+        /// <summary>Photon sends a drive's whole state with its next update, from the client that runs it.</summary>
+        private static void SendWholeState(VoidDriveModule drive)
+        {
+            try
+            {
+                PhotonView view = drive.photonView;
+                if (view == null || !view.AmOwner || LastSentField == null) return;
+                LastSentField.SetValue(view, null);
+                int slot = FleetShips.Slot(FleetShips.OwnerOf(drive));
+                Log.Info((slot >= 0 ? "Ship " + (slot + 1) + "'s" : "A") +
+                         " void drive is fully charged (it is run here): its state goes out to every player again, so it reads as charged on every screen.");
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Sending a charged void drive's state to every player", e);
             }
         }
 

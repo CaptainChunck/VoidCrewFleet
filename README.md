@@ -33,7 +33,8 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
     head for each of its crew (black while they live, red once dead) and its hull as the ship panel shows yours, with
     its type's silhouette; a lost ship shows the red skull and LOST.
 - The ships start side by side, fly freely, and **void-jump together**:
-  - the escape vector set on any ship's astral map counts for every ship;
+  - the escape vector and the destination picked on any ship's astral map count for every ship, and every ship's
+    map shows them;
   - each crew charges its own ship's void drive;
   - once **every crewed ship's drive is charged**, pulling any ship's void lever jumps the whole fleet, whoever flies
     it. While a drive isn't charged, the lever says which ship's and nothing starts. A ship nobody crews is carried

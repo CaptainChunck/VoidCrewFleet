@@ -23,6 +23,7 @@ namespace VoidCrewFleet
         public static ConfigEntry<bool> VerboseLogging;
         public static ConfigEntry<AutoTestMode> AutoTest;
         public static ConfigEntry<bool> AutoTestJump;
+        public static ConfigEntry<bool> AutoTestLeverJump;
         public static ConfigEntry<int> AutoTestShips;
         public static ConfigEntry<string> AutoTestLoadouts;
         public static ConfigEntry<string> AutoTestDestroy;
@@ -31,6 +32,8 @@ namespace VoidCrewFleet
         public static ConfigEntry<bool> AutoTestReturn;
         public static ConfigEntry<bool> AutoTestFists;
         public static ConfigEntry<bool> AutoTestTour;
+        public static ConfigEntry<bool> AutoTestCruisers;
+        public static ConfigEntry<bool> AutoTestDeconstruct;
         public static ConfigEntry<bool> Profile;
 
         public static void Bind(ConfigFile config)
@@ -96,6 +99,10 @@ namespace VoidCrewFleet
                 "with that fleet mode, and log what the fleet looks like (with screenshots in BepInEx\\fleet-autotest). Leave it Off to play.");
             AutoTestJump = config.Bind("Diagnostics", "AutoTestJump", true,
                 "With AutoTest = TwoShips or FleetPilgrimage: also make the lead ship void jump (debug charge) and log the other ships following it.");
+            AutoTestLeverJump = config.Bind("Diagnostics", "AutoTestLeverJump", false,
+                "With AutoTestJump: make the jump the way players do, led by the last ship: every ship is powered and charged, the escape vector " +
+                "and then the destination are picked on the last ship's astral map, and the last ship's void lever is pulled each time (first once " +
+                "with your own ship's drive short of full, which must be refused and name that ship). The log says what every ship and map did.");
             AutoTestShips = config.Bind("Diagnostics", "AutoTestShips", 2,
                 new ConfigDescription("With AutoTest on: how many ships the self-test plans (co-op), or ships per team (PvP).", new AcceptableValueRange<int>(1, 3)));
             AutoTestLoadouts = config.Bind("Diagnostics", "AutoTestLoadouts", "",
@@ -117,6 +124,13 @@ namespace VoidCrewFleet
             AutoTestTour = config.Bind("Diagnostics", "AutoTestTour", false,
                 "With AutoTest = PvP: a free camera tours the arena (above it, behind each team, its centre, every ship, every salvage spot and a " +
                 "supply drop called in for the tour), with a screenshot at each and the game's screens hidden.");
+            AutoTestCruisers = config.Bind("Diagnostics", "AutoTestCruisers", false,
+                "With AutoTest = FleetPilgrimage: the host brings in the Fleet Battle mission's HOLLOW Cruiser spawner near the fleet, destroys " +
+                "the first cruiser it sends and checks that the next one comes, as with one ship (one at a time, 30 s after the last one died). " +
+                "The log says PASSED or FAILED.");
+            AutoTestDeconstruct = config.Bind("Diagnostics", "AutoTestDeconstruct", false,
+                "With AutoTest on (co-op, two or more ships): the host takes a module apart on its own ship, then one on each other ship, and " +
+                "builds each again from its build box. The log says PASSED or FAILED for each ship.");
         }
     }
 }

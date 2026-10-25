@@ -3,15 +3,22 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using CG.Client.Player.Input;
 using CG.Client.Player.Interactions;
+using CG.Client.Player.Interactions.Build;
 using CG.Game;
 using CG.Game.Player;
+using CG.Game.SpaceObjects.Controllers;
 using CG.GameLoopStateMachine;
 using CG.GameLoopStateMachine.GameStates;
+using CG.Objects;
+using CG.Ship.Hull;
 using CG.Ship.Modules;
+using CG.Ship.Object;
 using CG.Space;
 using Gameplay.Hub;
 using Gameplay.Quests;
+using Gameplay.Ship;
 using Gameplay.Ship.VoidJump;
 using PlatformAbstractionLayer;
 using Photon.Pun;
@@ -36,7 +43,8 @@ namespace VoidCrewFleet
     /// then writes what the fleet looks like to the log: the ships, their positions and slots, the crews, the clone tubes, the
     /// local player's ship, then (AutoTestRespawn) a death and re-cloning, (AutoTestDestroy) ships destroyed one by one,
     /// (AutoTestReturn) RETURN TO HUB, and (with AutoTestJump) a void jump of every ship, with screenshots in the BepInEx
-    /// folder. It never runs unless switched on in the config.
+    /// folder: a debug jump, or (AutoTestLeverJump) one made the way players make it, led by the last ship's lever and astral
+    /// map. It never runs unless switched on in the config.
     /// </summary>
     internal static class AutoTest
     {
@@ -51,6 +59,8 @@ namespace VoidCrewFleet
             Tour,
             Fists,
             Respawning,
+            Cruisers,
+            Deconstructing,
             Destroying,
             Returning,
             Jumping,
@@ -174,7 +184,7 @@ namespace VoidCrewFleet
                     }
                     else
                     {
-                        Go(Step.Destroying);
+                        AfterRespawn();
                     }
                     return;
                 case Step.Tour:
@@ -190,6 +200,16 @@ namespace VoidCrewFleet
                 case Step.Respawning:
                     if (!_sequenceDone && Since < 90f) return;
                     if (!_sequenceDone) Log.Warn("[autotest] The respawn test didn't finish in 90 s.");
+                    AfterRespawn();
+                    return;
+                case Step.Cruisers:
+                    if (!_sequenceDone && Since < 240f) return;
+                    if (!_sequenceDone) Log.Warn("[autotest] The cruiser test didn't finish in 240 s.");
+                    AfterCruisers();
+                    return;
+                case Step.Deconstructing:
+                    if (!_sequenceDone && Since < 240f) return;
+                    if (!_sequenceDone) Log.Warn("[autotest] The deconstruct test didn't finish in 240 s.");
                     Go(Step.Destroying);
                     return;
                 case Step.Destroying:
@@ -220,11 +240,16 @@ namespace VoidCrewFleet
                     else Finish();
                     return;
                 case Step.Jumping:
-                    if (Time.unscaledTime - _lastReport < 3f) return;
+                    // The lever jump logs each of its own steps and takes a few minutes: a report every 10 s, and done when it is.
+                    if (Time.unscaledTime - _lastReport < (_leverJump ? 10f : 3f)) return;
                     _lastReport = Time.unscaledTime;
                     Report("jump");
                     if (_shots < 12) Screenshot("jump");
-                    if (Since > 75f) Finish();
+                    if (_leverJump ? _sequenceDone || Since > 240f : Since > 75f)
+                    {
+                        if (_leverJump && !_sequenceDone) Log.Warn("[autotest] The lever jump didn't finish in 240 s.");
+                        Finish();
+                    }
                     return;
             }
         }
@@ -471,6 +496,355 @@ namespace VoidCrewFleet
             Report("re-cloned");
             Screenshot("recloned");
             _sequenceDone = true;
+        }
+
+        /// <summary>After the respawn test: the cruiser test (AutoTestCruisers, co-op), then the ships are destroyed.</summary>
+        private static void AfterRespawn()
+        {
+            if (Settings.AutoTestCruisers.Value && FleetSession.Mode == FleetMode.Coop)
+            {
+                Go(Step.Cruisers);
+                _sequenceDone = false;
+                FleetRuntime.Instance.StartCoroutine(CruiserSequence());
+                return;
+            }
+            AfterCruisers();
+        }
+
+        /// <summary>After the cruiser test: the deconstruct test (AutoTestDeconstruct, co-op with several ships), then the ships are destroyed.</summary>
+        private static void AfterCruisers()
+        {
+            if (Settings.AutoTestDeconstruct.Value && FleetSession.Mode == FleetMode.Coop && FleetShips.Active)
+            {
+                Go(Step.Deconstructing);
+                _sequenceDone = false;
+                FleetRuntime.Instance.StartCoroutine(DeconstructSequence());
+                return;
+            }
+            Go(Step.Destroying);
+        }
+
+        /// <summary>
+        /// Taking modules apart on every ship, and building them again (AutoTestDeconstruct): the host takes a module apart on
+        /// its own ship first (the game's one build controller then keeps that ship's sockets), then one on each other ship,
+        /// and checks that each comes out of its slot and that the slot takes the module back from its build box. In Fleet
+        /// 0.4.4 a module on any ship but the first stayed stuck in its slot, switched off, and the slot with it.
+        /// </summary>
+        private static System.Collections.IEnumerator DeconstructSequence()
+        {
+            BuildProcessController builder = ClientGame.Current != null ? ClientGame.Current.GetComponent<BuildProcessController>() : null;
+            PlayerControlledShip own = FleetShips.LocalShip ?? FleetShips.BySlot(0);
+            if (!PhotonNetwork.IsMasterClient || builder == null || own == null)
+            {
+                Log.Warn("[autotest] Deconstruct: skipped (host " + PhotonNetwork.IsMasterClient + ", build controller " + (builder != null) + ", own ship " + (own != null) + ").");
+                _sequenceDone = true;
+                yield break;
+            }
+            var ships = new List<PlayerControlledShip> { own };
+            foreach (int slot in FleetShips.AliveSlots())
+            {
+                PlayerControlledShip ship = FleetShips.BySlot(slot);
+                if (ship != null && ship != own) ships.Add(ship);
+            }
+            float wait = ClientGame.Current.SharedConfiguration.DeconstructDuration + 20f;
+            int passed = 0, failed = 0;
+            foreach (PlayerControlledShip ship in ships)
+            {
+                string passedOver;
+                BuildSocket socket = TakeApartCandidate(ship, out passedOver);
+                if (socket == null)
+                {
+                    Log.Warn("[autotest] Deconstruct: nothing on " + FleetShips.Describe(ship) + " can be taken apart; skipped (" + passedOver + ").");
+                    continue;
+                }
+                CellModule module = socket.InstalledModule;
+                string name = module.DisplayName;
+                if (!module.BuildingConstraints.AllowDeconstruction)
+                {
+                    // What a ship starts with stays on it (the game spawns it so); what players build in a mission comes off.
+                    // This one is made removable, as if it had been built in this mission.
+                    module.BuildingConstraints.AllowDeconstruction = true;
+                    Log.Info("[autotest] Deconstruct: " + name + " came with the ship; made removable here, as if built in this mission.");
+                }
+                // The game only takes apart a module with nothing in its item slots (a turret's ammo, a shield's battery), as
+                // a player would empty them first.
+                int emptied = 0;
+                foreach (CarryablesSocket slot in module.ConnectedSockets)
+                {
+                    CarryableObject item = slot != null ? slot.Payload : null;
+                    if (item == null || item.DestroyRequested) continue;
+                    item.Kill();
+                    emptied++;
+                }
+                if (emptied > 0)
+                {
+                    Log.Info("[autotest] Deconstruct: emptied " + emptied + " item slot(s) of " + name + " first.");
+                    yield return new WaitForSeconds(2f);
+                }
+                Log.Info("[autotest] Deconstruct: taking apart " + name + " on " + FleetShips.Describe(ship) + " (socket " + socket.Index + ").");
+                bool asked = false;
+                try
+                {
+                    asked = builder.TryDeconstructModule(module);
+                }
+                catch (Exception e)
+                {
+                    Log.Failure("[autotest] asking to take apart " + name, e);
+                }
+                float started = Time.unscaledTime;
+                while (Time.unscaledTime - started < wait && StillIn(socket, module)) yield return new WaitForSeconds(1f);
+                if (StillIn(socket, module))
+                {
+                    failed++;
+                    Log.Error("[autotest] Deconstruct: FAILED on " + FleetShips.Describe(ship) + ", " + name + " is still in its slot after " + wait.ToString("0") +
+                              " s (asked " + asked + ", marked as being taken apart " + (module != null && module.IsBeingDeconstructed) + ").");
+                    continue;
+                }
+                Log.Info("[autotest] Deconstruct: " + name + " came out of its slot on " + FleetShips.Describe(ship) + " in " + (Time.unscaledTime - started).ToString("0") + " s.");
+                // The slot takes the module back from the build box it left there, once the game is done with the slot (it
+                // keeps working on it for a few seconds after the module came out).
+                started = Time.unscaledTime;
+                while (Time.unscaledTime - started < 15f && builder.IsWorkingOnSocket(socket)) yield return new WaitForSeconds(0.5f);
+                var box = socket.Payload as BuildBox;
+                bool rebuilding = false;
+                for (int attempt = 0; attempt < 3 && box != null && !rebuilding; attempt++)
+                {
+                    if (attempt > 0) yield return new WaitForSeconds(2f);
+                    try
+                    {
+                        rebuilding = builder.TryConstructModule(box);
+                    }
+                    catch (Exception e)
+                    {
+                        Log.Failure("[autotest] building " + name + " again", e);
+                    }
+                }
+                started = Time.unscaledTime;
+                while (rebuilding && Time.unscaledTime - started < wait && socket.InstalledModule == null) yield return new WaitForSeconds(1f);
+                if (socket.InstalledModule != null)
+                {
+                    passed++;
+                    Log.Info("[autotest] Deconstruct: PASSED on " + FleetShips.Describe(ship) + ", " + socket.InstalledModule.DisplayName + " is built in that slot again.");
+                }
+                else
+                {
+                    failed++;
+                    Log.Error("[autotest] Deconstruct: FAILED on " + FleetShips.Describe(ship) + ", the slot didn't take " + name + " back (build box " + (box != null) +
+                              ", building " + rebuilding + ").");
+                }
+            }
+            Log.Info("[autotest] Deconstruct: " + passed + " passed, " + failed + " failed.");
+            _sequenceDone = true;
+        }
+
+        /// <summary>
+        /// Whether a module is still in its socket. Compared as the same object: once taken apart the module is destroyed and
+        /// the socket holds nothing, which Unity's == takes for equal (a destroyed object counts as null).
+        /// </summary>
+        private static bool StillIn(BuildSocket socket, CellModule module)
+        {
+            return ReferenceEquals(socket.InstalledModule, module) && module != null;
+        }
+
+        /// <summary>
+        /// A socket of a ship whose module can be taken apart (not in use, undamaged, with a build box to fold into; its item
+        /// slots are emptied first): one players built if there is one, else one the ship started with (the test makes it
+        /// removable), a weapon first; null if none, with <paramref name="passedOver"/> saying why the others weren't.
+        /// </summary>
+        private static BuildSocket TakeApartCandidate(PlayerControlledShip ship, out string passedOver)
+        {
+            passedOver = "no sockets";
+            BuildSocketController sockets = ship != null ? ship.GetComponent<BuildSocketController>() : null;
+            if (sockets == null || sockets.Sockets == null) return null;
+            BuildSocket any = null, starting = null;
+            int empty = 0, notAllowed = 0, inUse = 0, damaged = 0;
+            foreach (BuildSocket socket in sockets.Sockets)
+            {
+                CellModule module = socket != null ? socket.InstalledModule : null;
+                if (module == null)
+                {
+                    empty++;
+                    continue;
+                }
+                if (module is VoidDriveModule || module.BuildingConstraints == null || module.BuildBoxRef == null || module.BuildBoxRef.IsNull)
+                {
+                    notAllowed++;
+                    continue;
+                }
+                if (module.IsInUse || module.IsBeingDeconstructed)
+                {
+                    inUse++;
+                    continue;
+                }
+                if (module.DefectSystem != null && module.DefectSystem.ActiveDefectAmount > 0)
+                {
+                    damaged++;
+                    continue;
+                }
+                bool weapon = module is Gameplay.CompositeWeapons.CompositeWeaponModule;
+                if (module.BuildingConstraints.AllowDeconstruction)
+                {
+                    if (weapon) return socket;
+                    if (any == null) any = socket;
+                }
+                else if (starting == null || (weapon && !(starting.InstalledModule is Gameplay.CompositeWeapons.CompositeWeaponModule)))
+                {
+                    starting = socket;
+                }
+            }
+            passedOver = sockets.Sockets.Count + " sockets: " + empty + " empty, " + notAllowed + " can't be taken apart, " + inUse + " in use, " + damaged + " damaged";
+            return any ?? starting;
+        }
+
+        /// <summary>The Fleet Battle mission's capital-ship spawner profile (SpawnerProfile_Hollow_FleetBattle_CapitolShips).</summary>
+        private const string CruiserProfile = "617c51d5b70105d46956fb25c40603f4";
+
+        /// <summary>The tag that spawner goes by and gives its cruisers (Tag_Spawner_Hollow_FleetBattle_CapitolShip).</summary>
+        private const string CruiserTag = "1424f8c92ce67d142b620e2203ae8a11";
+
+        /// <summary>
+        /// The Fleet Battle mission's HOLLOW Cruisers, without flying to a Fleet Battle sector (AutoTestCruisers): the host
+        /// brings in that mission's capital-ship spawner, the game's own (one HOLLOW Cruiser Elite at a time, which takes its
+        /// whole budget, and the next one 30 s after the last one died), lets it send a cruiser to a spot ahead of the fleet,
+        /// destroys it and checks that the next one comes, as with one ship. In Fleet 0.4.4 the next one never came in a
+        /// Fleet Pilgrimage: the enemy scaling left a remainder on the spawner's count.
+        /// </summary>
+        private static System.Collections.IEnumerator CruiserSequence()
+        {
+            Gameplay.NPC.AI.AIDirector director = Singleton<Gameplay.NPC.AI.AIDirector>.I;
+            System.Reflection.FieldInfo countField = GameMember.Field(typeof(Gameplay.NPC.AI.Spawner), "currentIntensity");
+            System.Reflection.FieldInfo unitsField = GameMember.Field(typeof(Gameplay.NPC.AI.Spawner), "trackedUnits");
+            var tag = new ScriptableObjectRef(new GUIDUnion(CruiserTag));
+            var profileGuid = new GUIDUnion(CruiserProfile);
+            Gameplay.NPC.AI.SpawnerProfile profile = null;
+            try
+            {
+                if (ScriptableObjectContainer.Instance.HasItem(profileGuid))
+                    profile = ScriptableObjectContainer.Instance.GetItem(profileGuid).Asset as Gameplay.NPC.AI.SpawnerProfile;
+            }
+            catch (Exception e)
+            {
+                Log.Failure("[autotest] finding the Fleet Battle cruiser spawner", e);
+            }
+            PlayerControlledShip near = FleetShips.LocalShip ?? FleetShips.BySlot(0);
+            if (!PhotonNetwork.IsMasterClient || director == null || profile == null || near == null || GameSessionManager.ActiveSector == null ||
+                countField == null || unitsField == null)
+            {
+                Log.Warn("[autotest] Cruisers: skipped (host " + PhotonNetwork.IsMasterClient + ", AI Director " + (director != null) + ", spawner profile " +
+                         (profile != null) + ", a ship to send them to " + (near != null) + ", the spawner's fields " + (countField != null && unitsField != null) + ").");
+                _sequenceDone = true;
+                yield break;
+            }
+            if (director.GetSpawner(tag, true) != null)
+            {
+                Log.Warn("[autotest] Cruisers: skipped, this sector already has the Fleet Battle cruiser spawner.");
+                _sequenceDone = true;
+                yield break;
+            }
+            FleetPlan plan = FleetSession.Current;
+            Log.Info("[autotest] Cruisers: Fleet Pilgrimage enemy scaling is " + (plan != null && plan.ScaleEnemies ? "on" : "OFF, so this only shows the game's own spawner") +
+                     "; bringing in the Fleet Battle cruiser spawner.");
+            director.CreateSpawner(profile);
+            Gameplay.NPC.AI.Spawner spawner = null;
+            float until = Time.unscaledTime + 10f;
+            while (spawner == null && Time.unscaledTime < until)
+            {
+                yield return new WaitForSeconds(0.5f);
+                spawner = director.GetSpawner(tag, true);
+            }
+            if (spawner == null)
+            {
+                Log.Error("[autotest] Cruisers: FAILED, the spawner didn't start.");
+                _sequenceDone = true;
+                yield break;
+            }
+            Vector3 spot = near.WorldPosition + near.transform.forward * 1500f;
+            director.SetSpawnerSpawnHandle(tag, new CG.Game.Scenarios.Actions.SpawnHandle(GameSessionManager.ActiveSector, spot, Quaternion.identity));
+            Log.Info("[autotest] Cruisers: the spawner is up (budget " + spawner.TargetIntensity + " of " + spawner.MaxIntensity + ", counts " +
+                     SpawnerCount(countField, spawner).ToString("R") + "); its cruisers jump in 1.5 km ahead of " + FleetShips.Describe(near) + ".");
+
+            // The first cruiser: at the AI Director's next turn (every 15 s).
+            OrbitObject first = null;
+            until = Time.unscaledTime + 45f;
+            while (first == null && Time.unscaledTime < until)
+            {
+                yield return new WaitForSeconds(1f);
+                first = SpawnerUnit(unitsField, spawner, null);
+            }
+            if (first == null)
+            {
+                Log.Error("[autotest] Cruisers: FAILED, the spawner sent no cruiser in 45 s (it counts " + SpawnerCount(countField, spawner).ToString("R") + ").");
+                EndCruiserTest(director, tag, unitsField, spawner);
+                _sequenceDone = true;
+                yield break;
+            }
+            Log.Info("[autotest] Cruisers: the first cruiser is " + first.name + " (the spawner counts " + SpawnerCount(countField, spawner).ToString("R") + ").");
+            // It comes through a void jump: destroyed once it is in the sector (or after 40 s, wherever it is).
+            until = Time.unscaledTime + 40f;
+            while (first != null && !first.IsDestroyed && first.Sector != GameSessionManager.ActiveSector && Time.unscaledTime < until)
+                yield return new WaitForSeconds(1f);
+            bool gone = first == null || first.IsDestroyed;
+            bool arrived = !gone && first.Sector == GameSessionManager.ActiveSector;
+            Log.Info("[autotest] Cruisers: it " + (gone ? "was destroyed already." : (arrived ? "arrived, " + Vector3.Distance(first.WorldPosition, near.WorldPosition).ToString("0") +
+                     " m from " + FleetShips.Describe(near) : "did not arrive in 40 s") + "; destroying it."));
+            if (!gone && !first.DestroyRequested) first.Kill();
+            float died = Time.unscaledTime;
+            yield return new WaitForSeconds(1f);
+            float left = SpawnerCount(countField, spawner);
+            Log.Info("[autotest] Cruisers: with it gone the spawner counts " + left.ToString("R") + (left == 0f ? " (nothing, right)." : " (should be 0: that's room taken from the next one)."));
+
+            // The next one: 30 s after the last one died, at the AI Director's next turn.
+            OrbitObject next = null;
+            until = Time.unscaledTime + 75f;
+            while (next == null && Time.unscaledTime < until)
+            {
+                yield return new WaitForSeconds(1f);
+                next = SpawnerUnit(unitsField, spawner, first);
+            }
+            if (next != null) Log.Info("[autotest] Cruisers: PASSED, the next cruiser came " + (Time.unscaledTime - died).ToString("0") + " s after the first one died.");
+            else Log.Error("[autotest] Cruisers: FAILED, no next cruiser in 75 s; the spawner counts " + SpawnerCount(countField, spawner).ToString("R") + " of its budget " + spawner.TargetIntensity + ".");
+            EndCruiserTest(director, tag, unitsField, spawner);
+            _sequenceDone = true;
+        }
+
+        /// <summary>The intensity a spawner counts for the units it has out (NaN when it can't be read).</summary>
+        private static float SpawnerCount(System.Reflection.FieldInfo countField, Gameplay.NPC.AI.Spawner spawner)
+        {
+            return GameMember.Read(countField, spawner, float.NaN);
+        }
+
+        /// <summary>A unit the spawner sent that is still there (other than one already seen), or null.</summary>
+        private static OrbitObject SpawnerUnit(System.Reflection.FieldInfo unitsField, Gameplay.NPC.AI.Spawner spawner, OrbitObject except)
+        {
+            List<OrbitObject> units = GameMember.Read<List<OrbitObject>>(unitsField, spawner, null);
+            if (units == null) return null;
+            foreach (OrbitObject unit in units)
+            {
+                if (unit != null && !unit.IsDestroyed && !unit.DestroyRequested && !ReferenceEquals(unit, except)) return unit;
+            }
+            return null;
+        }
+
+        /// <summary>The cruiser test's spawner goes again, with the cruisers it still has out.</summary>
+        private static void EndCruiserTest(Gameplay.NPC.AI.AIDirector director, ScriptableObjectRef tag, System.Reflection.FieldInfo unitsField, Gameplay.NPC.AI.Spawner spawner)
+        {
+            try
+            {
+                List<OrbitObject> units = GameMember.Read<List<OrbitObject>>(unitsField, spawner, null);
+                if (units != null)
+                {
+                    foreach (OrbitObject unit in new List<OrbitObject>(units))
+                    {
+                        if (unit != null && !unit.IsDestroyed && !unit.DestroyRequested) unit.Kill();
+                    }
+                }
+                director.DestroySpawner(tag);
+                Log.Info("[autotest] Cruisers: the test's spawner and its cruisers are gone.");
+            }
+            catch (Exception e)
+            {
+                Log.Failure("[autotest] removing the cruiser test's spawner", e);
+            }
         }
 
         /// <summary>
@@ -756,10 +1130,14 @@ namespace VoidCrewFleet
             _sequenceDone = true;
         }
 
+        private static bool _leverJump;
+
         private static void StartJump()
         {
+            _leverJump = Settings.AutoTestLeverJump.Value;
+            _sequenceDone = false;
             Go(Step.Jumping);
-            FleetRuntime.Instance.StartCoroutine(JumpSequence());
+            FleetRuntime.Instance.StartCoroutine(_leverJump ? LeverJumpSequence() : JumpSequence());
         }
 
         /// <summary>
@@ -814,6 +1192,183 @@ namespace VoidCrewFleet
             }
             Log.Info("[autotest] Making " + FleetShips.Describe(lead) + " jump (debug charge + travel); the other ships should follow.");
             system.DebugTransitionToRotatingState();
+        }
+
+        /// <summary>
+        /// The co-op jump as players make it, led by the last ship (AutoTestLeverJump): every ship is powered and its drive
+        /// charged; PLOT VECTOR pressed on the last ship's astral map gives every ship the vector; with the local player's own
+        /// ship's drive short of full, the last ship's lever is refused and names that ship (the drive then fills up again and
+        /// its state goes out to every player); the lever then starts the jump with the last ship leading and the others
+        /// following it into the void; a destination picked on the last ship's map is every map's pick; and the lever again
+        /// takes every ship there, side by side. Each step logs what every ship and map did.
+        /// </summary>
+        private static System.Collections.IEnumerator LeverJumpSequence()
+        {
+            System.Reflection.MethodInfo pull = GameMember.Method(typeof(VoidDriveModule), "OnJumpLeverPulled");
+            List<int> alive = FleetShips.AliveSlots();
+            PlayerControlledShip last = alive.Count > 1 ? FleetShips.BySlot(alive[alive.Count - 1]) : null;
+            PlayerControlledShip own = FleetShips.LocalShip ?? (alive.Count > 0 ? FleetShips.BySlot(alive[0]) : null);
+            VoidDriveModule lastDrive = last != null ? last.GetModule<VoidDriveModule>() : null;
+            VoidDriveModule ownDrive = own != null ? own.GetModule<VoidDriveModule>() : null;
+            VoidJumpSystem lastSystem = last != null ? last.GetComponentInChildren<VoidJumpSystem>() : null;
+            if (pull == null || lastDrive == null || ownDrive == null || lastSystem == null)
+            {
+                Fail("the lever jump needs two living ships with void drives");
+                yield break;
+            }
+            Log.Info("[autotest] Lever jump led by " + FleetShips.Describe(last) + ". Astral maps: " + AstralMapLink.DescribeForTest() + ".");
+
+            // Every ship powered and charged, as its crew would: the game's own debug helpers, each ship in turn as "the player ship".
+            foreach (PlayerControlledShip ship in FleetShips.All.ToList())
+            {
+                ForShip(ship, "Powering", () =>
+                {
+                    DebugInput.PowerShip();
+                    DebugInput.PowerAllModules();
+                });
+            }
+            yield return new WaitForSeconds(3f);
+            foreach (PlayerControlledShip ship in FleetShips.All.ToList()) ForShip(ship, "Charging", DebugInput.ChargeEnginesOnce);
+            yield return new WaitForSeconds(2f);
+            Log.Info("[autotest] Powered and charged: " + DescribeDrives() + ".");
+
+            // The escape vector, from the last ship's map: every ship takes it.
+            Log.Info("[autotest] Pressing PLOT VECTOR on " + FleetShips.Describe(last) + "'s astral map: " + AstralMapLink.PressForTest(last, null) + ".");
+            yield return new WaitForSeconds(2f);
+            Log.Info("[autotest] Escape vector on every ship: " + EveryShipIn<VoidJumpExitVectorSet>() + " (" + DescribeDrives() + "); astral maps: " +
+                     AstralMapLink.DescribeForTest() + ".");
+            if (!EveryShipIn<VoidJumpExitVectorSet>())
+            {
+                Log.Warn("[autotest] The map didn't set the escape vector everywhere; setting it on " + FleetShips.Describe(last) + "'s jump system.");
+                lastSystem.ExitVectorSet(true);
+                yield return new WaitForSeconds(2f);
+            }
+
+            // A crewed ship's drive short of full: the lever names that ship. Its engines keep charging, so it fills up again.
+            ownDrive.JumpCharge = 0.9f;
+            Log.Info("[autotest] Pulling " + FleetShips.Describe(last) + "'s lever with " + FleetShips.Describe(own) + "'s drive at 90 %: it should be refused, " +
+                     "naming " + FleetShips.Describe(own) + ".");
+            pull.Invoke(lastDrive, null);
+            yield return new WaitForSeconds(0.3f);
+            Screenshot("lever-refused");
+            float until = Time.unscaledTime + 15f;
+            while (Time.unscaledTime < until && !ownDrive.IsFullyCharged) yield return new WaitForSeconds(0.25f);
+            Log.Info("[autotest] " + FleetShips.Describe(own) + "'s drive full again: " + ownDrive.IsFullyCharged + "; the jump didn't start: " +
+                     EveryShipIn<VoidJumpExitVectorSet>() + ".");
+            yield return new WaitForSeconds(3.5f);
+
+            // The jump: the last ship's lever, every drive charged.
+            int leadBefore = VoidJumpLink.LeaderSlot;
+            Log.Info("[autotest] Pulling " + FleetShips.Describe(last) + "'s lever with every drive charged: the jump should start, led by it.");
+            pull.Invoke(lastDrive, null);
+            yield return new WaitForSeconds(2f);
+            bool started = !(lastSystem.ActiveState is VoidJumpInactive) && !(lastSystem.ActiveState is VoidJumpExitVectorSet);
+            Log.Info("[autotest] Jump started: " + started + "; lead ship " + (VoidJumpLink.LeaderSlot + 1) + " (expected " +
+                     ((started ? FleetShips.Slot(last) : leadBefore) + 1) + "); " + DescribeDrives() + ".");
+            if (!started)
+            {
+                Log.Warn("[autotest] The lever didn't start the jump; making " + FleetShips.Describe(last) + " jump the debug way instead.");
+                lastSystem.DebugTransitionToRotatingState();
+            }
+            until = Time.unscaledTime + 60f;
+            while (Time.unscaledTime < until && !EveryShipTravelling()) yield return new WaitForSeconds(0.5f);
+            Log.Info("[autotest] Every ship in the void: " + EveryShipTravelling() + " (" + DescribeDrives() + ").");
+            Report("in the void");
+            Screenshot("void");
+            yield return new WaitForSeconds(4f);
+
+            // A destination, picked on the last ship's map: every map should count it as the fleet's pick.
+            GameSessionSector pick = AstralMapLink.PickableForTest(last);
+            bool picked = pick != null && AstralMapLink.PressForTest(last, pick);
+            Log.Info("[autotest] Picking " + (pick != null ? pick.Name + " (" + pick.Id + ")" : "a mission (none on the map)") + " on " + FleetShips.Describe(last) +
+                     "'s astral map: " + picked + ".");
+            yield return new WaitForSeconds(2f);
+            Log.Info("[autotest] Astral maps after the pick: " + AstralMapLink.DescribeForTest() + ".");
+            if (GameSessionSectorManager.Instance == null || GameSessionSectorManager.Instance.DestinationSector == null)
+            {
+                Log.Warn("[autotest] No destination was picked, so the ships stay in the void.");
+                _sequenceDone = true;
+                yield break;
+            }
+
+            // The lever again: every ship arrives at the destination, side by side.
+            Log.Info("[autotest] Pulling " + FleetShips.Describe(last) + "'s lever again: every ship should arrive at the destination.");
+            pull.Invoke(lastDrive, null);
+            until = Time.unscaledTime + 60f;
+            while (Time.unscaledTime < until && !(GameSessionManager.ActiveSector != null && EveryShipIn<VoidJumpInactive>())) yield return new WaitForSeconds(0.5f);
+            yield return new WaitForSeconds(4f);
+            Log.Info("[autotest] Arrived: " + (GameSessionManager.ActiveSector != null && EveryShipIn<VoidJumpInactive>()) + ", in sector " +
+                     (GameSessionManager.ActiveSector != null ? GameSessionManager.ActiveSector.Name + " (" + GameSessionManager.ActiveSector.Id + ")" : "none") +
+                     " (picked " + pick.Id + ").");
+            Report("arrived");
+            Screenshot("arrived");
+            _sequenceDone = true;
+        }
+
+        /// <summary>Runs one of the game's own helpers with a ship as "the player ship".</summary>
+        private static void ForShip(PlayerControlledShip ship, string what, Action action)
+        {
+            ShipRedirect.BeginOverride(ship);
+            try
+            {
+                action();
+            }
+            catch (Exception e)
+            {
+                Log.Warn("[autotest] " + what + " " + FleetShips.Describe(ship) + " failed: " + e.GetType().Name + ": " + e.Message);
+            }
+            finally
+            {
+                ShipRedirect.EndOverride();
+            }
+        }
+
+        /// <summary>Whether every living ship's jump is in that state.</summary>
+        private static bool EveryShipIn<T>() where T : VoidJumpState
+        {
+            foreach (PlayerControlledShip ship in FleetShips.All)
+            {
+                if (ship == null || ship.StartedDeath) continue;
+                VoidJumpSystem system = ship.GetComponentInChildren<VoidJumpSystem>();
+                if (system == null || !(system.ActiveState is T)) return false;
+            }
+            return true;
+        }
+
+        /// <summary>Whether every living ship is travelling through the void.</summary>
+        private static bool EveryShipTravelling()
+        {
+            foreach (PlayerControlledShip ship in FleetShips.All)
+            {
+                if (ship == null || ship.StartedDeath) continue;
+                VoidJumpSystem system = ship.GetComponentInChildren<VoidJumpSystem>();
+                if (system == null || !(system.ActiveState is VoidJumpTravellingStable || system.ActiveState is VoidJumpTravellingUnstable)) return false;
+            }
+            return true;
+        }
+
+        /// <summary>"ship 1: drive 100 %, powered drive/engine/helm True/True/True, jump VoidJumpInactive": every ship's drive and jump.</summary>
+        private static string DescribeDrives()
+        {
+            var parts = new List<string>();
+            foreach (PlayerControlledShip ship in FleetShips.All)
+            {
+                try
+                {
+                    VoidDriveModule drive = ship.GetModule<VoidDriveModule>();
+                    ShipEngine engine = ship.GetModule<ShipEngine>();
+                    Helm helm = ship.GetModule<Helm>();
+                    VoidJumpSystem system = ship.GetComponentInChildren<VoidJumpSystem>();
+                    parts.Add(FleetShips.Describe(ship) + ": drive " + (drive != null ? (drive.JumpCharge * 100f).ToString("0.0") + " %" : "none") + ", powered drive/engine/helm " +
+                              (drive != null && drive.IsPowered) + "/" + (engine != null && engine.IsPowered) + "/" + (helm != null && helm.IsPowered) + ", jump " +
+                              (system != null && system.ActiveState != null ? system.ActiveState.GetType().Name : "?"));
+                }
+                catch (Exception e)
+                {
+                    parts.Add(FleetShips.Describe(ship) + ": can't be described (" + e.GetType().Name + ")");
+                }
+            }
+            return string.Join("; ", parts.ToArray());
         }
 
         private static void Finish()
@@ -889,6 +1444,7 @@ namespace VoidCrewFleet
             {
                 text.AppendLine("  co-op: local ship " + (FleetShips.CrewSlot(FleetShips.LocalActor) + 1) + ", spectator " + FleetShips.IsSpectator(FleetShips.LocalActor) +
                                 ", watching " + FleetShips.Describe(FleetShips.Watched) + ", RETURN TO HUB " + (FleetReturn.Available ? "available" : "not available"));
+                if (FleetShips.Active) text.AppendLine("  astral maps: " + AstralMapLink.DescribeForTest());
             }
             PlayerControlledShip game = ClientGame.Current != null ? ClientGame.Current.PlayerShip : null;
             LocalPlayer me = LocalPlayer.Instance;

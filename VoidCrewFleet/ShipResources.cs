@@ -6,8 +6,11 @@ using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
 using CG.Client.UserData;
 using CG.Game;
+using CG.Game.Missions;
+using CG.Objects;
 using CG.Ship.Modules;
 using CG.Space;
+using Gameplay.CompositeWeapons;
 using Gameplay.Factory;
 using Gameplay.Utilities;
 using HarmonyLib;
@@ -783,7 +786,7 @@ namespace VoidCrewFleet
                     ShipRedirect.BeginOverride(ship);
                     try
                     {
-                        start[slot] = __instance.GetPlayerShipRecycledAlloyValue();
+                        start[slot] = RecycledValue(__instance);
                     }
                     finally
                     {
@@ -798,6 +801,58 @@ namespace VoidCrewFleet
             {
                 Log.Failure("Working out each ship's starting value", e);
             }
+        }
+
+        /// <summary>
+        /// What "the player ship" would recycle for: the game's own count, unless an item on board has no crafting data at
+        /// all (another mod's part that was never made craftable, such as Ectype Skirmisher's micromissile payload). The
+        /// game's count then throws, and the same count is made here with such items as 0.
+        /// </summary>
+        private static int RecycledValue(GameSessionSuppliesManager manager)
+        {
+            try
+            {
+                return manager.GetPlayerShipRecycledAlloyValue();
+            }
+            catch (NullReferenceException)
+            {
+                return RecycledValueSkippingUnknown();
+            }
+        }
+
+        /// <summary>GameSessionSuppliesManager.GetPlayerShipRecycledAlloyValue, with items that have no crafting data counted as 0.</summary>
+        private static int RecycledValueSkippingUnknown()
+        {
+            var crafting = ResourceAssetContainer<CraftingDataContainer, UnityEngine.Object, CraftableItemDef>.Instance;
+            int total = 0;
+            ClientGame game = ClientGame.Current;
+            PlayerControlledShip ship = game != null ? game.PlayerShip : null;
+            if (ship != null)
+            {
+                foreach (CellModule module in ship.GetAllModules())
+                {
+                    if (module == null || !module.BuildingConstraints.AllowDeconstruction || module.BuildBoxRef == null) continue;
+                    CraftableItemDef def;
+                    if (module is CompositeWeaponModule weapon && crafting.TryGetByGuid(weapon.CompositeDataRef.AssetGuid, out def))
+                        total += def.CraftingRules.Recycle.Amount;
+                    else if (crafting.TryGetByGuid(module.BuildBoxRef.AssetGuid, out def) && def.Asset != null)
+                        total += def.CraftingRules.Recycle.Amount;
+                }
+            }
+            foreach (CarryableObject item in MissionHelper.GetAllCarryablesOnShip())
+            {
+                CraftableItemDef def;
+                if (item is CompositeWeaponBuildBox box && crafting.TryGetByGuid(box.WeaponDataRef.AssetGuid, out def))
+                    total += def.CraftingRules.Recycle.Amount;
+                else if (item == null)
+                    total += 2; // the game's own figure for an item it can't read
+                else if ((def = crafting.GetAssetDefById(item.assetGuid, false)) != null)
+                    total += def.CraftingRules.Recycle.Amount;
+                else
+                    Log.InfoOnce("no recycle value " + item.assetGuid.AsHex(), "The end-of-mission tally counts " + item.name + " (" + item.assetGuid.AsHex() +
+                        ") as 0 alloys: it has no crafting data, so it isn't one of the game's items.");
+            }
+            return total;
         }
 
         private static int[] StartValues()
