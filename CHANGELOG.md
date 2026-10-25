@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.4.5
+**Co-op void jumps**
+- **Every player's lever works, not only the host's.** A void drive is charged on one player's game (the host's, or the
+  ship's pilot's), and the game's network updates leave out a change of 0.01 or less, so everyone else's game could keep
+  it at 99 % (or show 100 % without it being full). Their lever pulls were refused with "Void drive not charged on Ship 2"
+  (or Ship 1) although it was charged, and the drive looked stuck at 99 %; sometimes the fleet couldn't leave a sector at
+  all. A drive that fills up now reaches every player at exactly 100 %, and a drive within 2 % of full on another
+  player's game counts as charged (the drive's own game still checks it exactly).
+- In a jump led by ship 2 or 3, every player hears at once which ship leads, so a ship flown by another player follows
+  from the very start.
+- **One astral map choice:** a destination picked on any ship's astral map is the pick on every ship's map, and a map
+  someone is using turns to it. Each ship's map now works with its own ship (it could show another ship's jump). Co-op
+  only.
+- A refused lever pull is logged with how charged each drive was on that player's game, and who runs it.
+
+**Fleet Pilgrimage**
+- **The Fleet Battle mission's HOLLOW Cruisers keep coming.** After the first cruiser was destroyed no other came, so
+  "Destroy 3 HOLLOW Cruisers" could never be finished. The same held back its bombers, and any enemy that fills a
+  spawner's whole budget (Warzone's Hollow Front capital ships too): the Fleet Pilgrimage's extra enemies kept a sliver of
+  every destroyed enemy counted. Now nothing of it stays. As many extra enemies as before.
+
+**Building on several ships**
+- **Taking apart or upgrading a module on any ship but one** could leave it stuck in its slot for the rest of the
+  mission: switched off, unable to come out, and the slot with it. The game kept the sockets of only one ship; each
+  module's own ship is now used, and so are the host's checks (one per ship, anything in the way). Only the host needs
+  the update for this.
+
+**Other mods**
+- **Fixed a crash with Ectype Skirmisher:** the game closed with no crash report when a player with the Skirmisher's Get
+  Out and Push perk arrived in a fleet mission. Fleet's per-ship stat rules now leave other mods' rules as those mods
+  made them (Ectype Framework's timed stats too).
+- The end-of-mission ship value counts another mod's item with no crafting data as 0 alloys instead of failing.
+- A ship's sounds stop cleanly as the hub unloads (it was an error in the log).
+
+**Developer tools** (off by default)
+- Diagnostics > AutoTestLeverJump, AutoTestCruisers and AutoTestDeconstruct: self-test steps for a jump led by the last
+  ship's lever and astral map, the Fleet Battle cruisers, and taking modules apart on every ship.
+
+Players on 0.4.2 to 0.4.4 can still join a 0.4.5 host (no network change), but everyone should update: a drive run by a
+player on an older version only reaches the others near full, and the jump and astral map fixes work best with everyone
+on 0.4.5. Works with Ship Customizer 0.7.0 or newer (0.9.3 recommended).
+
 ## 0.4.4
 **For big playtests.**
 - **Rooms of up to 48 players** (MaxPlayers, 4-48), still 8 per ship: a 3v3 Fleet Battle takes 48, co-op's three ships
