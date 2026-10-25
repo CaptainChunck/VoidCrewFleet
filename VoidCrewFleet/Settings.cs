@@ -32,6 +32,7 @@ namespace VoidCrewFleet
         public static ConfigEntry<bool> AutoTestFists;
         public static ConfigEntry<bool> AutoTestTour;
         public static ConfigEntry<bool> AutoTestCruisers;
+        public static ConfigEntry<bool> AutoTestDeconstruct;
         public static ConfigEntry<bool> Profile;
 
         public static void Bind(ConfigFile config)
@@ -122,6 +123,9 @@ namespace VoidCrewFleet
                 "With AutoTest = FleetPilgrimage: the host brings in the Fleet Battle mission's HOLLOW Cruiser spawner near the fleet, destroys " +
                 "the first cruiser it sends and checks that the next one comes, as with one ship (one at a time, 30 s after the last one died). " +
                 "The log says PASSED or FAILED.");
+            AutoTestDeconstruct = config.Bind("Diagnostics", "AutoTestDeconstruct", false,
+                "With AutoTest on (co-op, two or more ships): the host takes a module apart on its own ship, then one on each other ship, and " +
+                "builds each again from its build box. The log says PASSED or FAILED for each ship.");
         }
     }
 }

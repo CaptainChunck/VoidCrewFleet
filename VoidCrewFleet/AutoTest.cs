@@ -4,11 +4,15 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using CG.Client.Player.Interactions;
+using CG.Client.Player.Interactions.Build;
 using CG.Game;
 using CG.Game.Player;
 using CG.GameLoopStateMachine;
 using CG.GameLoopStateMachine.GameStates;
+using CG.Game.SpaceObjects.Controllers;
+using CG.Ship.Hull;
 using CG.Ship.Modules;
+using CG.Ship.Object;
 using CG.Space;
 using Gameplay.Hub;
 using Gameplay.Quests;
@@ -52,6 +56,7 @@ namespace VoidCrewFleet
             Fists,
             Respawning,
             Cruisers,
+            Deconstructing,
             Destroying,
             Returning,
             Jumping,
@@ -196,6 +201,11 @@ namespace VoidCrewFleet
                 case Step.Cruisers:
                     if (!_sequenceDone && Since < 240f) return;
                     if (!_sequenceDone) Log.Warn("[autotest] The cruiser test didn't finish in 240 s.");
+                    AfterCruisers();
+                    return;
+                case Step.Deconstructing:
+                    if (!_sequenceDone && Since < 240f) return;
+                    if (!_sequenceDone) Log.Warn("[autotest] The deconstruct test didn't finish in 240 s.");
                     Go(Step.Destroying);
                     return;
                 case Step.Destroying:
@@ -489,7 +499,125 @@ namespace VoidCrewFleet
                 FleetRuntime.Instance.StartCoroutine(CruiserSequence());
                 return;
             }
+            AfterCruisers();
+        }
+
+        /// <summary>After the cruiser test: the deconstruct test (AutoTestDeconstruct, co-op with several ships), then the ships are destroyed.</summary>
+        private static void AfterCruisers()
+        {
+            if (Settings.AutoTestDeconstruct.Value && FleetSession.Mode == FleetMode.Coop && FleetShips.Active)
+            {
+                Go(Step.Deconstructing);
+                _sequenceDone = false;
+                FleetRuntime.Instance.StartCoroutine(DeconstructSequence());
+                return;
+            }
             Go(Step.Destroying);
+        }
+
+        /// <summary>
+        /// Taking modules apart on every ship, and building them again (AutoTestDeconstruct): the host takes a module apart on
+        /// its own ship first (the game's one build controller then keeps that ship's sockets), then one on each other ship,
+        /// and checks that each comes out of its slot and that the slot takes the module back from its build box. In Fleet
+        /// 0.4.4 a module on any ship but the first stayed stuck in its slot, switched off, and the slot with it.
+        /// </summary>
+        private static System.Collections.IEnumerator DeconstructSequence()
+        {
+            BuildProcessController builder = ClientGame.Current != null ? ClientGame.Current.GetComponent<BuildProcessController>() : null;
+            PlayerControlledShip own = FleetShips.LocalShip ?? FleetShips.BySlot(0);
+            if (!PhotonNetwork.IsMasterClient || builder == null || own == null)
+            {
+                Log.Warn("[autotest] Deconstruct: skipped (host " + PhotonNetwork.IsMasterClient + ", build controller " + (builder != null) + ", own ship " + (own != null) + ").");
+                _sequenceDone = true;
+                yield break;
+            }
+            var ships = new List<PlayerControlledShip> { own };
+            foreach (int slot in FleetShips.AliveSlots())
+            {
+                PlayerControlledShip ship = FleetShips.BySlot(slot);
+                if (ship != null && ship != own) ships.Add(ship);
+            }
+            float wait = ClientGame.Current.SharedConfiguration.DeconstructDuration + 20f;
+            int passed = 0, failed = 0;
+            foreach (PlayerControlledShip ship in ships)
+            {
+                BuildSocket socket = TakeApartCandidate(ship);
+                if (socket == null)
+                {
+                    Log.Warn("[autotest] Deconstruct: nothing on " + FleetShips.Describe(ship) + " can be taken apart right now; skipped.");
+                    continue;
+                }
+                CellModule module = socket.InstalledModule;
+                string name = module.DisplayName;
+                Log.Info("[autotest] Deconstruct: taking apart " + name + " on " + FleetShips.Describe(ship) + " (socket " + socket.Index + ").");
+                bool asked = false;
+                try
+                {
+                    asked = builder.TryDeconstructModule(module);
+                }
+                catch (Exception e)
+                {
+                    Log.Failure("[autotest] asking to take apart " + name, e);
+                }
+                float started = Time.unscaledTime;
+                while (Time.unscaledTime - started < wait && socket.InstalledModule == module) yield return new WaitForSeconds(1f);
+                if (socket.InstalledModule == module)
+                {
+                    failed++;
+                    Log.Error("[autotest] Deconstruct: FAILED on " + FleetShips.Describe(ship) + ", " + name + " is still in its slot after " + wait.ToString("0") +
+                              " s (asked " + asked + ", marked as being taken apart " + (module != null && module.IsBeingDeconstructed) + ").");
+                    continue;
+                }
+                Log.Info("[autotest] Deconstruct: " + name + " came out of its slot on " + FleetShips.Describe(ship) + " in " + (Time.unscaledTime - started).ToString("0") + " s.");
+                // The slot takes the module back from the build box it left there.
+                yield return new WaitForSeconds(2f);
+                var box = socket.Payload as BuildBox;
+                bool rebuilding = false;
+                try
+                {
+                    rebuilding = box != null && builder.TryConstructModule(box);
+                }
+                catch (Exception e)
+                {
+                    Log.Failure("[autotest] building " + name + " again", e);
+                }
+                started = Time.unscaledTime;
+                while (rebuilding && Time.unscaledTime - started < wait && socket.InstalledModule == null) yield return new WaitForSeconds(1f);
+                if (socket.InstalledModule != null)
+                {
+                    passed++;
+                    Log.Info("[autotest] Deconstruct: PASSED on " + FleetShips.Describe(ship) + ", " + socket.InstalledModule.DisplayName + " is built in that slot again.");
+                }
+                else
+                {
+                    failed++;
+                    Log.Error("[autotest] Deconstruct: FAILED on " + FleetShips.Describe(ship) + ", the slot didn't take " + name + " back (build box " + (box != null) +
+                              ", building " + rebuilding + ").");
+                }
+            }
+            Log.Info("[autotest] Deconstruct: " + passed + " passed, " + failed + " failed.");
+            _sequenceDone = true;
+        }
+
+        /// <summary>
+        /// A socket of a ship whose module can be taken apart now (allowed, not in use, its item sockets empty, undamaged),
+        /// a weapon if there is one; null if none.
+        /// </summary>
+        private static BuildSocket TakeApartCandidate(PlayerControlledShip ship)
+        {
+            BuildSocketController sockets = ship != null ? ship.GetComponent<BuildSocketController>() : null;
+            if (sockets == null || sockets.Sockets == null) return null;
+            BuildSocket any = null;
+            foreach (BuildSocket socket in sockets.Sockets)
+            {
+                CellModule module = socket != null ? socket.InstalledModule : null;
+                if (module == null || module is VoidDriveModule || module.BuildingConstraints == null || !module.BuildingConstraints.AllowDeconstruction) continue;
+                if (module.IsInUse || module.IsBeingDeconstructed || module.ConnectedSockets.Any(s => s != null && s.IsFull)) continue;
+                if (module.DefectSystem != null && module.DefectSystem.ActiveDefectAmount > 0) continue;
+                if (module is Gameplay.CompositeWeapons.CompositeWeaponModule) return socket;
+                if (any == null) any = socket;
+            }
+            return any;
         }
 
         /// <summary>The Fleet Battle mission's capital-ship spawner profile (SpawnerProfile_Hollow_FleetBattle_CapitolShips).</summary>
