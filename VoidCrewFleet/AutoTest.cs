@@ -559,6 +559,13 @@ namespace VoidCrewFleet
                 }
                 CellModule module = socket.InstalledModule;
                 string name = module.DisplayName;
+                if (!module.BuildingConstraints.AllowDeconstruction)
+                {
+                    // What a ship starts with stays on it (the game spawns it so); what players build in a mission comes off.
+                    // This one is made removable, as if it had been built in this mission.
+                    module.BuildingConstraints.AllowDeconstruction = true;
+                    Log.Info("[autotest] Deconstruct: " + name + " came with the ship; made removable here, as if built in this mission.");
+                }
                 // The game only takes apart a module with nothing in its item slots (a turret's ammo, a shield's battery), as
                 // a player would empty them first.
                 int emptied = 0;
@@ -625,15 +632,16 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// A socket of a ship whose module can be taken apart (allowed, not in use, undamaged; its item slots are emptied
-        /// first), a weapon if there is one; null if none, with <paramref name="passedOver"/> saying why the others weren't.
+        /// A socket of a ship whose module can be taken apart (not in use, undamaged, with a build box to fold into; its item
+        /// slots are emptied first): one players built if there is one, else one the ship started with (the test makes it
+        /// removable), a weapon first; null if none, with <paramref name="passedOver"/> saying why the others weren't.
         /// </summary>
         private static BuildSocket TakeApartCandidate(PlayerControlledShip ship, out string passedOver)
         {
             passedOver = "no sockets";
             BuildSocketController sockets = ship != null ? ship.GetComponent<BuildSocketController>() : null;
             if (sockets == null || sockets.Sockets == null) return null;
-            BuildSocket any = null;
+            BuildSocket any = null, starting = null;
             int empty = 0, notAllowed = 0, inUse = 0, damaged = 0;
             foreach (BuildSocket socket in sockets.Sockets)
             {
@@ -643,7 +651,7 @@ namespace VoidCrewFleet
                     empty++;
                     continue;
                 }
-                if (module is VoidDriveModule || module.BuildingConstraints == null || !module.BuildingConstraints.AllowDeconstruction)
+                if (module is VoidDriveModule || module.BuildingConstraints == null || module.BuildBoxRef == null || module.BuildBoxRef.IsNull)
                 {
                     notAllowed++;
                     continue;
@@ -658,11 +666,19 @@ namespace VoidCrewFleet
                     damaged++;
                     continue;
                 }
-                if (module is Gameplay.CompositeWeapons.CompositeWeaponModule) return socket;
-                if (any == null) any = socket;
+                bool weapon = module is Gameplay.CompositeWeapons.CompositeWeaponModule;
+                if (module.BuildingConstraints.AllowDeconstruction)
+                {
+                    if (weapon) return socket;
+                    if (any == null) any = socket;
+                }
+                else if (starting == null || (weapon && !(starting.InstalledModule is Gameplay.CompositeWeapons.CompositeWeaponModule)))
+                {
+                    starting = socket;
+                }
             }
             passedOver = sockets.Sockets.Count + " sockets: " + empty + " empty, " + notAllowed + " can't be taken apart, " + inUse + " in use, " + damaged + " damaged";
-            return any;
+            return any ?? starting;
         }
 
         /// <summary>The Fleet Battle mission's capital-ship spawner profile (SpawnerProfile_Hollow_FleetBattle_CapitolShips).</summary>
