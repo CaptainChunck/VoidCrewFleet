@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using CG.Client.Player.Input;
 using CG.Client.Player.Interactions;
 using CG.Game;
 using CG.Game.Player;
@@ -12,6 +13,7 @@ using CG.Ship.Modules;
 using CG.Space;
 using Gameplay.Hub;
 using Gameplay.Quests;
+using Gameplay.Ship;
 using Gameplay.Ship.VoidJump;
 using PlatformAbstractionLayer;
 using Photon.Pun;
@@ -36,7 +38,8 @@ namespace VoidCrewFleet
     /// then writes what the fleet looks like to the log: the ships, their positions and slots, the crews, the clone tubes, the
     /// local player's ship, then (AutoTestRespawn) a death and re-cloning, (AutoTestDestroy) ships destroyed one by one,
     /// (AutoTestReturn) RETURN TO HUB, and (with AutoTestJump) a void jump of every ship, with screenshots in the BepInEx
-    /// folder. It never runs unless switched on in the config.
+    /// folder: a debug jump, or (AutoTestLeverJump) one made the way players make it, led by the last ship's lever and astral
+    /// map. It never runs unless switched on in the config.
     /// </summary>
     internal static class AutoTest
     {
@@ -220,11 +223,16 @@ namespace VoidCrewFleet
                     else Finish();
                     return;
                 case Step.Jumping:
-                    if (Time.unscaledTime - _lastReport < 3f) return;
+                    // The lever jump logs each of its own steps and takes a few minutes: a report every 10 s, and done when it is.
+                    if (Time.unscaledTime - _lastReport < (_leverJump ? 10f : 3f)) return;
                     _lastReport = Time.unscaledTime;
                     Report("jump");
                     if (_shots < 12) Screenshot("jump");
-                    if (Since > 75f) Finish();
+                    if (_leverJump ? _sequenceDone || Since > 240f : Since > 75f)
+                    {
+                        if (_leverJump && !_sequenceDone) Log.Warn("[autotest] The lever jump didn't finish in 240 s.");
+                        Finish();
+                    }
                     return;
             }
         }
@@ -756,10 +764,14 @@ namespace VoidCrewFleet
             _sequenceDone = true;
         }
 
+        private static bool _leverJump;
+
         private static void StartJump()
         {
+            _leverJump = Settings.AutoTestLeverJump.Value;
+            _sequenceDone = false;
             Go(Step.Jumping);
-            FleetRuntime.Instance.StartCoroutine(JumpSequence());
+            FleetRuntime.Instance.StartCoroutine(_leverJump ? LeverJumpSequence() : JumpSequence());
         }
 
         /// <summary>
@@ -814,6 +826,183 @@ namespace VoidCrewFleet
             }
             Log.Info("[autotest] Making " + FleetShips.Describe(lead) + " jump (debug charge + travel); the other ships should follow.");
             system.DebugTransitionToRotatingState();
+        }
+
+        /// <summary>
+        /// The co-op jump as players make it, led by the last ship (AutoTestLeverJump): every ship is powered and its drive
+        /// charged; PLOT VECTOR pressed on the last ship's astral map gives every ship the vector; with the local player's own
+        /// ship's drive short of full, the last ship's lever is refused and names that ship (the drive then fills up again and
+        /// its state goes out to every player); the lever then starts the jump with the last ship leading and the others
+        /// following it into the void; a destination picked on the last ship's map is every map's pick; and the lever again
+        /// takes every ship there, side by side. Each step logs what every ship and map did.
+        /// </summary>
+        private static System.Collections.IEnumerator LeverJumpSequence()
+        {
+            System.Reflection.MethodInfo pull = GameMember.Method(typeof(VoidDriveModule), "OnJumpLeverPulled");
+            List<int> alive = FleetShips.AliveSlots();
+            PlayerControlledShip last = alive.Count > 1 ? FleetShips.BySlot(alive[alive.Count - 1]) : null;
+            PlayerControlledShip own = FleetShips.LocalShip ?? (alive.Count > 0 ? FleetShips.BySlot(alive[0]) : null);
+            VoidDriveModule lastDrive = last != null ? last.GetModule<VoidDriveModule>() : null;
+            VoidDriveModule ownDrive = own != null ? own.GetModule<VoidDriveModule>() : null;
+            VoidJumpSystem lastSystem = last != null ? last.GetComponentInChildren<VoidJumpSystem>() : null;
+            if (pull == null || lastDrive == null || ownDrive == null || lastSystem == null)
+            {
+                Fail("the lever jump needs two living ships with void drives");
+                yield break;
+            }
+            Log.Info("[autotest] Lever jump led by " + FleetShips.Describe(last) + ". Astral maps: " + AstralMapLink.DescribeForTest() + ".");
+
+            // Every ship powered and charged, as its crew would: the game's own debug helpers, each ship in turn as "the player ship".
+            foreach (PlayerControlledShip ship in FleetShips.All.ToList())
+            {
+                ForShip(ship, "Powering", () =>
+                {
+                    DebugInput.PowerShip();
+                    DebugInput.PowerAllModules();
+                });
+            }
+            yield return new WaitForSeconds(3f);
+            foreach (PlayerControlledShip ship in FleetShips.All.ToList()) ForShip(ship, "Charging", DebugInput.ChargeEnginesOnce);
+            yield return new WaitForSeconds(2f);
+            Log.Info("[autotest] Powered and charged: " + DescribeDrives() + ".");
+
+            // The escape vector, from the last ship's map: every ship takes it.
+            Log.Info("[autotest] Pressing PLOT VECTOR on " + FleetShips.Describe(last) + "'s astral map: " + AstralMapLink.PressForTest(last, null) + ".");
+            yield return new WaitForSeconds(2f);
+            Log.Info("[autotest] Escape vector on every ship: " + EveryShipIn<VoidJumpExitVectorSet>() + " (" + DescribeDrives() + "); astral maps: " +
+                     AstralMapLink.DescribeForTest() + ".");
+            if (!EveryShipIn<VoidJumpExitVectorSet>())
+            {
+                Log.Warn("[autotest] The map didn't set the escape vector everywhere; setting it on " + FleetShips.Describe(last) + "'s jump system.");
+                lastSystem.ExitVectorSet(true);
+                yield return new WaitForSeconds(2f);
+            }
+
+            // A crewed ship's drive short of full: the lever names that ship. Its engines keep charging, so it fills up again.
+            ownDrive.JumpCharge = 0.9f;
+            Log.Info("[autotest] Pulling " + FleetShips.Describe(last) + "'s lever with " + FleetShips.Describe(own) + "'s drive at 90 %: it should be refused, " +
+                     "naming " + FleetShips.Describe(own) + ".");
+            pull.Invoke(lastDrive, null);
+            yield return new WaitForSeconds(0.3f);
+            Screenshot("lever-refused");
+            float until = Time.unscaledTime + 15f;
+            while (Time.unscaledTime < until && !ownDrive.IsFullyCharged) yield return new WaitForSeconds(0.25f);
+            Log.Info("[autotest] " + FleetShips.Describe(own) + "'s drive full again: " + ownDrive.IsFullyCharged + "; the jump didn't start: " +
+                     EveryShipIn<VoidJumpExitVectorSet>() + ".");
+            yield return new WaitForSeconds(3.5f);
+
+            // The jump: the last ship's lever, every drive charged.
+            int leadBefore = VoidJumpLink.LeaderSlot;
+            Log.Info("[autotest] Pulling " + FleetShips.Describe(last) + "'s lever with every drive charged: the jump should start, led by it.");
+            pull.Invoke(lastDrive, null);
+            yield return new WaitForSeconds(2f);
+            bool started = !(lastSystem.ActiveState is VoidJumpInactive) && !(lastSystem.ActiveState is VoidJumpExitVectorSet);
+            Log.Info("[autotest] Jump started: " + started + "; lead ship " + (VoidJumpLink.LeaderSlot + 1) + " (expected " +
+                     ((started ? FleetShips.Slot(last) : leadBefore) + 1) + "); " + DescribeDrives() + ".");
+            if (!started)
+            {
+                Log.Warn("[autotest] The lever didn't start the jump; making " + FleetShips.Describe(last) + " jump the debug way instead.");
+                lastSystem.DebugTransitionToRotatingState();
+            }
+            until = Time.unscaledTime + 60f;
+            while (Time.unscaledTime < until && !EveryShipTravelling()) yield return new WaitForSeconds(0.5f);
+            Log.Info("[autotest] Every ship in the void: " + EveryShipTravelling() + " (" + DescribeDrives() + ").");
+            Report("in the void");
+            Screenshot("void");
+            yield return new WaitForSeconds(4f);
+
+            // A destination, picked on the last ship's map: every map should count it as the fleet's pick.
+            GameSessionSector pick = AstralMapLink.PickableForTest(last);
+            bool picked = pick != null && AstralMapLink.PressForTest(last, pick);
+            Log.Info("[autotest] Picking " + (pick != null ? pick.Name + " (" + pick.Id + ")" : "a mission (none on the map)") + " on " + FleetShips.Describe(last) +
+                     "'s astral map: " + picked + ".");
+            yield return new WaitForSeconds(2f);
+            Log.Info("[autotest] Astral maps after the pick: " + AstralMapLink.DescribeForTest() + ".");
+            if (GameSessionSectorManager.Instance == null || GameSessionSectorManager.Instance.DestinationSector == null)
+            {
+                Log.Warn("[autotest] No destination was picked, so the ships stay in the void.");
+                _sequenceDone = true;
+                yield break;
+            }
+
+            // The lever again: every ship arrives at the destination, side by side.
+            Log.Info("[autotest] Pulling " + FleetShips.Describe(last) + "'s lever again: every ship should arrive at the destination.");
+            pull.Invoke(lastDrive, null);
+            until = Time.unscaledTime + 60f;
+            while (Time.unscaledTime < until && !(GameSessionManager.ActiveSector != null && EveryShipIn<VoidJumpInactive>())) yield return new WaitForSeconds(0.5f);
+            yield return new WaitForSeconds(4f);
+            Log.Info("[autotest] Arrived: " + (GameSessionManager.ActiveSector != null && EveryShipIn<VoidJumpInactive>()) + ", in sector " +
+                     (GameSessionManager.ActiveSector != null ? GameSessionManager.ActiveSector.Name + " (" + GameSessionManager.ActiveSector.Id + ")" : "none") +
+                     " (picked " + pick.Id + ").");
+            Report("arrived");
+            Screenshot("arrived");
+            _sequenceDone = true;
+        }
+
+        /// <summary>Runs one of the game's own helpers with a ship as "the player ship".</summary>
+        private static void ForShip(PlayerControlledShip ship, string what, Action action)
+        {
+            ShipRedirect.BeginOverride(ship);
+            try
+            {
+                action();
+            }
+            catch (Exception e)
+            {
+                Log.Warn("[autotest] " + what + " " + FleetShips.Describe(ship) + " failed: " + e.GetType().Name + ": " + e.Message);
+            }
+            finally
+            {
+                ShipRedirect.EndOverride();
+            }
+        }
+
+        /// <summary>Whether every living ship's jump is in that state.</summary>
+        private static bool EveryShipIn<T>() where T : VoidJumpState
+        {
+            foreach (PlayerControlledShip ship in FleetShips.All)
+            {
+                if (ship == null || ship.StartedDeath) continue;
+                VoidJumpSystem system = ship.GetComponentInChildren<VoidJumpSystem>();
+                if (system == null || !(system.ActiveState is T)) return false;
+            }
+            return true;
+        }
+
+        /// <summary>Whether every living ship is travelling through the void.</summary>
+        private static bool EveryShipTravelling()
+        {
+            foreach (PlayerControlledShip ship in FleetShips.All)
+            {
+                if (ship == null || ship.StartedDeath) continue;
+                VoidJumpSystem system = ship.GetComponentInChildren<VoidJumpSystem>();
+                if (system == null || !(system.ActiveState is VoidJumpTravellingStable || system.ActiveState is VoidJumpTravellingUnstable)) return false;
+            }
+            return true;
+        }
+
+        /// <summary>"ship 1: drive 100 %, powered drive/engine/helm True/True/True, jump VoidJumpInactive": every ship's drive and jump.</summary>
+        private static string DescribeDrives()
+        {
+            var parts = new List<string>();
+            foreach (PlayerControlledShip ship in FleetShips.All)
+            {
+                try
+                {
+                    VoidDriveModule drive = ship.GetModule<VoidDriveModule>();
+                    ShipEngine engine = ship.GetModule<ShipEngine>();
+                    Helm helm = ship.GetModule<Helm>();
+                    VoidJumpSystem system = ship.GetComponentInChildren<VoidJumpSystem>();
+                    parts.Add(FleetShips.Describe(ship) + ": drive " + (drive != null ? (drive.JumpCharge * 100f).ToString("0.0") + " %" : "none") + ", powered drive/engine/helm " +
+                              (drive != null && drive.IsPowered) + "/" + (engine != null && engine.IsPowered) + "/" + (helm != null && helm.IsPowered) + ", jump " +
+                              (system != null && system.ActiveState != null ? system.ActiveState.GetType().Name : "?"));
+                }
+                catch (Exception e)
+                {
+                    parts.Add(FleetShips.Describe(ship) + ": can't be described (" + e.GetType().Name + ")");
+                }
+            }
+            return string.Join("; ", parts.ToArray());
         }
 
         private static void Finish()
@@ -889,6 +1078,7 @@ namespace VoidCrewFleet
             {
                 text.AppendLine("  co-op: local ship " + (FleetShips.CrewSlot(FleetShips.LocalActor) + 1) + ", spectator " + FleetShips.IsSpectator(FleetShips.LocalActor) +
                                 ", watching " + FleetShips.Describe(FleetShips.Watched) + ", RETURN TO HUB " + (FleetReturn.Available ? "available" : "not available"));
+                if (FleetShips.Active) text.AppendLine("  astral maps: " + AstralMapLink.DescribeForTest());
             }
             PlayerControlledShip game = ClientGame.Current != null ? ClientGame.Current.PlayerShip : null;
             LocalPlayer me = LocalPlayer.Instance;

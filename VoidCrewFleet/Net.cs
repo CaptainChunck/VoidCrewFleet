@@ -58,8 +58,8 @@ namespace VoidCrewFleet
         HackPull = 42,
 
         /// <summary>
-        /// A ship's void drive owner (its pilot, when that isn't the host) to the host: that ship's lever started the void jump,
-        /// so it leads. Data: slot.
+        /// A ship's void drive owner (its pilot, when that isn't the host) to everyone else (0.4.4 and older: to the host only):
+        /// that ship's lever started the void jump, so it leads. The host makes it the room's lead ship. Data: slot.
         /// </summary>
         JumpLead = 50,
 

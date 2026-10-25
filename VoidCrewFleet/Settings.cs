@@ -23,6 +23,7 @@ namespace VoidCrewFleet
         public static ConfigEntry<bool> VerboseLogging;
         public static ConfigEntry<AutoTestMode> AutoTest;
         public static ConfigEntry<bool> AutoTestJump;
+        public static ConfigEntry<bool> AutoTestLeverJump;
         public static ConfigEntry<int> AutoTestShips;
         public static ConfigEntry<string> AutoTestLoadouts;
         public static ConfigEntry<string> AutoTestDestroy;
@@ -96,6 +97,10 @@ namespace VoidCrewFleet
                 "with that fleet mode, and log what the fleet looks like (with screenshots in BepInEx\\fleet-autotest). Leave it Off to play.");
             AutoTestJump = config.Bind("Diagnostics", "AutoTestJump", true,
                 "With AutoTest = TwoShips or FleetPilgrimage: also make the lead ship void jump (debug charge) and log the other ships following it.");
+            AutoTestLeverJump = config.Bind("Diagnostics", "AutoTestLeverJump", false,
+                "With AutoTestJump: make the jump the way players do, led by the last ship: every ship is powered and charged, the escape vector " +
+                "and then the destination are picked on the last ship's astral map, and the last ship's void lever is pulled each time (first once " +
+                "with your own ship's drive short of full, which must be refused and name that ship). The log says what every ship and map did.");
             AutoTestShips = config.Bind("Diagnostics", "AutoTestShips", 2,
                 new ConfigDescription("With AutoTest on: how many ships the self-test plans (co-op), or ships per team (PvP).", new AcceptableValueRange<int>(1, 3)));
             AutoTestLoadouts = config.Bind("Diagnostics", "AutoTestLoadouts", "",
