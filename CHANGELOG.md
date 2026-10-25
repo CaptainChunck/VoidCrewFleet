@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.4.6
+**Missions**
+- **No more getting stuck after a mission ends** with another mod's item aboard (such as Ectype Skirmisher's micromissile
+  payload). The game's count of the ship's value failed on it, so the results screen never came and everyone stayed in
+  the ended mission. Such an item now counts as 0 alloys, at the end as at the start, with one ship or several.
+
+**Big co-op rooms**
+- **A co-op fleet with more than 24 players no longer gets stuck.** Co-op seats 8 a ship on up to three ships. With more
+  players, AUTO-BALANCE put 12 on a ship, CONFIRM CREWS then refused it ("a ship takes 8 at most") and the mission could
+  never start; the game's own missions started with 12-16 a ship. Now no crew goes past 8: the crew screen says what
+  helps (SHIPS at 3, or FLEET BATTLE for more than 24), one of the game's own missions doesn't start with more than 24,
+  and a player who joins once the crews are set and finds every crew full waits for a free place, watching (in the hub
+  and in the mission), as in Fleet Battle.
+
+**Co-op void jumps**
+- A void lever pull on a drive run by a player on Fleet 0.4.4 or older now goes on as soon as that drive reads 99 % on
+  your game. The 0.4.5 fix only helped once that drive's engines had stopped charging. A copy of another player's drive
+  now counts as charged within 1 % of full instead of 2 %: Photon never leaves out more than that.
+
+**Fleet Battle against modified games**
+- **The host's confirmed teams count, not the room's copy.** Another player's game could mark the teams as not confirmed
+  in the middle of a match: every respawn was held, the lobby screen opened for everyone, and the roster, forfeit and
+  spectator views stopped. The host now goes by its own teams and puts the room's copy of the teams, crews, ships and
+  roster back if anyone else changes it; players keep a match's teams until it ends.
+- **Only the host can end a match.** A modified game could end any Fleet Battle (or other fleet mission) with the result
+  it chose; anyone else's end-of-match call or message is now ignored.
+- **The other team's modules stay theirs.** The host no longer builds, upgrades or takes apart a ship's modules for a
+  player outside its team, and only the host's game can take a module off a ship (a modified game could delete the
+  enemy's guns, shields or helm from anywhere).
+
+**Game updates**
+- **A game update that changes one sound, effect or display no longer switches off every fleet mission.** Ships kept
+  apart need 70 game patches instead of 201; the others are optional, and the start-up log names any part Fleet runs
+  without. Patches on the game's coroutines and lambdas are found from the method that holds them, so they survive the
+  game adding a method.
+- A Fleet patch that names something a game update renamed is now caught as the game starts, and its feature is switched
+  off cleanly. Before, it broke the game method it patched: a broken start-of-mission patch could stop every mission from
+  starting.
+- Removed 51 patches that changed nothing (on things never aboard a player ship: sector twists, black holes, NPCs, the
+  HUD), and one on a developer test method.
+
 ## 0.4.5
 **Co-op void jumps**
 - **Every player's lever works, not only the host's.** A void drive is charged on one player's game (the host's, or the
