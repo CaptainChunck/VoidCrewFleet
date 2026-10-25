@@ -2,9 +2,13 @@
 using System.Collections.Generic;
 using System.Reflection;
 using System.Reflection.Emit;
+using CG.Client.Player.Interactions.Build;
 using CG.Client.Quests.SectorTwists;
 using CG.Game;
 using CG.Game.Scenarios;
+using CG.Game.SpaceObjects.Controllers;
+using CG.Ship.Hull;
+using CG.Ship.Modules;
 using CG.Ship.Scanning;
 using CG.Space;
 using HarmonyLib;
@@ -755,6 +759,66 @@ namespace VoidCrewFleet
         [GamePatch(Feature, "CG.Game.Scenarios.Actions.PositioningModeExtensions", "GetPosition", PatchKind.Finalizer, Optional = true)]
         [GamePatch(Feature, "CG.Game.Scenarios.Actions.OrientationModeExtensions", "GetRotation", PatchKind.Finalizer, Optional = true)]
         private static void ScenarioFinalizer()
+        {
+            EndOverride();
+        }
+
+        // ---------------------------------------------------------------- building and taking apart modules
+
+        /// <summary>
+        /// Taking a module apart or upgrading it starts by looking for the module's socket, among one ship's sockets: the
+        /// game's one build controller keeps the sockets of whichever ship the host was on the first time anyone took a
+        /// module apart, and the game's own checks look at "the player ship". On any other ship the module had no socket
+        /// there, so the host marked it as being taken apart (switched off, and kept from switching on again) and then
+        /// failed: the module stayed stuck in its slot for the rest of the mission, neither working nor coming out, and the
+        /// slot with it. When the ship asked has no socket holding the module, the module's own ship answers.
+        /// </summary>
+        [GamePatch(Feature, "CG.Game.SpaceObjects.Controllers.BuildSocketController", "GetSocketForModule", PatchKind.Postfix, Optional = true)]
+        private static void SocketForModulePostfix(CellModule module, ref BuildSocket __result)
+        {
+            if (__result != null || module == null || !FleetShips.Active) return;
+            try
+            {
+                PlayerControlledShip own = FleetShips.OwnerOf(module);
+                BuildSocketController sockets = own != null ? own.GetComponent<BuildSocketController>() : null;
+                if (sockets == null || sockets.Sockets == null) return;
+                foreach (BuildSocket socket in sockets.Sockets)
+                {
+                    if (socket != null && socket.InstalledModule == module)
+                    {
+                        __result = socket;
+                        return;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Finding a module's socket on its own ship", e);
+            }
+        }
+
+        /// <summary>
+        /// The host's work on a socket (building a module in it, taking its module apart, upgrading it) treats the socket's
+        /// own ship as "the player ship": the one-per-ship check, the "anything in the way" check and taking the old module
+        /// off the ship's list of modules all go to that ship, not to whichever ship the host is on.
+        /// </summary>
+        [GamePatch(Feature, "CG.Client.Player.Interactions.Build.BuildProcess", "Run", PatchKind.Prefix, Optional = true)]
+        private static void BuildProcessPrefix(BuildProcess __instance)
+        {
+            PlayerControlledShip ship = null;
+            try
+            {
+                if (FleetShips.Active && __instance != null && __instance.Socket != null) ship = FleetShips.OwnerOf(__instance.Socket);
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Choosing the ship a module is built on", e);
+            }
+            BeginOverride(ship);
+        }
+
+        [GamePatch(Feature, "CG.Client.Player.Interactions.Build.BuildProcess", "Run", PatchKind.Finalizer, Optional = true)]
+        private static void BuildProcessFinalizer()
         {
             EndOverride();
         }
