@@ -637,9 +637,12 @@ namespace VoidCrewFleet
         /// refuses (no escape vector, no power, the helm off, not charged) changes nothing, and is logged with the drives as
         /// this client has them (Fleet's own refusals are logged where they are made). The lead is set before the jump's first
         /// step, which the game takes right after this check.
+        /// On the puller's screen the game checks the drive's charge before it sends the pull on; a copy of a drive run on
+        /// another player's game can read a hair short of full (<see cref="ChargedCopy"/>), so such a pull goes on to the
+        /// drive's own game, which checks the charge exactly.
         /// </summary>
         [GamePatch(Feature, "CG.Ship.Modules.VoidDriveModule", "TryStartJumpEngine", PatchKind.Postfix)]
-        private static void TryStartJumpPostfix(VoidDriveModule __instance, ImpulseJumpOutcome __result)
+        private static void TryStartJumpPostfix(VoidDriveModule __instance, ref ImpulseJumpOutcome __result)
         {
             try
             {
@@ -650,6 +653,14 @@ namespace VoidCrewFleet
                 {
                     int slot = FleetShips.Slot(ship);
                     if (deciding && slot >= 0) SetLead(slot);
+                    return;
+                }
+                if (!deciding && __result == ImpulseJumpOutcome.CantFlyImpulseNotCharging && __instance.photonView != null && !__instance.photonView.AmOwner &&
+                    __instance.JumpCharge >= ChargedCopy)
+                {
+                    Log.Info("Void jump: " + FleetShips.Describe(ship) + "'s drive reads " + (__instance.JumpCharge * 100f).ToString("0.0") +
+                             " % here; the pull goes on to the game that runs it, which checks its charge exactly.");
+                    __result = ImpulseJumpOutcome.ImpulseFlightStarted;
                     return;
                 }
                 // The game never answers CantFlyNoImpulse itself: that is Fleet's own refusal. InTransit is a pull mid-jump.
@@ -664,9 +675,18 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
+        /// How charged a copy of a drive run on another player's game must read to count as charged here. Photon leaves out a
+        /// change of 0.01 or less, so a copy can stop just short of full; the drive's own game sends its whole state once it
+        /// is full (SendWholeState), but a player on an older Fleet doesn't, and their drive would otherwise hold every
+        /// jump up. The drive's own game still checks its own charge exactly.
+        /// </summary>
+        private const float ChargedCopy = 0.98f;
+
+        /// <summary>
         /// "Ship 2", "Ship 3": the living ships whose void drive isn't fully charged, among those with a crew member in the room.
         /// A ship nobody crews (co-op with fewer players than ships, or its crew left) doesn't hold the jump up: the lead ship's
-        /// jump carries it along whatever its charge.
+        /// jump carries it along whatever its charge. A drive run on another player's game counts as charged a hair short of
+        /// full (<see cref="ChargedCopy"/>).
         /// </summary>
         private static List<string> UnchargedShips()
         {
@@ -676,7 +696,8 @@ namespace VoidCrewFleet
                 if (!FleetShips.HasCrewInRoom(slot)) continue;
                 PlayerControlledShip ship = FleetShips.BySlot(slot);
                 VoidDriveModule drive = ship != null ? ship.GetModule<VoidDriveModule>() : null;
-                if (drive == null || !drive.IsFullyCharged) names.Add("Ship " + (slot + 1));
+                if (drive == null) names.Add("Ship " + (slot + 1));
+                else if (!drive.IsFullyCharged && (drive.photonView == null || drive.photonView.AmOwner || drive.JumpCharge < ChargedCopy)) names.Add("Ship " + (slot + 1));
             }
             return names;
         }
