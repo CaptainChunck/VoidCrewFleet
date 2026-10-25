@@ -159,6 +159,11 @@ namespace VoidCrewFleet
             return column;
         }
 
+        /// <summary>The game's panel settings the last overlay copied, and the theme it gave it (FindTemplate).</summary>
+        private static PanelSettings _templatePanel;
+
+        private static ThemeStyleSheet _templateTheme;
+
         /// <summary>
         /// A full-screen UI Toolkit panel of the plugin's own, drawn above the game's screens: it uses a copy of the game's own
         /// panel settings (same theme and fonts) with a higher sort order. VR UI Fix draws it into the headset like any
@@ -166,9 +171,31 @@ namespace VoidCrewFleet
         /// </summary>
         public static UIDocument CreateOverlay(string name, int sortingOrder)
         {
-            // The top panel gives the scaling; the theme most panels use gives the fonts (a fade panel may have none).
+            // The game's panel found for an earlier overlay serves again while it exists (the top one is the voice panel's,
+            // which lasts as long as the game): finding it is a search of the whole scene.
+            if (_templatePanel == null) FindTemplate();
+            PanelSettings top = _templatePanel;
+            if (top == null) return null;
+            PanelSettings settings = UnityEngine.Object.Instantiate(top);
+            settings.name = name + " panel";
+            settings.sortingOrder = Mathf.Min(Mathf.Max(sortingOrder, top.sortingOrder + 10), 29990);
+            settings.clearColor = false;
+            if (_templateTheme != null) settings.themeStyleSheet = _templateTheme;
+            var holder = new GameObject(name);
+            UnityEngine.Object.DontDestroyOnLoad(holder);
+            UIDocument overlay = holder.AddComponent<UIDocument>();
+            overlay.panelSettings = settings;
+            return overlay;
+        }
+
+        /// <summary>
+        /// The game's screen-space panel overlays copy: the top one gives the scaling, and the theme most panels use gives the
+        /// fonts (a fade panel may have none).
+        /// </summary>
+        private static void FindTemplate()
+        {
             PanelSettings top = null;
-            var themes = new System.Collections.Generic.Dictionary<ThemeStyleSheet, int>();
+            var themes = new Dictionary<ThemeStyleSheet, int>();
             foreach (UIDocument document in UnityEngine.Object.FindObjectsOfType<UIDocument>())
             {
                 PanelSettings panel = document != null ? document.panelSettings : null;
@@ -180,25 +207,16 @@ namespace VoidCrewFleet
                 themes.TryGetValue(panel.themeStyleSheet, out count);
                 themes[panel.themeStyleSheet] = count + 1;
             }
-            if (top == null) return null;
-            PanelSettings settings = UnityEngine.Object.Instantiate(top);
-            settings.name = name + " panel";
-            settings.sortingOrder = Mathf.Min(Mathf.Max(sortingOrder, top.sortingOrder + 10), 29990);
-            settings.clearColor = false;
             ThemeStyleSheet theme = null;
             int uses = 0;
-            foreach (System.Collections.Generic.KeyValuePair<ThemeStyleSheet, int> pair in themes)
+            foreach (KeyValuePair<ThemeStyleSheet, int> pair in themes)
             {
                 if (pair.Value <= uses) continue;
                 theme = pair.Key;
                 uses = pair.Value;
             }
-            if (theme != null) settings.themeStyleSheet = theme;
-            var holder = new GameObject(name);
-            UnityEngine.Object.DontDestroyOnLoad(holder);
-            UIDocument overlay = holder.AddComponent<UIDocument>();
-            overlay.panelSettings = settings;
-            return overlay;
+            _templatePanel = top;
+            _templateTheme = theme;
         }
 
         // ---------------------------------------------------------------- the game's own look
@@ -283,29 +301,55 @@ namespace VoidCrewFleet
         /// <summary>One of the game's UI sprites by name, while a screen that uses it is loaded; null otherwise.</summary>
         public static Sprite GameSprite(string name)
         {
-            Sprite sprite;
-            if (Sprites.TryGetValue(name, out sprite) && sprite != null) return sprite;
-            foreach (Sprite candidate in Resources.FindObjectsOfTypeAll<Sprite>())
-            {
-                if (candidate == null || candidate.name != name) continue;
-                Sprites[name] = candidate;
-                return candidate;
-            }
-            return null;
+            return Find(name, Sprites, SpriteMisses);
         }
 
         /// <summary>One of the game's UI textures by name, while a screen that uses it is loaded; null otherwise.</summary>
         public static Texture2D GameTexture(string name)
         {
-            Texture2D texture;
-            if (Textures.TryGetValue(name, out texture) && texture != null) return texture;
-            foreach (Texture2D candidate in Resources.FindObjectsOfTypeAll<Texture2D>())
+            return Find(name, Textures, TextureMisses);
+        }
+
+        /// <summary>When a search last didn't find each name (GameSprite, GameTexture).</summary>
+        private static readonly Dictionary<string, float> SpriteMisses = new Dictionary<string, float>();
+
+        private static readonly Dictionary<string, float> TextureMisses = new Dictionary<string, float>();
+
+        /// <summary>How long a name a search didn't find is taken as not loaded before it is looked for again.</summary>
+        private const float MissSeconds = 2f;
+
+        /// <summary>
+        /// An asset of the game's by name. Looking one up searches every loaded asset of its type, comparing names (each read
+        /// makes a string), so each search also looks for every other name still missing, and a name it didn't find is only
+        /// looked for again after MissSeconds: a screen built of several missing pieces of art searches once, not once per
+        /// piece. Only the names asked for are kept (keeping every asset would keep the game from unloading them).
+        /// </summary>
+        private static T Find<T>(string name, Dictionary<string, T> found, Dictionary<string, float> missed) where T : UnityEngine.Object
+        {
+            T asset;
+            if (found.TryGetValue(name, out asset) && asset != null) return asset;
+            float now = Time.unscaledTime;
+            float at;
+            if (missed.TryGetValue(name, out at) && now - at < MissSeconds) return null;
+            missed[name] = now;
+            // Every name to look for: this one, those not found before, and those whose asset is gone (unloaded with its screen).
+            var wanted = new HashSet<string>(missed.Keys);
+            foreach (KeyValuePair<string, T> known in found)
             {
-                if (candidate == null || candidate.name != name) continue;
-                Textures[name] = candidate;
-                return candidate;
+                if (known.Value == null) wanted.Add(known.Key);
             }
-            return null;
+            foreach (T candidate in Resources.FindObjectsOfTypeAll<T>())
+            {
+                if (candidate == null) continue;
+                string candidateName = candidate.name;
+                // The first asset of a name, as before.
+                if (!wanted.Remove(candidateName)) continue;
+                found[candidateName] = candidate;
+                missed.Remove(candidateName);
+                if (wanted.Count == 0) break;
+            }
+            foreach (string gone in wanted) missed[gone] = now;
+            return found.TryGetValue(name, out asset) && asset != null ? asset : null;
         }
 
         /// <summary>

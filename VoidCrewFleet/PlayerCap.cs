@@ -38,10 +38,31 @@ namespace VoidCrewFleet
         private static readonly MethodInfo SliderUpdateLabels = GameMember.Method(typeof(SliderIntSettingEntryVE), "UpdateLabels");
         private static readonly FieldInfo SliderSetting = GameMember.Field(typeof(SliderIntSettingEntryVE), "setting");
 
-        /// <summary>The largest room this player hosts.</summary>
+        /// <summary>The largest room this player hosts: their setting, within what the patches that went in allow (ReadyMax).</summary>
         public static int Limit
         {
-            get { return Mathf.Clamp(Settings.MaxPlayers.Value, 4, MaxRoom); }
+            get { return Mathf.Clamp(Settings.MaxPlayers.Value, 4, ReadyMax); }
+        }
+
+        /// <summary>
+        /// The largest room the patches that went in allow. 48 with everything in. When fleet missions are off after a game
+        /// update (HubFleet.FleetReady), every mission is a one-ship mission: one ship's crew (CrewRules.MaxCrew). When not
+        /// every kind of progression can be paused (ProgressionGuard.Complete), the game's own six, as a mission with more
+        /// players must give no progression.
+        /// </summary>
+        private static int ReadyMax
+        {
+            get
+            {
+                if (!ProgressionGuard.Complete) return GameLimit;
+                if (!HubFleet.FleetReady)
+                {
+                    Log.WarnOnce("room size without fleets", "Some of the patches fleet missions need didn't apply (a game update?), so rooms you host hold " +
+                                                             "one ship's crew: up to " + CrewRules.MaxCrew + " players.");
+                    return CrewRules.MaxCrew;
+                }
+                return MaxRoom;
+            }
         }
 
         /// <summary>
@@ -83,13 +104,27 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
+        /// The frame in which the hub terminal reads the room's size into a slider whose maximum stays under it (Unity's frame
+        /// count), or -1: the size it then writes back is clamped, and would shrink the room (RoomSetupReadPrefix).
+        /// </summary>
+        private static int _clampedReadFrame = -1;
+
+        /// <summary>
         /// Every slider and menu sets the room size through this; keep it within 1 and the ceiling (which never cuts the room
-        /// below its current size or players).
+        /// below its current size or players). A size the hub terminal writes back as it reads the room, clamped by a slider
+        /// whose maximum couldn't be raised (a game update), would shrink the room: it is left out.
         /// </summary>
         [GamePatch(Feature, "PhotonService", "SetCurrentRoomPlayerLimit", PatchKind.Prefix)]
-        private static void SetLimitPrefix(ref int limit)
+        private static bool SetLimitPrefix(ref int limit)
         {
+            if (Time.frameCount == _clampedReadFrame && limit < CurrentRoomLimit())
+            {
+                Log.WarnOnce("clamped room size", "The hub terminal's room-size slider couldn't be raised past " + limit + " (the game may have changed), so the " +
+                                                  "room keeps its size of " + CurrentRoomLimit() + " instead of taking the slider's.");
+                return false;
+            }
             limit = Mathf.Clamp(limit, 1, Ceiling);
+            return true;
         }
 
         [GamePatch(Feature, "MatchmakingRoomSetup", ".ctor", PatchKind.Postfix, Arguments = new[] { "UnityEngine.UIElements.VisualElement" })]
@@ -102,11 +137,14 @@ namespace VoidCrewFleet
         /// The hub terminal writes the room's size back through its slider whenever it reads the room (when it opens, and when
         /// the room's players change), clamped to the slider's maximum. That maximum was set when the terminal was built: raise
         /// it first when the room has grown past it since (another host made it bigger), or the write-back would shrink it.
+        /// When it can't be raised (the setting's maximum isn't found after a game update), the write-back of this read is left
+        /// out (SetLimitPrefix).
         /// </summary>
         [GamePatch(Feature, "MatchmakingRoomSetup", "RetrieveAndUpdateInfo", PatchKind.Prefix, Optional = true)]
         private static void RoomSetupReadPrefix(IntSetting ___playerLimit, SliderIntSettingEntryVE ___playerLimitVE)
         {
             WidenSlider(___playerLimit, ___playerLimitVE, Ceiling, "hub matchmaking terminal");
+            _clampedReadFrame = ___playerLimit != null && ___playerLimit.MaxValue < CurrentRoomLimit() ? Time.frameCount : -1;
         }
 
         [GamePatch(Feature, "LobbyPanel", ".ctor", PatchKind.Postfix,

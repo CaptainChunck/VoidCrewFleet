@@ -116,11 +116,6 @@ namespace VoidCrewFleet
             Send(type, data, new RaiseEventOptions { Receivers = ReceiverGroup.MasterClient });
         }
 
-        public static void ToAll(Msg type, params object[] data)
-        {
-            Send(type, data, new RaiseEventOptions { Receivers = ReceiverGroup.All });
-        }
-
         public static void ToOthers(Msg type, params object[] data)
         {
             Send(type, data, new RaiseEventOptions { Receivers = ReceiverGroup.Others });

@@ -33,6 +33,12 @@ namespace VoidCrewFleet
             public string Text;
             public GUIDUnion Type = GUIDUnion.Empty();
             public readonly List<HeadIcon> HeadIcons = new List<HeadIcon>();
+
+            /// <summary>What the name line was made from: it is only made again when one of these changes (not every tick).</summary>
+            public int TextSlot = -1;
+
+            public bool TextTeams;
+            public string TextType;
         }
 
         /// <summary>The card's plate starts where the panel's resource plates do over its hull row (76 px in).</summary>
@@ -254,7 +260,8 @@ namespace VoidCrewFleet
             }
             card.Hull.Show(Hull(ship), Repairable(ship), lost);
             string type = FleetSlots.TypeNameOf(slot, false);
-            SetText(card, "<b>" + FleetSlots.Name(slot, teams) + "</b>" + (string.IsNullOrEmpty(type) ? "" : "  " + type), Color.white);
+            if (TextChanged(card, slot, teams, type))
+                SetText(card, "<b>" + FleetSlots.Name(slot, teams) + "</b>" + (string.IsNullOrEmpty(type) ? "" : "  " + type), Color.white);
             GUIDUnion shipType = FleetSlots.TypeOf(slot, false);
             if (!(shipType == card.Type))
             {
@@ -291,8 +298,11 @@ namespace VoidCrewFleet
             }
             card.Hull.Show(Hull(ship), Repairable(ship), false);
             // Its name and its type's silhouette in its team's colour.
-            Color colour = FleetApi.TeamColor(CrewRules.TeamOf(slot, true));
-            if (SetText(card, "<b>" + FleetSlots.Name(slot, true) + "</b>", colour)) card.Hull.Icon.style.unityBackgroundImageTintColor = colour;
+            if (TextChanged(card, slot, true, null))
+            {
+                Color colour = FleetApi.TeamColor(CrewRules.TeamOf(slot, true));
+                if (SetText(card, "<b>" + FleetSlots.Name(slot, true) + "</b>", colour)) card.Hull.Icon.style.unityBackgroundImageTintColor = colour;
+            }
             GUIDUnion shipType = FleetSlots.TypeOf(slot, false);
             if (!(shipType == card.Type))
             {
@@ -300,6 +310,16 @@ namespace VoidCrewFleet
                 card.Hull.SetIcon(FleetSlots.TypeIcon(shipType));
             }
             card.Root.style.display = DisplayStyle.Flex;
+            return true;
+        }
+
+        /// <summary>Whether the card's name line must be made again: it now shows another ship, mode or type (notes the new ones).</summary>
+        private static bool TextChanged(Card card, int slot, bool teams, string type)
+        {
+            if (card.Text != null && slot == card.TextSlot && teams == card.TextTeams && string.Equals(type, card.TextType)) return false;
+            card.TextSlot = slot;
+            card.TextTeams = teams;
+            card.TextType = type;
             return true;
         }
 
