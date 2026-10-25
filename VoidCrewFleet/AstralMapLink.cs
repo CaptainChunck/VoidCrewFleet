@@ -32,10 +32,14 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- a map works with its own ship
 
-        /// <summary>While a map sets itself up (its action panel included), "the player ship" is the map's own ship.</summary>
+        /// <summary>
+        /// While a map sets itself up (its action panel included), "the player ship" is the map's own ship. The finalizer
+        /// ends it only when its prefix set it (__state).
+        /// </summary>
         [GamePatch(Feature, "UI.AstralMap.AstralMapController", "Start", PatchKind.Prefix, Optional = true)]
-        private static void StartPrefix(AstralMapController __instance)
+        private static void StartPrefix(AstralMapController __instance, out bool __state)
         {
+            __state = false;
             PlayerControlledShip ship = null;
             try
             {
@@ -46,12 +50,13 @@ namespace VoidCrewFleet
                 Log.Failure("Finding the ship of an astral map", e);
             }
             ShipRedirect.BeginOverride(ship);
+            __state = true;
         }
 
         [GamePatch(Feature, "UI.AstralMap.AstralMapController", "Start", PatchKind.Finalizer, Optional = true)]
-        private static void StartFinalizer()
+        private static void StartFinalizer(bool __state)
         {
-            ShipRedirect.EndOverride();
+            if (__state) ShipRedirect.EndOverride();
         }
 
         // ---------------------------------------------------------------- one destination on every map

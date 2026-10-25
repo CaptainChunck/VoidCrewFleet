@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.4.7
+**Fleet Battle**
+- The hack countdowns are part of the HUD: they show with your objectives in the top right corner, like the game's own
+  timed objectives (whose ship, in its team's colour, and the time left).
+- The punch and hacking prompts are the game's own key prompts, in its row of prompts at the bottom of the screen: your
+  mouse or gamepad key's icon, its hold mark, and a fill while you hold Fire on an airlock panel.
+- Spectators see the game's own panel at the top of the screen (lost ship or waiting, the ship you watch, Q and E as key
+  prompts); a spectator without a chat gets notices in the game's subtitle boxes.
+- Players who join once the teams are confirmed and find every crew full show in the crew list: **[** lists them under
+  WAITING FOR A PLACE, with mute and kick, and its prompt counts them.
+
+**Lobby screen and hub**
+- Player rows and the ship rules lists are the game's own list entries: your row has the game's orange edge, and the
+  host's rows light up under the pointer. No more stutter in big rooms when someone picks a ship.
+- Player names show as typed (colour or size tags in a name no longer apply).
+- **Only the host chooses the mission's mutators too.** Another player's pick is refused on their own screen, and a
+  refused mission pick no longer stays marked on their galaxy map.
+- The SHIP RULES tab asks Ship Customizer for its options each time it opens; a ship's CUSTOM loadout shows by the host's
+  name on games without Ship Customizer; FLEET BATTLE isn't listed while a game update has switched one of its parts off.
+
+**Against modified games**
+- **The host's mission choices and ship rules count, not the room's copy.** A modified game could change the mission,
+  ship count, ship types, loadouts or ship rules for everyone; the host now puts its own back.
+- A "mission ended" message kept in the room can no longer end the mission for a player who joins later.
+- A ship's destruction, or a change to its power, panels or switches, replayed from the room after its sender left is
+  ignored.
+
+**Missions**
+- A stat bonus another mod builds from its own kind of modifier is left as that mod made it when several ships use it,
+  as its own rules already were (the game's copy of such a bonus could close the game at once).
+- An item's parts (its ping label, an upgrader's effects) now follow the item when it is carried to another ship.
+- The end of a fleet mission no longer logs "Only ship N is left", and no longer takes each ship's voice lines apart one
+  by one while it unloads.
+- "Fleet runs aren't saved" is said in every fleet mission, not only the first.
+
+**Game updates**
+- A Fleet part that loses one of its optional patches can no longer leave the wrong ship as "the player ship" for the
+  rest of a mission.
+- After an update that stops the mod pausing any kind of progression, fleet missions are off and rooms keep to 6 players
+  (8 when only fleets are off).
+- Missions still start if the ready room's seats can't be read, and the hub terminal no longer shrinks a big room to 6.
+- Work that fails during a long loading screen is no longer switched off for the session.
+
+**Other**
+- The first **[** press no longer hitches, and the mod's screens search the scene less.
+- A player whose game doesn't know the clone tube the host sent logs it once, then every tenth try, instead of every
+  second.
+- The start-up log says "Several player ships", "Ships jump together", "Fleet choices in the hub" and "Fleet loadout
+  terminal" (it said "Two ...").
+- The self-test's own settings only appear in the config once AutoTest is on.
+- For builders: the offline checker covers injected parameter types, transpiler targets, lookups by name, the feature
+  list, every prefix telling its finalizer what it began, and the HUD names Fleet uses; PvP helpers are shared instead of
+  copied; tests for the host's copy of the hub choices and the roster; set-vr-mods.ps1 and dead code removed.
+
 ## 0.4.6
 **Missions**
 - **No more getting stuck after a mission ends** with another mod's item aboard (such as Ectype Skirmisher's micromissile

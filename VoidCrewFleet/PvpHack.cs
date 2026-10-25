@@ -1,11 +1,8 @@
 using System;
 using System.Collections.Generic;
-using System.Text;
 using CG.Client;
 using CG.Client.Ship;
 using CG.Game.Player;
-using CG.GameLoopStateMachine;
-using CG.GameLoopStateMachine.GameStates;
 using CG.Objects;
 using CG.Ship.Hull;
 using CG.Ship.Modules;
@@ -13,6 +10,8 @@ using CG.Ship.Object;
 using CG.Space;
 using Gameplay.Atmosphere;
 using Photon.Pun;
+using UI;
+using UI.MainHUD;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.UIElements;
@@ -25,7 +24,8 @@ namespace VoidCrewFleet
     /// 1. Carry a terminal to the control panel outside an enemy airlock and hold Fire on the panel: it is plugged in.
     /// 2. The hack takes a minute. The ship's own crew can pull the terminal out (hold Fire on it) until then.
     /// 3. Then the whole hacking team can use every door of that ship for five minutes (not the cockpit's), including the
-    ///    airlock's door buttons and pressurise lever (not its safety override). Both teams see a countdown.
+    ///    airlock's door buttons and pressurise lever (not its safety override). Both teams see a countdown, as one more entry
+    ///    of the HUD's own mission list, its timed objectives (the game's templates for them).
     /// Enemies never get into the cockpit: its doors stay shut to them, and one who walks in anyway is pushed back out.
     /// The host decides everything and keeps the hacks in a room property, so everyone (late joiners too) sees them. Their
     /// end times are the server's clock in milliseconds, an int that wraps around, so they are compared by difference. The
@@ -52,7 +52,6 @@ namespace VoidCrewFleet
         public const float AccessSeconds = 300f;
         private const int HackMs = (int)(HackSeconds * 1000f);
         private const int AccessMs = (int)(AccessSeconds * 1000f);
-        private const int SightMask = (1 << 10) | (1 << 12) | (1 << 27);
 
         /// <summary>
         /// How long the hacker's game has to put a plugged-in terminal away before the host removes it itself (and then
@@ -174,6 +173,16 @@ namespace VoidCrewFleet
             public int Seconds;
         }
 
+        /// <summary>One countdown: an objective of the HUD's mission list (the game's own, or made from its names and classes).</summary>
+        private sealed class TimerRow
+        {
+            public VisualElement Root;
+            public Label Name;
+            public Label Timer;
+            public bool Written;
+            public TimerLine Shown;
+        }
+
         /// <summary>A ship's airlocks, in the order every client finds them (an airlock's index names it in messages).</summary>
         private sealed class ShipAirlocks
         {
@@ -238,14 +247,12 @@ namespace VoidCrewFleet
         /// <summary>The session the caches of ships, airlocks, panels and cockpits are for: a new one forgets them.</summary>
         private static object _session;
 
-        private static string _timerText;
         private static float _nextTimers;
 
-        /// <summary>The countdowns' lines as last built into _timerText, and this time's (reused, so a tick allocates nothing).</summary>
+        /// <summary>The countdowns' lines as last written into the HUD, and this time's (reused, so a tick allocates nothing).</summary>
         private static readonly List<TimerLine> ShownTimerLines = new List<TimerLine>();
 
         private static readonly List<TimerLine> TimerLines = new List<TimerLine>();
-        private static readonly StringBuilder TimerBuilder = new StringBuilder();
         private static long _takenKey;
         private static int _takenSeconds = -1;
         private static string _takenText;
@@ -260,17 +267,24 @@ namespace VoidCrewFleet
         private static float _inCockpitSince = -1f;
         private static Color? _glow;
 
-        // The action hint as last built: its step, the Fire key's name (looked up when a step begins) and the percentage.
+        // The action prompt as last set: its step, and the Fire key's control path for the device in use (looked up when a step begins).
         private static Step _hintStep;
         private static string _hintKey;
-        private static int _hintPercent = -1;
-        private static string _hintText;
 
-        private static UIDocument _timerDocument;
-        private static Label _timerLabel;
+        /// <summary>The game's HUD mission list field that holds its templates for a mission and its objectives.</summary>
+        private static readonly System.Reflection.FieldInfo MissionPrefabsField = GameMember.Field(typeof(MissionListUIController), "missionPrefabs");
 
-        /// <summary>What the countdowns' label shows now (null while hidden), and when making it may be tried again.</summary>
-        private static string _timerShown;
+        // The countdowns' entry in the HUD's mission list: the HUD it was put in (a document makes a new tree when it is
+        // enabled again), the entry, its body (the objectives), the game's objective template, and its rows.
+        private static UIDocument _timerHud;
+        private static VisualElement _timerHudRoot;
+        private static VisualElement _timerEntry;
+        private static VisualElement _timerBody;
+        private static VisualTreeAsset _objectiveTemplate;
+        private static readonly List<TimerRow> TimerRows = new List<TimerRow>();
+
+        /// <summary>Whether the entry is showing, and when a HUD without a mission list may be looked at again.</summary>
+        private static bool _timersShown;
 
         private static float _nextTimerBuild;
 
@@ -692,12 +706,10 @@ namespace VoidCrewFleet
             // Notices a new room or host between matches too.
             HostHasLatest();
             SyncSession();
-            // The countdowns' overlay is made as a PvP match starts, not at the first hack: making it holds up a frame (about 19 ms).
-            if (_timerLabel == null && FleetSession.IsPvP && InGame()) EnsureTimers();
             if (!Active)
             {
                 if (Models.Count > 0) ClearModels();
-                ShowTimers(null);
+                HideTimers();
                 _nextTimers = 0f;
                 SetHint(Step.None, null);
                 return;
@@ -706,13 +718,12 @@ namespace VoidCrewFleet
             {
                 ReadRoom();
                 ShowModels();
-                // The countdowns only show whole seconds: their text is rebuilt a few times a second, not every frame.
+                // The countdowns only show whole seconds: they are looked at a few times a second, not every frame.
                 if (Time.unscaledTime >= _nextTimers)
                 {
-                    _timerText = TimerText();
                     _nextTimers = Time.unscaledTime + TimerSeconds;
+                    UpdateTimers();
                 }
-                ShowTimers(_timerText);
                 HandleInput();
                 KeepOutOfCockpit();
             }
@@ -824,10 +835,10 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// The local team's hacks and door access, and the enemy's on our ships. The text is only built again when a line or
-        /// its whole seconds change; otherwise the last one is returned, and nothing is allocated.
+        /// A few times a second: the local team's hacks and door access, and the enemy's on our ships, into TimerLines; the HUD
+        /// is written again only when a line or its whole seconds change, and nothing is allocated otherwise.
         /// </summary>
-        private static string TimerText()
+        private static void UpdateTimers()
         {
             TimerLines.Clear();
             int mine = FleetShips.TeamOfActor(FleetShips.LocalActor);
@@ -846,38 +857,16 @@ namespace VoidCrewFleet
                     TimerLines.Add(new TimerLine { Kind = kind, Slot = slot, Seconds = Mathf.Max(0, Mathf.CeilToInt(msLeft / 1000f)) });
                 }
             }
-            if (SameLines(TimerLines, ShownTimerLines)) return _timerText;
+            if (SameLines(TimerLines, ShownTimerLines) && (TimerLines.Count == 0 || (_timerEntry != null && _timerEntry.panel != null))) return;
+            if (TimerLines.Count == 0)
+            {
+                HideTimers();
+                return;
+            }
+            if (!WriteTimers()) return;
             ShownTimerLines.Clear();
             // One by one: AddRange copies through a new array.
             for (int i = 0; i < TimerLines.Count; i++) ShownTimerLines.Add(TimerLines[i]);
-            if (TimerLines.Count == 0) return null;
-            StringBuilder text = TimerBuilder;
-            text.Length = 0;
-            foreach (TimerLine line in TimerLines)
-            {
-                if (text.Length > 0) text.Append('\n');
-                string ship = FleetSlots.Name(line.Slot, true);
-                // The game's colours: light blue for our own progress, light green for what we won, orange and red for threats.
-                switch (line.Kind)
-                {
-                    case TimerKind.Hacking:
-                        text.Append("<color=#BDE7FB>HACKING ").Append(ship).Append("'S AIRLOCK  ");
-                        break;
-                    case TimerKind.EnemyHacking:
-                        text.Append("<color=#F6AE3C>ENEMY HACKING ").Append(ship).Append("'S AIRLOCK  ");
-                        break;
-                    case TimerKind.Access:
-                        text.Append("<color=#83C886>DOOR ACCESS TO ").Append(ship).Append("  ");
-                        break;
-                    default:
-                        text.Append("<color=#EC1E24>THE ENEMY CAN OPEN ").Append(ship).Append("'S DOORS  ");
-                        break;
-                }
-                text.Append(line.Seconds / 60).Append(':');
-                if (line.Seconds % 60 < 10) text.Append('0');
-                text.Append(line.Seconds % 60).Append("</color>");
-            }
-            return text.ToString();
         }
 
         private static bool SameLines(List<TimerLine> a, List<TimerLine> b)
@@ -890,61 +879,221 @@ namespace VoidCrewFleet
             return true;
         }
 
-        /// <summary>The countdowns, or none; never over the game's menus (the overlay is drawn above them).</summary>
-        private static void ShowTimers(string text)
+        /// <summary>No countdowns: the entry leaves the HUD's mission list (it stays made for the next hack).</summary>
+        private static void HideTimers()
         {
-            if (string.IsNullOrEmpty(text) || MenuScreenController.IsOpen()) text = null;
-            if (ReferenceEquals(text, _timerShown) && (text == null || (_timerLabel != null && _timerLabel.panel != null))) return;
-            if (text == null)
-            {
-                if (_timerLabel != null) _timerLabel.style.display = DisplayStyle.None;
-                _timerShown = null;
-                return;
-            }
-            if (!EnsureTimers()) return;
-            _timerLabel.text = text;
-            _timerLabel.style.display = DisplayStyle.Flex;
-            _timerShown = text;
+            ShownTimerLines.Clear();
+            if (!_timersShown) return;
+            _timersShown = false;
+            if (_timerEntry != null) _timerEntry.style.display = DisplayStyle.None;
         }
 
         /// <summary>
-        /// The countdowns' overlay and label (made again if the label has lost its panel); false while there is no game screen
-        /// to copy the overlay's settings from yet (tried again a second later).
+        /// The countdowns into the entry, one objective each: its name (whose ship, in its team's colour) and its time in the
+        /// game's timer (light blue for our hack, light green for our door access, orange and red for the enemy's). False
+        /// while the HUD has no mission list to put them in.
         /// </summary>
-        private static bool EnsureTimers()
+        private static bool WriteTimers()
         {
-            if (_timerLabel != null && _timerLabel.panel != null) return true;
-            if (Time.unscaledTime < _nextTimerBuild) return false;
-            _nextTimerBuild = Time.unscaledTime + 1f;
             try
             {
-                if (_timerDocument == null) _timerDocument = Ui.CreateOverlay("Void Crew Fleet hack timers", 3900);
-                if (_timerDocument == null || _timerDocument.rootVisualElement == null) return false;
-                VisualElement root = _timerDocument.rootVisualElement;
-                root.pickingMode = PickingMode.Ignore;
-                if (_timerLabel != null) _timerLabel.RemoveFromHierarchy();
-                _timerLabel = Ui.HudLabel("", 20, Color.white);
-                _timerLabel.style.position = Position.Absolute;
-                _timerLabel.style.left = 0;
-                _timerLabel.style.right = 0;
-                _timerLabel.style.top = new Length(9, LengthUnit.Percent);
-                _timerLabel.style.unityTextAlign = TextAnchor.UpperCenter;
-                _timerLabel.style.display = DisplayStyle.None;
-                _timerShown = null;
-                root.Add(_timerLabel);
+                if (!EnsureTimerEntry()) return false;
+                while (TimerRows.Count < TimerLines.Count) TimerRows.Add(MakeTimerRow());
+                for (int i = 0; i < TimerRows.Count; i++)
+                {
+                    TimerRow row = TimerRows[i];
+                    if (i >= TimerLines.Count)
+                    {
+                        row.Root.style.display = DisplayStyle.None;
+                        continue;
+                    }
+                    TimerLine line = TimerLines[i];
+                    row.Root.style.display = DisplayStyle.Flex;
+                    if (!row.Written || row.Shown.Kind != line.Kind || row.Shown.Slot != line.Slot)
+                    {
+                        row.Name.text = TimerName(line);
+                        row.Timer.style.color = TimerColour(line.Kind);
+                    }
+                    if (!row.Written || row.Shown.Seconds != line.Seconds) row.Timer.text = (line.Seconds / 60) + ":" + (line.Seconds % 60).ToString("00");
+                    row.Shown = line;
+                    row.Written = true;
+                }
+                if (!_timersShown)
+                {
+                    _timersShown = true;
+                    _timerEntry.style.display = DisplayStyle.Flex;
+                }
                 return true;
             }
             catch (Exception e)
             {
-                Log.Failure("Making the hack countdowns", e);
+                Log.Failure("Showing the hack countdowns", e);
                 return false;
             }
         }
 
-        private static bool InGame()
+        /// <summary>What a countdown is about, as the game words an objective: whose ship, in its team's colour.</summary>
+        private static string TimerName(TimerLine line)
         {
-            GameStateMachine machine = GameStateMachine.Instance;
-            return machine != null && machine.CurrentState is GSIngame;
+            Color team = FleetApi.TeamColor(FleetShips.TeamOfSlot(line.Slot));
+            string ship = "<color=#" + ColorUtility.ToHtmlStringRGB(team) + ">" + FleetSlots.Name(line.Slot, true) + "</color>";
+            switch (line.Kind)
+            {
+                case TimerKind.Hacking:
+                    return "Hacking " + ship + "'s airlock";
+                case TimerKind.EnemyHacking:
+                    return "The enemy is hacking " + ship + "'s airlock: pull their terminal out";
+                case TimerKind.Access:
+                    return "Door access to " + ship;
+                default:
+                    return "The enemy can open " + ship + "'s doors";
+            }
+        }
+
+        /// <summary>The game's own colours: light blue for our progress, light green for what we won, orange and red for threats.</summary>
+        private static Color TimerColour(TimerKind kind)
+        {
+            switch (kind)
+            {
+                case TimerKind.Hacking:
+                    return new Color32(0xBD, 0xE7, 0xFB, 0xFF);
+                case TimerKind.EnemyHacking:
+                    return Ui.GameOrange;
+                case TimerKind.Access:
+                    return new Color32(0x83, 0xC8, 0x86, 0xFF);
+                default:
+                    return new Color32(0xEC, 0x1E, 0x24, 0xFF);
+            }
+        }
+
+        /// <summary>
+        /// The countdowns' entry at the end of the HUD's mission list (the objectives in its top right corner), made again when
+        /// the HUD's document or tree is replaced: the game's own mission template (MissionListUIController's), headed AIRLOCK
+        /// HACKS, or one made from the same names and classes when the template can't be read. A HUD without the list (a game
+        /// update renamed it) is logged once and looked at again once a second.
+        /// </summary>
+        private static bool EnsureTimerEntry()
+        {
+            MainHUDUI hudUi = MainHUDUI.Instance;
+            UIDocument hud = hudUi != null ? hudUi.GetComponent<UIDocument>() : null;
+            VisualElement root = hud != null ? hud.rootVisualElement : null;
+            if (root == null) return false;
+            if (_timerEntry != null && hud == _timerHud && root == _timerHudRoot && _timerEntry.panel != null) return true;
+            if (Time.unscaledTime < _nextTimerBuild) return false;
+            _nextTimerBuild = Time.unscaledTime + 1f;
+            if (_timerEntry != null) _timerEntry.RemoveFromHierarchy();
+            _timerEntry = null;
+            _timerBody = null;
+            TimerRows.Clear();
+            _timersShown = false;
+            _timerHud = hud;
+            _timerHudRoot = root;
+            VisualElement list = root.Q("MissionList");
+            if (list == null)
+            {
+                Log.WarnOnce("hack timers place", "The game's HUD has no mission list (MissionList), so the hack countdowns don't show there.");
+                return false;
+            }
+            var missions = hudUi.GetComponent<MissionListUIController>();
+            MissionDisplayPrefabs prefabs = missions != null ? GameMember.Read<MissionDisplayPrefabs>(MissionPrefabsField, missions, null) : null;
+            _objectiveTemplate = prefabs != null ? prefabs.MainObjective : null;
+            Label header = null;
+            VisualElement entry = null;
+            try
+            {
+                entry = prefabs != null && prefabs.Mission != null ? prefabs.Mission.InstantiateWithIgnore() : null;
+                if (entry != null)
+                {
+                    header = entry.Q<Label>("MissionName");
+                    _timerBody = entry.Q("MissionBody");
+                    if (header == null || _timerBody == null) entry = null;
+                }
+            }
+            catch (Exception e)
+            {
+                entry = null;
+                Log.WarnOnce("hack timers template", "The game's mission template couldn't be used for the hack countdowns (" + e.Message + "); they use its classes instead.");
+            }
+            if (entry == null)
+            {
+                _objectiveTemplate = null;
+                entry = BuildEntry(out header, out _timerBody);
+            }
+            _timerBody.Clear();
+            header.text = "AIRLOCK HACKS";
+            entry.style.display = DisplayStyle.None;
+            list.Add(entry);
+            _timerEntry = entry;
+            return true;
+        }
+
+        /// <summary>
+        /// The mission entry made from the game's names and classes (the HUD's own style sheet styles them, as the loadout
+        /// terminal's styles its rows): its header, the orange line under it, and the body, with the template's spacing.
+        /// </summary>
+        private static VisualElement BuildEntry(out Label header, out VisualElement body)
+        {
+            var entry = new VisualElement { pickingMode = PickingMode.Ignore };
+            entry.AddToClassList("ui-text-dropshadow");
+            entry.style.backgroundColor = new Color(0f, 0f, 0f, 0.63f);
+            entry.style.paddingTop = 10;
+            entry.style.paddingBottom = 10;
+            entry.style.marginBottom = 20;
+            var headerRow = new VisualElement { name = "MissionNameHeader", pickingMode = PickingMode.Ignore };
+            header = new Label { name = "MissionName", pickingMode = PickingMode.Ignore };
+            headerRow.Add(header);
+            entry.Add(headerRow);
+            var line = new VisualElement { pickingMode = PickingMode.Ignore };
+            line.style.borderTopWidth = 1;
+            line.style.borderTopColor = Ui.GameOrange;
+            Ui.Margin(line, 4, 4, 6, 0);
+            entry.Add(line);
+            body = new VisualElement { name = "MissionBody", pickingMode = PickingMode.Ignore };
+            entry.Add(body);
+            return entry;
+        }
+
+        /// <summary>
+        /// One countdown: the game's main objective template (its diamond and its name), with the timer label the game adds to a
+        /// timed objective (#ObjectiveTimer, as its own mission display does); made from those names and classes when the
+        /// template can't be read.
+        /// </summary>
+        private static TimerRow MakeTimerRow()
+        {
+            VisualElement root = null;
+            Label name = null;
+            VisualElement body = null;
+            try
+            {
+                root = _objectiveTemplate != null ? _objectiveTemplate.InstantiateWithIgnore() : null;
+                name = root != null ? root.Q<Label>("ObjectiveName") : null;
+                body = root != null ? root.Q("BodyContainer") : null;
+            }
+            catch (Exception e)
+            {
+                _objectiveTemplate = null;
+                Log.WarnOnce("hack timers objective", "The game's objective template couldn't be used for the hack countdowns (" + e.Message + "); they use its classes instead.");
+            }
+            if (name == null || body == null)
+            {
+                var objective = new VisualElement { name = "MainObjective", pickingMode = PickingMode.Ignore };
+                objective.AddToClassList("mission-behaviour__main");
+                var icon = new VisualElement { name = "ObjectiveIcon", pickingMode = PickingMode.Ignore };
+                icon.style.width = 18;
+                icon.style.flexShrink = 0;
+                objective.Add(icon);
+                body = new VisualElement { name = "BodyContainer", pickingMode = PickingMode.Ignore };
+                body.style.flexShrink = 1;
+                body.style.flexGrow = 1;
+                objective.Add(body);
+                name = new Label { name = "ObjectiveName", pickingMode = PickingMode.Ignore };
+                body.Add(name);
+                root = objective;
+            }
+            var timer = new Label { name = "ObjectiveTimer", pickingMode = PickingMode.Ignore };
+            body.Add(timer);
+            _timerBody.Add(root);
+            return new TimerRow { Root = root, Name = name, Timer = timer };
         }
 
         // ---------------------------------------------------------------- the local player's actions
@@ -972,15 +1121,14 @@ namespace VoidCrewFleet
             }
             float needed = step == Step.Plug ? PlugHold : PullHold;
             float progress = _holding == step ? Mathf.Clamp01((Time.unscaledTime - _holdStart) / needed) : 0f;
-            if (step != _hintStep) _hintKey = PvpPunch.FireName(fire);
-            int percent = progress > 0f ? Mathf.RoundToInt(progress * 100f) : 0;
-            if (step != _hintStep || percent != _hintPercent)
+            if (step != _hintStep)
             {
-                _hintPercent = percent;
-                _hintText = "HOLD " + _hintKey + "  " + (step == Step.Plug ? "PLUG IN THE HACKING TERMINAL" : "PULL OUT THE ENEMY TERMINAL") +
-                            (percent > 0 ? "  " + percent + "%" : "");
+                bool pad = PvpPunch.UsingGamepad;
+                _hintKey = PvpPunch.KeyPath(fire, pad, pad ? null : "<Mouse>/leftButton");
             }
-            SetHint(step, _hintText);
+            // The key's fill shows the hold, in whole percents.
+            int percent = progress > 0f ? Mathf.RoundToInt(progress * 100f) : 0;
+            SetHint(step, step == Step.Plug ? "PLUG IN THE HACKING TERMINAL" : "PULL OUT THE ENEMY TERMINAL", percent / 100f);
             if (progress < 1f || Time.unscaledTime < _nextRequest) return;
             _needRelease = true;
             _holding = Step.None;
@@ -995,12 +1143,14 @@ namespace VoidCrewFleet
             else Net.ToHost(Msg.HackPull, ship, index);
         }
 
-        /// <summary>The hacking line of the action hint, for a step (None: the text given, or none).</summary>
-        private static void SetHint(Step step, string text)
+        /// <summary>
+        /// The hacking prompt, for a step: hold the Fire key, its fill showing the hold. None: the text given without a key (an
+        /// airlock hacked already), or none.
+        /// </summary>
+        private static void SetHint(Step step, string text, float progress = 0f)
         {
             _hintStep = step;
-            if (step == Step.None) _hintPercent = -1;
-            ActionHint.Set("hack", ActionHint.HackPriority, text);
+            ActionHint.Set("hack", ActionHint.HackPriority, step == Step.None ? null : _hintKey, step != Step.None, text, progress);
         }
 
         /// <summary>
@@ -1071,7 +1221,7 @@ namespace VoidCrewFleet
                 if (distance > Reach + 0.4f) continue;
                 float angle = Vector3.Angle(aim, to);
                 if (angle >= bestAngle) continue;
-                if (Physics.Linecast(eye, centre - to.normalized * 0.25f, SightMask, QueryTriggerInteraction.Ignore)) continue;
+                if (Physics.Linecast(eye, centre - to.normalized * 0.25f, PvpCombat.SightMask, QueryTriggerInteraction.Ignore)) continue;
                 bestAngle = angle;
                 target = KeyOf(view, i);
             }
@@ -1106,7 +1256,7 @@ namespace VoidCrewFleet
             Vector3 to = point - eye;
             float distance = to.magnitude;
             if (distance > Reach || Vector3.Angle(aim, to) > (distance < 1f ? AimAngle * 2f : AimAngle)) return false;
-            return !Physics.Linecast(eye, point - to.normalized * 0.15f, SightMask, QueryTriggerInteraction.Ignore);
+            return !Physics.Linecast(eye, point - to.normalized * 0.15f, PvpCombat.SightMask, QueryTriggerInteraction.Ignore);
         }
 
         /// <summary>

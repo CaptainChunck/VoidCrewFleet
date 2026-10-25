@@ -24,7 +24,7 @@ namespace VoidCrewFleet
     /// </summary>
     internal static class HubTerminalUi
     {
-        public const string Feature = "Two-ship loadout terminal";
+        public const string Feature = "Fleet loadout terminal";
 
         private static readonly FieldInfo LoadoutListField = GameMember.Field(typeof(LoadoutTerminal), "loadoutList");
         private static readonly FieldInfo DisplayField = GameMember.Field(typeof(LoadoutTerminal), "display");

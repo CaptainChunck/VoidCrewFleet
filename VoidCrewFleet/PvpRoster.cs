@@ -31,9 +31,6 @@ namespace VoidCrewFleet
         private const string KeyRoster = "VCF_Roster";
         private const string KeyId = "VCF_Pid";
 
-        /// <summary>FleetShips' room property: each ship this mission started with by slot (its view ID; 0 for one that never spawned).</summary>
-        private const string KeyShips = "VCF_Ships";
-
         /// <summary>How long a seat is held for a player who lost their connection.</summary>
         public const int HoldSeconds = 180;
 
@@ -54,8 +51,10 @@ namespace VoidCrewFleet
         private static readonly HashSet<string> Present = new HashSet<string>();
         private static readonly List<RosterSeat> WaitingBefore = new List<RosterSeat>();
 
-        /// <summary>Host, during a tick: the room's players in join order.</summary>
+        /// <summary>Host, during a tick: the room's players in join order, and the living ships' slots.</summary>
         private static readonly List<Player> Players = new List<Player>();
+
+        private static readonly List<int> Alive = new List<int>();
 
         /// <summary>Host: each player's "pf:" ID with the PlayFab ID it was made from, so it isn't made again every tick.</summary>
         private static readonly Dictionary<int, KeyValuePair<object, string>> PlayFabIds = new Dictionary<int, KeyValuePair<object, string>>();
@@ -156,13 +155,6 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- what others read
 
-        /// <summary>PvP: seats a team still holds for players who lost their connection (they count as on the team).</summary>
-        public static int HeldSeats(int team)
-        {
-            List<RosterSeat> seats = Seats();
-            return seats != null ? RosterRules.Held(seats, team) : 0;
-        }
-
         /// <summary>The roster as the host last published it (the host's own copy on the host). Only to read.</summary>
         public static List<RosterSeat> Seats()
         {
@@ -201,7 +193,9 @@ namespace VoidCrewFleet
                 bool pvp = plan.Mode == FleetMode.PvP;
                 if (!Ready(pvp)) return;
 
-                List<int> alive = FleetShips.AliveSlots();
+                // Into a list kept for it: this runs a few times a second.
+                List<int> alive = Alive;
+                FleetShips.AliveSlots(alive);
                 int now = Now;
                 bool changed = RosterRules.ExpireHolds(_seats, now, HoldMs);
                 if (RosterRules.DropGone(_seats, now, HoldMs)) changed = true;
@@ -299,12 +293,13 @@ namespace VoidCrewFleet
         private static bool LoseGoneShips(List<int> alive)
         {
             if (alive.Count == 0 || !InGame()) return false;
-            int[] published = PublishedShips();
-            if (published == null || published.Length < 2) return false;
+            // The ships as the host published them (FleetShips: on the host its own list, not the room's copy).
+            int ships = FleetShips.PublishedCount;
+            if (ships < 2) return false;
             bool changed = false;
-            for (int slot = 0; slot < published.Length; slot++)
+            for (int slot = 0; slot < ships; slot++)
             {
-                if (published[slot] == 0 || alive.Contains(slot) || !PlayingOn(slot)) continue;
+                if (!FleetShips.IsLost(slot) || !PlayingOn(slot)) continue;
                 RosterRules.ShipLost(_seats, slot);
                 changed = true;
                 Log.Info(FleetSlots.Name(slot, FleetSession.IsPvP) + " is lost but its crew was still playing on the roster (a new host?): they are out (DEAD) now.");
@@ -320,14 +315,6 @@ namespace VoidCrewFleet
                 if (seat.Slot == slot && seat.State == CrewState.Playing) return true;
             }
             return false;
-        }
-
-        /// <summary>The ships this mission started with, as the host published them (FleetShips); null before that.</summary>
-        private static int[] PublishedShips()
-        {
-            Room room = PhotonNetwork.CurrentRoom;
-            object value;
-            return room != null && room.CustomProperties != null && room.CustomProperties.TryGetValue(KeyShips, out value) ? value as int[] : null;
         }
 
         /// <summary>Whether this player is in the mission itself (past loading and spawning).</summary>

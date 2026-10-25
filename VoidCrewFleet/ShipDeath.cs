@@ -117,15 +117,24 @@ namespace VoidCrewFleet
         /// <summary>
         /// Whether the game's "this ship starts dying" message comes from someone allowed to send it, in a fleet mission: the
         /// client that owns the ship's network object (it kills the ship when its hull reaches 0: the host, or the pilot who
-        /// flies it) or the host. Anyone else's (a modified game's) is ignored on every client. When the sender can't be told
-        /// (RpcSender not in), or outside a fleet mission, the message counts as the game would count it.
+        /// flies it) or the host. Anyone else's (a modified game's) is ignored on every client, and so is one replayed from the
+        /// room after its sender left: the game sends this message to the players in the room and never keeps it, so only a
+        /// modified game's can be replayed, to every player who joins later. When the sender can't be told (RpcSender not in),
+        /// or outside a fleet mission, the message counts as the game would count it.
         /// </summary>
         private static bool SentByShipOrHost(PlayerControlledShip ship)
         {
             if (ship == null || FleetSession.ShipCount < 2) return true;
             PhotonView view = ship.photonView;
             int actor;
-            if (view == null || !RpcSender.Of(view, out actor)) return true;
+            if (view == null) return true;
+            if (!RpcSender.Of(view, out actor))
+            {
+                if (!RpcSender.FromAbsentPlayer(view)) return true;
+                Log.WarnOnce("ship death from a leaver for " + view.ViewID,
+                    "A player who has left the room sent the destruction of " + FleetShips.Describe(ship) + " (replayed from the room); ignored.");
+                return false;
+            }
             if (actor == view.OwnerActorNr || actor == view.ControllerActorNr) return true;
             Photon.Realtime.Player host = PhotonNetwork.MasterClient;
             if (host != null && actor == host.ActorNumber) return true;
@@ -230,14 +239,7 @@ namespace VoidCrewFleet
 
         private static bool AnotherShipSurvives
         {
-            get
-            {
-                foreach (PlayerControlledShip ship in FleetShips.All)
-                {
-                    if (ship != null && ship != Dying && !ship.StartedDeath) return true;
-                }
-                return false;
-            }
+            get { return FleetShips.AnotherLivingShip(Dying); }
         }
 
         /// <summary>
@@ -353,8 +355,9 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// The game's death sequence (one per mission: the local player's view of a ship's death) as it starts up: its timings are
-        /// kept, so a ship's death doesn't search the whole scene for them (15-20 ms in a fleet mission).
+        /// A ship's death sequence (every ship has one: the local player's view of that ship's death) as it starts up: its
+        /// timings, the game's same ones on every ship, are kept, so a ship's death doesn't search the whole scene for them
+        /// (15-20 ms in a fleet mission).
         /// </summary>
         [GamePatch(Feature, "PlayerShipDeathSequence", "Awake", PatchKind.Postfix, Optional = true)]
         private static void SequenceAwakePostfix(PlayerShipDeathSequence __instance)
@@ -536,11 +539,7 @@ namespace VoidCrewFleet
                 var ship = orbitObject as PlayerControlledShip;
                 if (ship == null || FleetSession.ShipCount < 2) return true;
                 if (FleetSession.IsPvP) return false;
-                foreach (PlayerControlledShip other in FleetShips.All)
-                {
-                    if (other != null && other != ship && !other.StartedDeath) return false;
-                }
-                return true;
+                return !FleetShips.AnotherLivingShip(ship);
             }
             catch (Exception e)
             {

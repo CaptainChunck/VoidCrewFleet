@@ -69,8 +69,8 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
   every ship is lost; Fleet Battle ends when a team has none left.
 
 ### Missions (galaxy map)
-- **Only the host chooses the mission and starts it.** Other players' picks on the galaxy map are refused with a
-  message, and only the host sitting in a ready-room seat starts the countdown, in every mission.
+- **Only the host chooses the mission, its mutators, and starts it.** Other players' picks on the galaxy map are
+  refused with a message, and only the host sitting in a ready-room seat starts the countdown, in every mission.
 - **The game's own missions** can be flown with up to three ships.
 - **FLEET PILGRIMAGE**: the Pilgrimage for two or three ships. Enemies come in greater numbers (more with a third ship)
   and every sector holds more objectives, so the crews can split up and work on different objectives at the same time.
@@ -88,8 +88,10 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
   2. Everyone on a team wears a **BLUE TEAM / RED TEAM** badge above their head, and sees their own team and ship
      as a row of the ship panel in the top left corner (BLUE TEAM  BLUE 1, DESTROYER). Once the teams are confirmed
      the crew list shows BLUE on the left and RED on the right, with **[** and **]** opening each team's whole list
-     when it doesn't fit. In the match it shows your own crew and a card for each other ship of your team, and each
-     enemy ship's health (in red) while it is within your ship's scan range: nothing of the other team's players.
+     when it doesn't fit. Players who join then and find every crew full are on neither team yet: **[** lists them
+     too, under WAITING FOR A PLACE (with mute and kick in their menus), and its prompt counts them. In the match it
+     shows your own crew and a card for each other ship of your team, and each enemy ship's health (in red) while it is
+     within your ship's scan range: nothing of the other team's players.
   3. At the loadout terminal the FLEET panel lists every ship in team colours. Only a ship's own team can change its
      loadout, Ship Customizer's CUSTOM included. A ship nobody set up starts with its type's standard loadout.
   4. The host starts the match by **sitting in a ready-room seat**, and everyone spawns aboard their ship.
@@ -154,8 +156,8 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
   2. **Hold Fire** on the panel to plug it in. The hack takes **1 minute**, and the defenders can **pull it out** (hold
      Fire on it for 3 seconds) until then.
   3. When it finishes, your whole team can **use every door of that ship for 5 minutes**, including the airlock's door
-     buttons and pressurise lever, but not the cockpit doors or the airlock's safety override. A countdown shows on
-     screen for both teams.
+     buttons and pressurise lever, but not the cockpit doors or the airlock's safety override. Both teams see the
+     countdowns with their objectives, in the top right corner.
 
 ## Installation
 1. Install **BepInEx 5** for Void Crew, with a Thunderstore mod manager (BepInExPack) or by hand.
@@ -169,6 +171,7 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
 |---|---|---|---|
 | General | Enabled | true | Turn the mod off without removing it. |
 | Lobby | MaxPlayers | 24 | Room size for rooms you host (4–48). |
+| Lobby | PlayerId | (empty) | Made by itself when Steam isn't running: the ID fleet rooms know you by, to give you your place back after a lost connection. Leave it as it is. |
 | Lobby | Ships | 1 | How many ships rooms you host start with (1–3; follows the FLEET panel's SHIPS). |
 | Two ships | ShipSpacing | 160 | Distance between ships side by side at the start and after a jump (m). |
 | Fleet Pilgrimage | EnemyMultiplier | 1.6 | How many more enemies the Fleet Pilgrimage sends with two ships (host); a third ship adds as much again. A change applies from the next mission. |
@@ -182,7 +185,8 @@ Pilgrimage** (more enemies, more objectives), or fight each other in **Fleet Bat
 | Crew list | PlayersKey | `<Keyboard>/leftBracket` | Opens the list of every player, or of the BLUE team once teams are picked (Tab is the game's camera view). |
 | Crew list | RedTeamKey | `<Keyboard>/rightBracket` | Opens the list of the RED team once teams are picked. |
 | Diagnostics | VerboseLogging | false | More detail in the BepInEx log. |
-| Diagnostics | AutoTest | Off | Developer self-test; leave it Off to play. |
+| Diagnostics | Profile | false | Developer: logs where the mod's own time goes every 10 s; leave it off to play. |
+| Diagnostics | AutoTest | Off | Developer self-test; leave it Off to play. Its own settings (AutoTestJump, AutoTestShips and the others, each described in the file) are only written once it isn't Off. |
 
 ## Progression
 Fleet missions, PvP and missions with more than 6 players **give no XP, rewards or achievements**, as Void Crew's
@@ -192,6 +196,8 @@ are only joining (a player the game sends back for missing mods doesn't count):
   shards aren't unlocked there either.
 - A mission that starts like that stays so even if players leave.
 - Fleet runs aren't saved, because the game's save holds only one ship.
+- If a game update stops the mod from pausing every kind of progression, fleet missions are off and rooms you host keep
+  to the game's own 6 players, so no mission needs a pause. (If only fleet missions are off, rooms hold one ship's 8.)
 
 ## Compatibility
 - **[Ship Customizer](https://github.com/CaptainChunck/VoidCrewShipCustomizer)** (optional):

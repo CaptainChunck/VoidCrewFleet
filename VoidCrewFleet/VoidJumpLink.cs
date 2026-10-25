@@ -40,7 +40,7 @@ namespace VoidCrewFleet
     /// </summary>
     internal static class VoidJumpLink
     {
-        public const string Feature = "Two ships jump together";
+        public const string Feature = "Ships jump together";
 
         private const int StateInactive = 0;
         private const int StateAligning = 2;

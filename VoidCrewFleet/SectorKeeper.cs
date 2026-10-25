@@ -7,9 +7,10 @@ namespace VoidCrewFleet
 {
     /// <summary>
     /// A session has one active sector. When the ships jump out of it, the game takes its one player ship out of the
-    /// sector and the host then destroys everything else in it: with two ships, the second would be destroyed. Here every
-    /// player ship is taken out before a sector unloads, and put into the new sector when it is entered. The sector's play
-    /// area (which pulls a ship that strays too far back towards the centre) holds every ship, not only "the player ship".
+    /// sector and the host then destroys everything else in it: with several ships, the others would be destroyed. Here
+    /// every player ship is taken out before a sector unloads, and put into the new sector when it is entered. The sector's
+    /// play area (which pulls a ship that strays too far back towards the centre) holds every ship, not only "the player
+    /// ship".
     /// </summary>
     internal static class SectorKeeper
     {
@@ -17,7 +18,7 @@ namespace VoidCrewFleet
 
         /// <summary>The game's own pull of "the player ship" into the play area, called directly (no reflection call per ship).</summary>
         private static readonly Action<PlayableAreaController, PlayableArea> PullShip =
-            Bind<Action<PlayableAreaController, PlayableArea>>(GameMember.Method(typeof(PlayableAreaController), "CheckPlayableAreaPlayership"));
+            ShipRedirect.Bind<Action<PlayableAreaController, PlayableArea>>(GameMember.Method(typeof(PlayableAreaController), "CheckPlayableAreaPlayership"));
 
         [GamePatch(Feature, "GameSessionSector", "Unload", PatchKind.Prefix)]
         private static void UnloadPrefix(GameSessionSector __instance)
@@ -47,7 +48,7 @@ namespace VoidCrewFleet
             }
         }
 
-        /// <summary>Both ships belong to the sector the session enters (the jumping ship adds itself; this adds the other).</summary>
+        /// <summary>Every ship belongs to the sector the session enters (the jumping ship adds itself; this adds the others).</summary>
         [GamePatch(Feature, "GameSessionSectorManager", "EnterSectorInternal", PatchKind.Postfix)]
         private static void EnterSectorPostfix()
         {
@@ -142,20 +143,6 @@ namespace VoidCrewFleet
             {
                 PullArguments[0] = null;
                 ShipRedirect.EndOverride();
-            }
-        }
-
-        /// <summary>A fast call to a private game method, or null when it is missing or has changed.</summary>
-        private static T Bind<T>(MethodInfo method) where T : class
-        {
-            if (method == null) return null;
-            try
-            {
-                return Delegate.CreateDelegate(typeof(T), method, false) as T;
-            }
-            catch
-            {
-                return null;
             }
         }
     }

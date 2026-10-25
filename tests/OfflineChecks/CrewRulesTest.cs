@@ -737,6 +737,19 @@ internal static class CrewRulesTest
         Check(gone.Any(s => s.Id == "D"), "a dead player is kept (they come back dead)");
         Check(gone.Any(s => s.Id == "P") && Seat(gone, "P").Expired, "an expired hold is kept");
 
+        // Forgetting several at once keeps everyone else in their order (the roster's order is the order places go in), and
+        // the holds left are counted per team.
+        var mixed = new List<RosterSeat>
+        {
+            Waiting("W1", 1, -1, now), Playing("A", 2, 0, 0), Waiting("W2", 3, 1, now), Playing("B", 4, 1, 1), Waiting("W3", 5, 0, now), Playing("C", 6, 0, 0)
+        };
+        foreach (string id in new[] { "W1", "W2", "W3", "B", "C" }) RosterRules.Leave(mixed, id, now);
+        Check(RosterRules.DropGone(mixed, now + Hold, Hold), "three waiting players gone for good are forgotten together");
+        Equal("A,B,C", string.Join(",", mixed.Select(s => s.Id).ToArray()), "the others stay in their order");
+        Equal(1, RosterRules.Held(mixed, 0), "BLUE holds C's place");
+        Equal(1, RosterRules.Held(mixed, 1), "RED holds B's place");
+        Check(!RosterRules.DropGone(mixed, now + Hold, Hold), "nothing more to forget");
+
         ReturnChecks(now);
     }
 

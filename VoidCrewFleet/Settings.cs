@@ -96,7 +96,21 @@ namespace VoidCrewFleet
 
             AutoTest = config.Bind("Diagnostics", "AutoTest", AutoTestMode.Off,
                 "Developer self-test. Anything but Off makes the game host a private one-player room from the main menu by itself, start a mission " +
-                "with that fleet mode, and log what the fleet looks like (with screenshots in BepInEx\\fleet-autotest). Leave it Off to play.");
+                "with that fleet mode, and log what the fleet looks like (with screenshots in BepInEx\\fleet-autotest). Leave it Off to play. " +
+                "Its own settings (AutoTestJump and the others) are only written here once it isn't Off.");
+            Profile = config.Bind("Diagnostics", "Profile", false,
+                "Developer: times the plugin's own code (every patch method and periodic handler) and logs where its time went every 10 s. " +
+                "Adds a little overhead of its own; leave it off when playing.");
+            // The self-test's own settings only matter (and only show in this file) while the self-test is on. A file that already
+            // has them keeps them as they are (BepInEx keeps settings nobody reads), and they count again once it is on.
+            if (AutoTest.Value != AutoTestMode.Off) BindAutoTest(config);
+            else AutoTest.SettingChanged += (sender, args) => BindAutoTest(config);
+        }
+
+        /// <summary>The self-test's own settings, once AutoTest isn't Off (at start-up, or when it is changed while the game runs).</summary>
+        private static void BindAutoTest(ConfigFile config)
+        {
+            if (AutoTestJump != null || AutoTest.Value == AutoTestMode.Off) return;
             AutoTestJump = config.Bind("Diagnostics", "AutoTestJump", true,
                 "With AutoTest = TwoShips or FleetPilgrimage: also make the lead ship void jump (debug charge) and log the other ships following it.");
             AutoTestLeverJump = config.Bind("Diagnostics", "AutoTestLeverJump", false,
@@ -118,9 +132,6 @@ namespace VoidCrewFleet
                 "With AutoTest on: after destroying ships, the host uses RETURN TO HUB and the test waits to be back in the hub.");
             AutoTestFists = config.Bind("Diagnostics", "AutoTestFists", false,
                 "With AutoTest = PvP: the test player raises their fists and punches, with screenshots.");
-            Profile = config.Bind("Diagnostics", "Profile", false,
-                "Developer: times the plugin's own code (every patch method and periodic handler) and logs where its time went every 10 s. " +
-                "Adds a little overhead of its own; leave it off when playing.");
             AutoTestTour = config.Bind("Diagnostics", "AutoTestTour", false,
                 "With AutoTest = PvP: a free camera tours the arena (above it, behind each team, its centre, every ship, every salvage spot and a " +
                 "supply drop called in for the tour), with a screenshot at each and the game's screens hidden.");

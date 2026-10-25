@@ -8,19 +8,30 @@ using Mono.Cecil.Cil;
 // Offline checks for Void Crew Fleet (no game running). Everything is read with Mono.Cecil, nothing is executed:
 //  1. every [GamePatch] in the plugin names a type and method that exist in the game's assemblies, with exactly one
 //     method of that name unless the attribute lists the argument types, and every injected parameter of the patch
-//     method (__instance, __result, ___field, argument names) fits that target; a patch on a coroutine finds the
-//     coroutine's body from the method ([IteratorStateMachine]), a patch on a lambda exactly one lambda with that number;
-//     every patch method is static and not generic (the plugin compiles each one at start-up, Patcher.Prepare);
+//     method (__instance, __result, ___field, argument names) fits that target, its type and ref-ness included (Harmony
+//     doesn't check most of them: a wrong one makes bad code at run time); a patch on a coroutine finds the coroutine's
+//     body from the method ([IteratorStateMachine]), a patch on a lambda exactly one lambda with that number; every patch
+//     method is static and not generic (the plugin compiles each one at start-up, Patcher.Prepare); a patch that waits for
+//     the game to load is optional; a transpiler's target still has what it replaces (a call of, or read of, one of the game
+//     members its code looks up by name);
 //  2. every GameMember.Type/Field/Method/Property call in the plugin passes constant names that exist in the game;
 //  3. every game member a patch method's code names, and every one its class's static fields and static set-up name,
 //     exists in the game: what the start-up compile would refuse. A build against the game already ensures it; this
-//     shows it for a built plugin against another game version (FleetCheck.exe <old dll> <new game's Managed>).
+//     shows it for a built plugin against another game version (FleetCheck.exe <old dll> <new game's Managed>);
+//  4. every lookup by name of a game type's member outside GameMember (AccessTools, Type.GetMethod and the like) names
+//     one that exists (exactly once for a method or property without argument types), and none is in a static set-up,
+//     where a lookup that throws (an overload a game update adds) would break every hook of its class. Lookups on a type
+//     only known at run time are listed as notes;
+//  5. the features: every feature with a patch applied at start-up is in the start-up report (Features.All), every
+//     feature there has one, and every Feature constant names a feature that has a patch.
 // Run it with tests\build-and-test.ps1, which builds the plugin first.
 // Usage: FleetCheck.exe <plugin dll> <game Managed dir>
 internal static class Program
 {
     private const string AttributeName = "VoidCrewFleet.GamePatchAttribute";
     private const string MemberHelper = "VoidCrewFleet.GameMember";
+    private const string PatcherClass = "VoidCrewFleet.Patcher";
+    private const string FeaturesClass = "VoidCrewFleet.Features";
 
     private static readonly Dictionary<string, TypeDefinition> Types = new Dictionary<string, TypeDefinition>();
 
@@ -29,6 +40,12 @@ internal static class Program
 
     /// <summary>Every patch method, once, for check 3.</summary>
     private static readonly List<MethodDefinition> Hooks = new List<MethodDefinition>();
+
+    /// <summary>Per feature: how many of its patches go in at start-up (not AfterGameLoad), for check 5.</summary>
+    private static readonly Dictionary<string, int> StartupPatches = new Dictionary<string, int>();
+
+    /// <summary>The features with a patch of any kind, for check 5.</summary>
+    private static readonly HashSet<string> PatchedFeatures = new HashSet<string>();
 
     private static int _failures;
     private static int _checks;
@@ -54,6 +71,14 @@ internal static class Program
             CheckMemberLookups(plugin);
             Console.WriteLine("Game members named in the patch methods' code and their classes' static set-up:");
             CheckHookCode();
+            Console.WriteLine("State a prefix hands its postfix or finalizer (__state):");
+            CheckStatePairs(plugin);
+            Console.WriteLine("Game members looked up by name outside GameMember:");
+            CheckOtherLookups(plugin);
+            Console.WriteLine("Features:");
+            CheckFeatures(plugin);
+            Console.WriteLine("Elements of the game's HUD that Fleet's PvP displays are put in or read (the game's own code names them):");
+            CheckHudNames();
         }
         catch (Exception e)
         {
@@ -69,6 +94,12 @@ internal static class Program
         _checks++;
         Console.WriteLine((ok ? "  ok   " : "  FAIL ") + what);
         if (!ok) _failures++;
+    }
+
+    /// <summary>A line for what the checker can't verify (not counted).</summary>
+    private static void Note(string what)
+    {
+        Console.WriteLine("  note " + what);
     }
 
     // ------------------------------------------------------------------ the game's types
@@ -146,6 +177,7 @@ internal static class Program
                     string[] arguments = null;
                     bool optional = false;
                     bool coroutine = false;
+                    bool afterGameLoad = false;
                     int lambda = -1;
                     foreach (Mono.Cecil.CustomAttributeNamedArgument property in attribute.Properties)
                     {
@@ -166,8 +198,21 @@ internal static class Program
                         {
                             lambda = Convert.ToInt32(property.Argument.Value);
                         }
+                        else if (property.Name == "AfterGameLoad")
+                        {
+                            afterGameLoad = (bool)property.Argument.Value;
+                        }
                     }
                     if (!Hooks.Contains(hook)) Hooks.Add(hook);
+                    PatchedFeatures.Add(feature);
+                    int count;
+                    StartupPatches.TryGetValue(feature, out count);
+                    StartupPatches[feature] = count + (afterGameLoad ? 0 : 1);
+                    // Features.Listen registers a feature's work only while it is on at start-up: a required late patch could
+                    // still switch it off after that.
+                    if (afterGameLoad)
+                        Check(optional, "[" + feature + "] " + typeName + "." + methodName + " <- " + hook.DeclaringType.Name + "." + hook.Name +
+                                        ": a patch that waits for the game to load is optional");
                     CheckPatch(feature, typeName, methodName, kind, arguments, optional, coroutine, lambda, hook);
                 }
             }
@@ -235,31 +280,310 @@ internal static class Program
         {
             // Transpilers get their arguments by type (instructions, ILGenerator, original), not by name.
             Check(target.HasBody, what + ": target has a body to transpile");
+            if (target.HasBody) CheckTranspilerTarget(hook, target, what);
             return;
         }
 
         foreach (ParameterDefinition parameter in hook.Parameters)
         {
             string name = parameter.Name;
-            if (name == "__instance") Check(!target.IsStatic, what + ": __instance on an instance method");
-            else if (name == "__result") Check(target.ReturnType.FullName != "System.Void", what + ": __result on a method that returns a value");
+            if (name == "__instance")
+            {
+                Check(!target.IsStatic, what + ": __instance on an instance method");
+                if (!target.IsStatic) CheckInjected(what, name, parameter.ParameterType, target.DeclaringType, InstanceRule(target.DeclaringType));
+            }
+            else if (name == "__result")
+            {
+                bool returns = target.ReturnType.FullName != "System.Void";
+                Check(returns, what + ": __result on a method that returns a value");
+                if (returns) CheckInjected(what, name, parameter.ParameterType, target.ReturnType, Rule.Result);
+            }
             else if (name == "__exception") Check(kind == 2 || kind == 1, what + ": __exception in a postfix or finalizer");
             else if (name == "__state" || name == "__runOriginal" || name == "__originalMethod" || name == "__args") continue;
             else if (name.StartsWith("___", StringComparison.Ordinal))
             {
                 string field = name.Substring(3);
-                bool found = Hierarchy(target.DeclaringType).Any(t => t.Fields.Any(f => f.Name == field));
-                Check(found, what + ": field " + field + " exists for ___" + field);
+                FieldDefinition found = Hierarchy(target.DeclaringType).SelectMany(t => t.Fields).FirstOrDefault(f => f.Name == field);
+                Check(found != null, what + ": field " + field + " exists for ___" + field);
+                if (found != null) CheckInjected(what, name, parameter.ParameterType, found.FieldType, Rule.Field);
             }
             else if (name.StartsWith("__", StringComparison.Ordinal))
             {
                 int index;
-                Check(int.TryParse(name.Substring(2), out index) && index < target.Parameters.Count, what + ": argument " + name + " exists");
+                bool exists = int.TryParse(name.Substring(2), out index) && index >= 0 && index < target.Parameters.Count;
+                Check(exists, what + ": argument " + name + " exists");
+                if (exists) CheckInjected(what, name, parameter.ParameterType, target.Parameters[index].ParameterType, Rule.Argument);
             }
             else
             {
-                Check(target.Parameters.Any(p => p.Name == name), what + ": target has a parameter named " + name);
+                ParameterDefinition argument = target.Parameters.FirstOrDefault(p => p.Name == name);
+                Check(argument != null, what + ": target has a parameter named " + name);
+                if (argument != null) CheckInjected(what, name, parameter.ParameterType, argument.ParameterType, Rule.Argument);
             }
+        }
+    }
+
+    // ------------------------------------------------------------------ 1. injected parameter types
+
+    /// <summary>How Harmony (BepInEx's HarmonyX, HarmonyManipulator.EmitCallParameter) passes a value to a patch method's parameter.</summary>
+    private enum Rule
+    {
+        /// <summary>An argument of the game method: boxed for a parameter of a reference type when it is a value; by reference the same type.</summary>
+        Argument,
+
+        /// <summary>A field (ldfld, ldflda): never boxed; by reference the same type.</summary>
+        Field,
+
+        /// <summary>The return value: boxed only into object; by reference the same type (or object for a value).</summary>
+        Result,
+
+        /// <summary>The instance of a class: a base type or interface of it will do; by reference the same type.</summary>
+        ClassInstance,
+
+        /// <summary>The instance of a struct: the same type, by value or by reference.</summary>
+        StructInstance
+    }
+
+    private static Rule InstanceRule(TypeDefinition declaringType)
+    {
+        return declaringType.IsValueType ? Rule.StructInstance : Rule.ClassInstance;
+    }
+
+    /// <summary>Checks that Harmony passes a value of type 'given' to a patch method's parameter of type 'wanted' as it should.</summary>
+    private static void CheckInjected(string what, string name, TypeReference wanted, TypeReference given, Rule rule)
+    {
+        bool byRef = wanted is ByReferenceType;
+        TypeReference hook = byRef ? ((ByReferenceType)wanted).ElementType : wanted;
+        TypeReference game = given is ByReferenceType ? ((ByReferenceType)given).ElementType : given;
+        bool fits;
+        bool value = IsValueType(game);
+        switch (rule)
+        {
+            case Rule.StructInstance:
+                fits = Same(hook, game);
+                break;
+            case Rule.Result:
+                fits = byRef ? Same(hook, game) || (value && Name(hook) == "System.Object") : value ? Same(hook, game) || Name(hook) == "System.Object" : AssignableTo(game, hook);
+                break;
+            case Rule.Field:
+                fits = byRef || value ? Same(hook, game) : AssignableTo(game, hook);
+                break;
+            case Rule.Argument:
+                // A value passed to a parameter of a reference type is boxed (by reference too, through a temporary).
+                fits = value && !IsValueType(hook) ? AssignableTo(game, hook) : byRef ? Same(hook, game) : AssignableTo(game, hook);
+                break;
+            default:
+                fits = byRef ? Same(hook, game) : AssignableTo(game, hook);
+                break;
+        }
+        Check(fits, what + ": " + name + " (" + (byRef ? "ref " : "") + Name(hook) + ") can take the " + Name(game) + " Harmony passes");
+    }
+
+    /// <summary>A type's name as reflection writes it (nested types with '+'), generic arguments included.</summary>
+    private static string Name(TypeReference type)
+    {
+        return Normalize(type.FullName);
+    }
+
+    private static bool Same(TypeReference a, TypeReference b)
+    {
+        return Name(a) == Name(b);
+    }
+
+    private static bool IsValueType(TypeReference type)
+    {
+        if (type is GenericParameter || type is ArrayType) return false;
+        try
+        {
+            TypeDefinition definition = type.Resolve();
+            return definition != null ? definition.IsValueType : type.IsValueType;
+        }
+        catch
+        {
+            return type.IsValueType;
+        }
+    }
+
+    /// <summary>Whether a value of type 'from' is one of type 'to' without a conversion: the same type, one of its base types or interfaces, or object.</summary>
+    private static bool AssignableTo(TypeReference from, TypeReference to)
+    {
+        string target = Name(to);
+        if (target == "System.Object" || Name(from) == target) return true;
+        var seen = new HashSet<string>();
+        var pending = new Queue<TypeReference>();
+        pending.Enqueue(from);
+        while (pending.Count > 0)
+        {
+            TypeReference current = pending.Dequeue();
+            if (!seen.Add(Name(current))) continue;
+            if (Name(current) == target) return true;
+            TypeDefinition definition;
+            try
+            {
+                definition = current.Resolve();
+            }
+            catch
+            {
+                definition = null;
+            }
+            if (definition == null) continue;
+            if (definition.BaseType != null) pending.Enqueue(definition.BaseType);
+            foreach (InterfaceImplementation implemented in definition.Interfaces) pending.Enqueue(implemented.InterfaceType);
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------------ 1. transpiler targets
+
+    /// <summary>A game member looked up by name: Type, Field, Method or Property, its type's name and its own.</summary>
+    private sealed class Lookup
+    {
+        public string Kind;
+        public string TypeName;
+        public string Member;
+
+        public override string ToString()
+        {
+            return TypeName + "." + Member;
+        }
+    }
+
+    /// <summary>
+    /// A transpiler changes the calls (or reads) of game members its code looks up by name: the GameMember lookups whose
+    /// results it reads from its class's static fields, in its own code and in the code of its class it calls (an iterator's
+    /// body included). Its target must still have one of them, or the transpiler changes nothing (Patcher.NothingReplaced).
+    /// </summary>
+    private static void CheckTranspilerTarget(MethodDefinition hook, MethodDefinition target, string what)
+    {
+        List<Lookup> lookups = TranspilerLookups(hook);
+        if (lookups.Count == 0)
+        {
+            Check(false, what + ": the transpiler looks up what it replaces with GameMember, into a static field (the checker can't tell what it replaces)");
+            return;
+        }
+        Lookup found = lookups.FirstOrDefault(lookup => Uses(target, lookup));
+        Check(found != null, what + ": target still uses what the transpiler replaces (" + (found != null ? found.ToString() : "none of: " + string.Join(", ", lookups.Select(l => l.ToString()).Distinct())) + ")");
+    }
+
+    private static List<Lookup> TranspilerLookups(MethodDefinition hook)
+    {
+        TypeDefinition home = hook.DeclaringType;
+        var fields = new List<FieldDefinition>();
+        var seen = new HashSet<MethodDefinition>();
+        var pending = new Queue<MethodDefinition>();
+        pending.Enqueue(hook);
+        while (pending.Count > 0)
+        {
+            MethodDefinition method = pending.Dequeue();
+            if (!seen.Add(method) || !method.HasBody) continue;
+            foreach (Instruction instruction in method.Body.Instructions)
+            {
+                var field = instruction.Operand as FieldReference;
+                if (field != null && instruction.OpCode == OpCodes.Ldsfld)
+                {
+                    FieldDefinition definition = ResolveField(field);
+                    if (definition != null && definition.Module == home.Module && !fields.Contains(definition)) fields.Add(definition);
+                    continue;
+                }
+                var called = instruction.Operand as MethodReference;
+                if (called == null) continue;
+                MethodDefinition callee = ResolveMethod(called);
+                if (callee == null || !Within(callee.DeclaringType, home)) continue;
+                pending.Enqueue(callee);
+                // An iterator: its body is in the class the compiler makes for it, created here.
+                if (callee.IsConstructor && callee.DeclaringType != home)
+                {
+                    foreach (MethodDefinition part in callee.DeclaringType.Methods) pending.Enqueue(part);
+                }
+            }
+        }
+        var lookups = new List<Lookup>();
+        var followed = new HashSet<FieldDefinition>();
+        foreach (FieldDefinition field in fields) AddFieldLookups(field, lookups, followed);
+        return lookups;
+    }
+
+    /// <summary>Whether a type is the class or one nested in it (an iterator's, a lambda's).</summary>
+    private static bool Within(TypeDefinition type, TypeDefinition home)
+    {
+        for (TypeDefinition current = type; current != null; current = current.DeclaringType)
+        {
+            if (current == home) return true;
+        }
+        return false;
+    }
+
+    /// <summary>The GameMember lookups a static field of the plugin is set up from, in its class's static set-up (through other static fields too).</summary>
+    private static void AddFieldLookups(FieldDefinition field, List<Lookup> lookups, HashSet<FieldDefinition> followed)
+    {
+        if (!followed.Add(field)) return;
+        MethodDefinition setUp = field.DeclaringType.Methods.FirstOrDefault(m => m.IsConstructor && m.IsStatic && m.HasBody);
+        if (setUp == null) return;
+        IList<Instruction> code = setUp.Body.Instructions;
+        int start = 0;
+        for (int i = 0; i < code.Count; i++)
+        {
+            if (code[i].OpCode != OpCodes.Stsfld) continue;
+            FieldDefinition stored = ResolveField(code[i].Operand as FieldReference);
+            if (stored == field)
+            {
+                for (int j = start; j < i; j++)
+                {
+                    var call = code[j].Operand as MethodReference;
+                    if (call != null && (code[j].OpCode == OpCodes.Call || code[j].OpCode == OpCodes.Callvirt) && call.DeclaringType.FullName == MemberHelper)
+                    {
+                        Lookup lookup = ReadLookup(code, j, call);
+                        if (lookup != null && lookup.Kind != "Type") lookups.Add(lookup);
+                    }
+                    var other = code[j].OpCode == OpCodes.Ldsfld ? ResolveField(code[j].Operand as FieldReference) : null;
+                    if (other != null && other.Module == field.Module) AddFieldLookups(other, lookups, followed);
+                }
+            }
+            start = i + 1;
+        }
+    }
+
+    /// <summary>Whether a game method's code calls (or reads, for a field) the member looked up, on its type or one of its base types.</summary>
+    private static bool Uses(MethodDefinition target, Lookup lookup)
+    {
+        TypeDefinition type = FindType(lookup.TypeName);
+        var owners = new HashSet<string>(type != null ? Hierarchy(type).Select(t => Normalize(t.FullName)) : new[] { lookup.TypeName });
+        foreach (Instruction instruction in target.Body.Instructions)
+        {
+            var member = instruction.Operand as MemberReference;
+            if (member == null || member.DeclaringType == null) continue;
+            TypeReference owner = member.DeclaringType is GenericInstanceType ? ((GenericInstanceType)member.DeclaringType).ElementType : member.DeclaringType;
+            if (!owners.Contains(Normalize(owner.FullName))) continue;
+            if (lookup.Kind == "Field" ? member is FieldReference && member.Name == lookup.Member :
+                lookup.Kind == "Property" ? member is MethodReference && (member.Name == "get_" + lookup.Member || member.Name == "set_" + lookup.Member) :
+                member is MethodReference && member.Name == lookup.Member)
+                return true;
+        }
+        return false;
+    }
+
+    private static FieldDefinition ResolveField(FieldReference field)
+    {
+        if (field == null) return null;
+        try
+        {
+            return field.Resolve();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static MethodDefinition ResolveMethod(MethodReference method)
+    {
+        try
+        {
+            return method.Resolve();
+        }
+        catch
+        {
+            return null;
         }
     }
 
@@ -423,67 +747,344 @@ internal static class Program
                     var call = code[i].Operand as MethodReference;
                     if (call == null || (code[i].OpCode != OpCodes.Call && code[i].OpCode != OpCodes.Callvirt)) continue;
                     if (call.DeclaringType.FullName != MemberHelper) continue;
-                    int count = call.Name == "Type" ? 1 : (call.Name == "Field" || call.Name == "Method" || call.Name == "Property" ? 2 : 0);
-                    if (count == 0 || call.Parameters.Count != count) continue;
+                    int count = LookupArguments(call);
+                    if (count == 0) continue;
                     string where = " (in " + type.Name + "." + method.Name + ")";
-
-                    var names = new List<string>();
-                    if (count == 2 && call.Parameters[0].ParameterType.FullName == "System.Type")
+                    Lookup lookup = ReadLookup(code, i, call);
+                    if (lookup == null)
                     {
-                        // GameMember.X(typeof(T), "name"): ldtoken T; call Type.GetTypeFromHandle; ldstr "name"
-                        Instruction name = i - 1 >= 0 ? code[i - 1] : null;
-                        Instruction token = i - 3 >= 0 ? code[i - 3] : null;
-                        var typeRef = token != null && token.OpCode == OpCodes.Ldtoken ? token.Operand as TypeReference : null;
-                        if (typeRef == null || name == null || name.OpCode != OpCodes.Ldstr)
-                        {
-                            Check(false, "GameMember." + call.Name + " is called with typeof() and a constant name" + where);
-                            continue;
-                        }
-                        names.Add(Normalize((typeRef is GenericInstanceType ? ((GenericInstanceType)typeRef).ElementType : typeRef).FullName));
-                        names.Add((string)name.Operand);
-                        CheckLookup(call.Name, names, where);
+                        Check(false, "GameMember." + call.Name + " is called with " + (count == 2 && call.Parameters[0].ParameterType.FullName == "System.Type"
+                            ? "typeof() and a constant name"
+                            : "constant names") + where);
                         continue;
                     }
-
-                    for (int back = count; back >= 1; back--)
-                    {
-                        Instruction load = i - back >= 0 ? code[i - back] : null;
-                        names.Add(load != null && load.OpCode == OpCodes.Ldstr ? (string)load.Operand : null);
-                    }
-                    if (names.Any(n => n == null))
-                    {
-                        Check(false, "GameMember." + call.Name + " is called with constant names" + where);
-                        continue;
-                    }
-                    CheckLookup(call.Name, names, where);
+                    CheckLookup(lookup, true, where);
                 }
             }
         }
     }
 
-    private static void CheckLookup(string kind, List<string> names, string where)
+    /// <summary>How many arguments a GameMember lookup takes (1 for Type, 2 for a member); 0 for its other methods.</summary>
+    private static int LookupArguments(MethodReference call)
     {
-        TypeDefinition type = FindType(names[0]);
-        if (kind == "Type" || type == null)
+        int count = call.Name == "Type" ? 1 : (call.Name == "Field" || call.Name == "Method" || call.Name == "Property" ? 2 : 0);
+        return count != 0 && call.Parameters.Count == count ? count : 0;
+    }
+
+    /// <summary>
+    /// The member a GameMember lookup at code[i] names, read from its constant arguments: GameMember.X(typeof(T), "name")
+    /// (ldtoken T; call Type.GetTypeFromHandle; ldstr "name") or GameMember.X("T", "name"); null when they aren't constant.
+    /// </summary>
+    private static Lookup ReadLookup(IList<Instruction> code, int i, MethodReference call)
+    {
+        int count = LookupArguments(call);
+        if (count == 0) return null;
+        if (count == 2 && call.Parameters[0].ParameterType.FullName == "System.Type")
         {
-            Check(type != null, "type " + names[0] + " exists" + where);
+            Instruction name = i - 1 >= 0 ? code[i - 1] : null;
+            Instruction token = i - 3 >= 0 ? code[i - 3] : null;
+            var typeRef = token != null && token.OpCode == OpCodes.Ldtoken ? token.Operand as TypeReference : null;
+            if (typeRef == null || name == null || name.OpCode != OpCodes.Ldstr) return null;
+            return new Lookup { Kind = call.Name, TypeName = ElementName(typeRef), Member = (string)name.Operand };
+        }
+        var names = new List<string>();
+        for (int back = count; back >= 1; back--)
+        {
+            Instruction load = i - back >= 0 ? code[i - back] : null;
+            names.Add(load != null && load.OpCode == OpCodes.Ldstr ? (string)load.Operand : null);
+        }
+        if (names.Any(n => n == null)) return null;
+        return new Lookup { Kind = call.Name, TypeName = names[0], Member = count == 2 ? names[1] : null };
+    }
+
+    /// <summary>A type's name without its generic arguments (List`1 for List&lt;T&gt;), as GameMember's checks look it up.</summary>
+    private static string ElementName(TypeReference type)
+    {
+        return Normalize((type is GenericInstanceType ? ((GenericInstanceType)type).ElementType : type).FullName);
+    }
+
+    /// <summary>Checks that a looked-up member exists; a method (or property) looked up without argument types exactly once.</summary>
+    private static void CheckLookup(Lookup lookup, bool once, string where)
+    {
+        TypeDefinition type = FindType(lookup.TypeName);
+        if (lookup.Kind == "Type" || type == null)
+        {
+            Check(type != null, "type " + lookup.TypeName + " exists" + where);
             return;
         }
-        string member = names[1];
-        string what = kind.ToLowerInvariant() + " " + names[0] + "." + member;
-        if (kind == "Field")
+        string member = lookup.Member;
+        string what = lookup.Kind.ToLowerInvariant() + " " + lookup.TypeName + "." + member;
+        if (lookup.Kind == "Field")
         {
             Check(Hierarchy(type).Any(t => t.Fields.Any(f => f.Name == member)), what + " exists" + where);
         }
-        else if (kind == "Property")
+        else if (lookup.Kind == "Property")
         {
-            Check(Hierarchy(type).Any(t => t.Properties.Any(p => p.Name == member)), what + " exists" + where);
+            TypeDefinition level = Hierarchy(type).FirstOrDefault(t => t.Properties.Any(p => p.Name == member));
+            int count = level == null ? 0 : level.Properties.Count(p => p.Name == member);
+            if (once && count > 1) Check(false, what + " exists exactly once (found " + count + ")" + where);
+            else Check(count > 0, what + " exists" + where);
         }
         else
         {
             TypeDefinition level = Hierarchy(type).FirstOrDefault(t => t.Methods.Any(m => m.Name == member));
             int count = level == null ? 0 : level.Methods.Count(m => m.Name == member);
-            Check(count == 1, what + " exists exactly once (found " + count + ")" + where);
+            if (once) Check(count == 1, what + " exists exactly once (found " + count + ")" + where);
+            else Check(count > 0, what + " exists" + where);
         }
+    }
+
+    // ------------------------------------------------------------------ 4. lookups by name outside GameMember
+
+    /// <summary>The reflection calls that find a member by name, and the kind of member each finds.</summary>
+    private static readonly Dictionary<string, string> NamedLookups = new Dictionary<string, string>
+    {
+        { "HarmonyLib.AccessTools::Method", "Method" }, { "HarmonyLib.AccessTools::DeclaredMethod", "Method" },
+        { "HarmonyLib.AccessTools::Field", "Field" }, { "HarmonyLib.AccessTools::DeclaredField", "Field" },
+        { "HarmonyLib.AccessTools::Property", "Property" }, { "HarmonyLib.AccessTools::DeclaredProperty", "Property" },
+        { "HarmonyLib.AccessTools::PropertyGetter", "Property" }, { "HarmonyLib.AccessTools::PropertySetter", "Property" },
+        { "HarmonyLib.AccessTools::DeclaredPropertyGetter", "Property" }, { "HarmonyLib.AccessTools::DeclaredPropertySetter", "Property" },
+        { "HarmonyLib.AccessTools::FieldRefAccess", "Field" }, { "HarmonyLib.AccessTools::StaticFieldRefAccess", "Field" },
+        { "System.Type::GetMethod", "Method" }, { "System.Type::GetField", "Field" }, { "System.Type::GetProperty", "Property" }
+    };
+
+    /// <summary>
+    /// Every lookup by name (AccessTools, Type.GetMethod and the like) outside GameMember: on a game type named with typeof(),
+    /// the member must exist (a method or property looked up without argument types exactly once, or AccessTools and
+    /// Type.GetMethod throw), and the lookup must not be in a static set-up, where a throw breaks every hook of the class
+    /// (GameMember never throws). The plugin's own types aren't checked; a type only known at run time gets a note. GameMember
+    /// and the patch system (Patcher) are left out: their lookups by name are those checks 1 and 2 verify.
+    /// </summary>
+    private static void CheckOtherLookups(ModuleDefinition plugin)
+    {
+        TypeDefinition helper = plugin.GetType(MemberHelper);
+        TypeDefinition patcher = plugin.GetType(PatcherClass);
+        foreach (TypeDefinition type in plugin.GetTypes())
+        {
+            if (Within(type, helper) || Within(type, patcher)) continue;
+            foreach (MethodDefinition method in type.Methods.Where(m => m.HasBody))
+            {
+                IList<Instruction> code = method.Body.Instructions;
+                for (int i = 0; i < code.Count; i++)
+                {
+                    var call = code[i].Operand as MethodReference;
+                    if (call == null || (code[i].OpCode != OpCodes.Call && code[i].OpCode != OpCodes.Callvirt)) continue;
+                    string kind;
+                    if (!NamedLookups.TryGetValue(call.DeclaringType.FullName + "::" + call.Name, out kind)) continue;
+                    if (!call.Parameters.Any(p => p.ParameterType.FullName == "System.String")) continue;
+                    string where = " (in " + type.Name + "." + method.Name + ")";
+                    // The name: the constant loaded last before the call (its other arguments are flags or argument types);
+                    // the type: typeof() loaded before that.
+                    int nameAt = -1;
+                    for (int back = i - 1; back >= 0 && back >= i - 24; back--)
+                    {
+                        if (code[back].OpCode == OpCodes.Ldstr)
+                        {
+                            nameAt = back;
+                            break;
+                        }
+                    }
+                    TypeReference owner = nameAt >= 2 && code[nameAt - 1].OpCode == OpCodes.Call && ((MethodReference)code[nameAt - 1].Operand).Name == "GetTypeFromHandle" &&
+                                          code[nameAt - 2].OpCode == OpCodes.Ldtoken
+                        ? code[nameAt - 2].Operand as TypeReference
+                        : null;
+                    string shown = call.DeclaringType.Name + "." + call.Name + (nameAt >= 0 ? "(\"" + code[nameAt].Operand + "\")" : "");
+                    if (owner == null)
+                    {
+                        Note("a lookup by name the checker can't verify (its type is only known at run time): " + shown + where);
+                        continue;
+                    }
+                    if (!FromGame(owner)) continue;
+                    bool withTypes = call.Parameters.Any(p => p.ParameterType.FullName == "System.Type[]") && !ArgumentIsNull(code, nameAt, i);
+                    bool canThrow = (kind == "Method" || kind == "Property") && !withTypes;
+                    var lookup = new Lookup { Kind = kind, TypeName = ElementName(owner), Member = (string)code[nameAt].Operand };
+                    CheckLookup(lookup, canThrow, " (" + shown + where + ")");
+                    if (method.IsConstructor && method.IsStatic && canThrow)
+                        Check(false, shown + where + " is in a static set-up and throws if a game update adds an overload, which would break every hook of " +
+                                     type.Name + ": look it up with GameMember, which never throws");
+                }
+            }
+        }
+    }
+
+    /// <summary>Whether a lookup's argument types were left out: between the name and the call only nulls and flags are loaded.</summary>
+    private static bool ArgumentIsNull(IList<Instruction> code, int nameAt, int callAt)
+    {
+        for (int i = nameAt + 1; i < callAt; i++)
+        {
+            OpCode op = code[i].OpCode;
+            if (op == OpCodes.Newarr || op == OpCodes.Ldsfld || op == OpCodes.Call || op == OpCodes.Callvirt || op == OpCodes.Ldloc || op == OpCodes.Ldloc_0 ||
+                op == OpCodes.Ldloc_1 || op == OpCodes.Ldloc_2 || op == OpCodes.Ldloc_3 || op == OpCodes.Ldloc_S || op == OpCodes.Ldarg || op == OpCodes.Ldarg_0 ||
+                op == OpCodes.Ldarg_1 || op == OpCodes.Ldarg_2 || op == OpCodes.Ldarg_3 || op == OpCodes.Ldarg_S)
+                return false;
+        }
+        return true;
+    }
+
+    // ------------------------------------------------------------------ 5. features
+
+    /// <summary>
+    /// The start-up report (Features.All) lists every feature with a patch applied at start-up, each feature it lists has one,
+    /// and every Feature constant names a feature with a patch.
+    /// </summary>
+    private static void CheckFeatures(ModuleDefinition plugin)
+    {
+        TypeDefinition features = plugin.GetType(FeaturesClass);
+        MethodDefinition setUp = features != null ? features.Methods.FirstOrDefault(m => m.IsConstructor && m.IsStatic && m.HasBody) : null;
+        if (setUp == null)
+        {
+            Check(false, FeaturesClass + " has its list of features (All)");
+            return;
+        }
+        // Its static set-up only fills All: every constant in it is a feature's name.
+        var listed = new HashSet<string>(setUp.Body.Instructions.Where(x => x.OpCode == OpCodes.Ldstr).Select(x => (string)x.Operand));
+        foreach (KeyValuePair<string, int> feature in StartupPatches.OrderBy(f => f.Key))
+        {
+            if (feature.Value == 0) continue;
+            Check(listed.Contains(feature.Key), "\"" + feature.Key + "\" (" + feature.Value + " patches at start-up) is in the start-up report (Features.All)");
+        }
+        foreach (string feature in listed.OrderBy(f => f))
+        {
+            int count;
+            StartupPatches.TryGetValue(feature, out count);
+            Check(count > 0, "\"" + feature + "\" in the start-up report has a patch applied at start-up");
+        }
+        foreach (TypeDefinition type in plugin.GetTypes())
+        {
+            FieldDefinition constant = type.Fields.FirstOrDefault(f => f.Name == "Feature" && f.HasConstant && f.Constant is string);
+            if (constant == null) continue;
+            Check(PatchedFeatures.Contains((string)constant.Constant), type.Name + ".Feature (\"" + constant.Constant + "\") names a feature that has a patch");
+        }
+    }
+
+    // ------------------------------------------------------------------ 4. __state between a prefix and its finalizer
+
+    /// <summary>
+    /// Harmony keeps one __state per patch class and game method, typed by the first of that class's patch methods there
+    /// that names it. So:
+    /// - a postfix or finalizer that reads __state needs a prefix of its class on the same method that sets it (out or ref)
+    ///   with the same type, or it always reads the type's default;
+    /// - an optional finalizer (or postfix) that ends a "player ship" (ShipRedirect.EndOverride) or a ship's event
+    ///   (ShipEvents.End) must take __state, so it ends only what its own prefix began. Patches go in one by one, so an
+    ///   optional prefix can be missing (a game update renamed an argument it reads) while its finalizer is in; a missing
+    ///   required patch switches its whole feature off instead.
+    /// </summary>
+    private static void CheckStatePairs(ModuleDefinition plugin)
+    {
+        var groups = new Dictionary<string, List<KeyValuePair<MethodDefinition, int>>>();
+        var labels = new Dictionary<string, string>();
+        foreach (TypeDefinition host in plugin.GetTypes())
+        {
+            foreach (MethodDefinition hook in host.Methods)
+            {
+                foreach (CustomAttribute attribute in hook.CustomAttributes.Where(a => a.AttributeType.FullName == AttributeName))
+                {
+                    string feature = (string)attribute.ConstructorArguments[0].Value;
+                    int kind = Convert.ToInt32(attribute.ConstructorArguments[3].Value);
+                    bool optional = false;
+                    string arguments = "", body = "";
+                    foreach (Mono.Cecil.CustomAttributeNamedArgument property in attribute.Properties)
+                    {
+                        var values = property.Argument.Value as CustomAttributeArgument[];
+                        if (property.Name == "Optional") optional = (bool)property.Argument.Value;
+                        else if (property.Name == "Coroutine" && (bool)property.Argument.Value) body = " (coroutine)";
+                        else if (property.Name == "Lambda") body = " (lambda " + property.Argument.Value + ")";
+                        else if (property.Name == "Arguments" && values != null) arguments = "(" + string.Join(", ", values.Select(v => (string)v.Value)) + ")";
+                    }
+                    if (kind == 3) continue;
+                    // The game method and the patch class (Harmony's __state is per both), written the same way whatever the
+                    // order of the attribute's settings.
+                    string key = (string)attribute.ConstructorArguments[1].Value + "." + (string)attribute.ConstructorArguments[2].Value + arguments + body +
+                                 " <- " + host.Name;
+                    if (!labels.ContainsKey(key)) labels[key] = "[" + feature + "] " + key;
+                    List<KeyValuePair<MethodDefinition, int>> group;
+                    if (!groups.TryGetValue(key, out group)) groups[key] = group = new List<KeyValuePair<MethodDefinition, int>>();
+                    group.Add(new KeyValuePair<MethodDefinition, int>(hook, kind));
+                    if (optional && kind != 0 && EndsWhatAPrefixBegan(hook))
+                        Check(StateOf(hook) != null,
+                            "[" + feature + "] " + key + "." + hook.Name + ": an optional finalizer that ends a \"player ship\" or a ship's event takes __state");
+                }
+            }
+        }
+        foreach (KeyValuePair<string, List<KeyValuePair<MethodDefinition, int>>> group in groups)
+        {
+            List<KeyValuePair<MethodDefinition, int>> withState = group.Value.Where(p => StateOf(p.Key) != null).ToList();
+            if (withState.Count == 0) continue;
+            List<string> types = withState.Select(p => Unref(StateOf(p.Key).ParameterType).FullName).Distinct().ToList();
+            bool prefixSets = withState.Any(p => p.Value == 0 && StateOf(p.Key).ParameterType is ByReferenceType);
+            bool prefixReadsOnly = withState.Any(p => p.Value == 0 && !(StateOf(p.Key).ParameterType is ByReferenceType));
+            List<string> readers = withState.Where(p => p.Value != 0).Select(p => p.Key.Name).ToList();
+            Check(types.Count == 1 && prefixSets && !prefixReadsOnly, labels[group.Key] + ": __state (" + string.Join(" / ", types) + ") set by a prefix, read by " +
+                                                                    (readers.Count > 0 ? string.Join(", ", readers) : "none"));
+        }
+    }
+
+    private static ParameterDefinition StateOf(MethodDefinition hook)
+    {
+        return hook.Parameters.FirstOrDefault(p => p.Name == "__state");
+    }
+
+    private static TypeReference Unref(TypeReference type)
+    {
+        var byRef = type as ByReferenceType;
+        return byRef != null ? byRef.ElementType : type;
+    }
+
+    /// <summary>
+    /// Whether a patch method's own code ends a "player ship" (ShipRedirect.EndOverride) or a ship's event (ShipEvents.End)
+    /// that it doesn't begin itself (a try/finally pair in one method is no prefix's).
+    /// </summary>
+    private static bool EndsWhatAPrefixBegan(MethodDefinition hook)
+    {
+        if (!hook.HasBody) return false;
+        int overrides = 0, events = 0;
+        foreach (Instruction instruction in hook.Body.Instructions)
+        {
+            var call = instruction.Operand as MethodReference;
+            if (call == null) continue;
+            string owner = call.DeclaringType.FullName;
+            if (owner == "VoidCrewFleet.ShipRedirect" && call.Name == "BeginOverride") overrides++;
+            else if (owner == "VoidCrewFleet.ShipRedirect" && call.Name == "EndOverride") overrides--;
+            else if (owner == "VoidCrewFleet.ShipEvents" && (call.Name == "Begin" || call.Name == "BeginFor")) events++;
+            else if (owner == "VoidCrewFleet.ShipEvents" && call.Name == "End") events--;
+        }
+        return overrides < 0 || events < 0;
+    }
+
+    // ------------------------------------------------------------------ 4. names in the game's HUD
+
+    /// <summary>
+    /// The elements of the game's HUD document (its UXML, which no assembly holds) that Fleet's PvP displays look up by name:
+    /// each with a game type whose own code looks the same name up, so a game update that renames one shows here, in the
+    /// game's code, rather than as a display that silently stops showing. (PvpHack's countdowns go into the HUD's mission
+    /// list and use its mission and objective templates as MissionDisplay does; ActionHint's prompt goes into the HUD's row
+    /// of key prompts, and writes the game's key prompt's action label.)
+    /// </summary>
+    private static readonly string[][] HudNames =
+    {
+        new[] { "MissionList", "MissionListUIController" },
+        new[] { "MissionName", "MissionDisplay" },
+        new[] { "MissionBody", "MissionDisplay" },
+        new[] { "ObjectiveName", "MissionDisplay" },
+        new[] { "BodyContainer", "MissionDisplay" },
+        new[] { "ObjectiveTimer", "MissionDisplay" },
+        new[] { "InteractionInfoContainer", "UI.MainHUD.HUDInteractionInfo" },
+        new[] { "Action", "UI.Core.KeyBindVE" }
+    };
+
+    private static void CheckHudNames()
+    {
+        foreach (string[] pair in HudNames)
+        {
+            TypeDefinition type = FindType(pair[1]);
+            Check(type != null && Names(type, pair[0]), "HUD element " + pair[0] + " is named by the game's own " + pair[1]);
+        }
+    }
+
+    /// <summary>Whether a type's code (its nested types' too: a coroutine's body is one) loads this text.</summary>
+    private static bool Names(TypeDefinition type, string text)
+    {
+        if (type.Methods.Where(m => m.HasBody).SelectMany(m => m.Body.Instructions).Any(i => i.OpCode == OpCodes.Ldstr && (string)i.Operand == text)) return true;
+        return type.NestedTypes.Any(nested => Names(nested, text));
     }
 }

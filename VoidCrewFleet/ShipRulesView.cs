@@ -11,7 +11,8 @@ namespace VoidCrewFleet
     /// single options a CUSTOM loadout may use, and how many starting alloys it may set; everyone else sees the same page
     /// and can't change it. The categories and options are Ship Customizer's own (its names, codes and tiers), so the tab
     /// only shows with a Customizer that lists them. Built like the loadout terminal: three sections with big headers over
-    /// its decorative lines, a list like its LOADOUTS list, rows like its RESOURCES list, and its small buttons.
+    /// its decorative lines, a list of the game's list entries like its LOADOUTS list (.metem-list-entry), rows like its
+    /// RESOURCES list (.ship-loadout-list-entry), and its small buttons.
     /// </summary>
     internal static class ShipRulesView
     {
@@ -28,6 +29,9 @@ namespace VoidCrewFleet
         private static List<string> _categories = new List<string>();
         private static float _optionsRead = -100f;
 
+        /// <summary>The Customizer's option lines the options were made from.</summary>
+        private static string[] _optionLines;
+
         private static VisualElement _view;
         private static Button _alloysButton;
         private static Button _clearButton;
@@ -43,7 +47,6 @@ namespace VoidCrewFleet
         private static bool _drawnEdit;
         private static bool _drawnChoosing;
         private static string _drawnSelected;
-        private static int _drawnOptions;
 
         /// <summary>Whether the tab can show: the Customizer lists what the rules can restrict.</summary>
         public static bool Available
@@ -130,13 +133,21 @@ namespace VoidCrewFleet
 
         // ---------------------------------------------------------------- the Customizer's options
 
-        private static void ReadOptions()
+        /// <summary>
+        /// Ship Customizer's options: asked again every 2 seconds while it lists none yet, and each time the tab is opened
+        /// (Opened), so options it lists later (once the hub's data has loaded, or after it updates its list) show too. The tab
+        /// is drawn again only when the list changed.
+        /// </summary>
+        private static void ReadOptions(bool again)
         {
-            if (_options.Count > 0 || Time.unscaledTime - _optionsRead < 2f) return;
+            if (!again && (_options.Count > 0 || Time.unscaledTime - _optionsRead < 2f)) return;
             _optionsRead = Time.unscaledTime;
+            string[] lines = CustomizerLink.GetRuleOptions();
+            if (SameLines(lines, _optionLines)) return;
+            _optionLines = lines;
             var options = new List<Option>();
             var categories = new List<string>();
-            foreach (string line in CustomizerLink.GetRuleOptions())
+            foreach (string line in lines)
             {
                 if (string.IsNullOrEmpty(line)) continue;
                 string[] parts = line.Split(new[] { '|' }, 4);
@@ -149,11 +160,29 @@ namespace VoidCrewFleet
             }
             _options = options;
             _categories = categories;
-            if (options.Count > 0)
+            if (_selected != null && !categories.Contains(_selected)) _selected = null;
+            _drawn = false;
+            if (options.Count > 0) Log.Info("Ship rules: Ship Customizer lists " + options.Count + " options in " + categories.Count + " categories.");
+        }
+
+        /// <summary>Whether two lists of the Customizer's option lines hold the same lines (no list counts as an empty one).</summary>
+        private static bool SameLines(string[] a, string[] b)
+        {
+            int count = a != null ? a.Length : 0;
+            if (count != (b != null ? b.Length : 0)) return false;
+            for (int i = 0; i < count; i++)
             {
-                _drawn = false;
-                Log.Info("Ship rules: Ship Customizer lists " + options.Count + " options in " + categories.Count + " categories.");
+                if (a[i] != b[i]) return false;
             }
+            return true;
+        }
+
+        /// <summary>The tab is opened (SHIP RULES pressed, or the lobby screen shows it): the Customizer's list is asked for again.</summary>
+        public static void Opened()
+        {
+            if (_view == null) return;
+            ReadOptions(true);
+            Refresh();
         }
 
         // ---------------------------------------------------------------- updating
@@ -162,20 +191,13 @@ namespace VoidCrewFleet
         public static void Refresh()
         {
             if (_view == null) return;
-            ReadOptions();
-            // The rules' JSON as the room (or the host's pending change) holds it: the same string until the rules change.
+            ReadOptions(false);
+            // The rules' JSON as this player goes by them (the host's own): the same string until the rules change.
             string json = ShipRules.ShownJson;
             bool edit = ShipRules.CanEdit;
             bool choosing = PvpTeams.HubChoosing;
             if (_selected == null && _categories.Count > 0) _selected = _categories[0];
-            if (_drawn && ReferenceEquals(json, _drawnJson) && edit == _drawnEdit && choosing == _drawnChoosing && _selected == _drawnSelected &&
-                _options.Count == _drawnOptions) return;
-            _drawn = true;
-            _drawnJson = json;
-            _drawnEdit = edit;
-            _drawnChoosing = choosing;
-            _drawnSelected = _selected;
-            _drawnOptions = _options.Count;
+            if (_drawn && ReferenceEquals(json, _drawnJson) && edit == _drawnEdit && choosing == _drawnChoosing && _selected == _drawnSelected) return;
             ShipRules.Rules rules = ShipRules.Shown;
             try
             {
@@ -200,34 +222,44 @@ namespace VoidCrewFleet
                 _itemList.Clear();
                 _itemsTitle.text = _selected ?? "OPTIONS";
                 foreach (Option option in _options.Where(o => o.Category == _selected)) _itemList.Add(OptionRow(option, rules));
+                // Noted only once it is all drawn: a tab that failed half-way is drawn again on the next tick.
+                _drawn = true;
+                _drawnJson = json;
+                _drawnEdit = edit;
+                _drawnChoosing = choosing;
+                _drawnSelected = _selected;
             }
             catch (Exception e)
             {
+                _drawn = false;
                 Log.Failure("Updating the ship rules tab", e);
             }
         }
 
         /// <summary>
-        /// A category, like a row of the terminal's LOADOUTS list: the one whose options are listed is filled orange, and
-        /// the row under the pointer white. Its button blocks or allows the whole category.
+        /// A category, one of the game's list entries (.metem-list-entry) like a row of the terminal's LOADOUTS list: the one
+        /// whose options are listed is the selected entry (orange), and the entry under the pointer turns white, as the game's
+        /// own do. Its button blocks or allows the whole category; it is one of the entry's own parts, so the entry's states
+        /// recolour it too.
         /// </summary>
         private static VisualElement CategoryRow(string category, ShipRules.Rules rules)
         {
             bool allowed = rules.CategoryAllowed(category);
-            bool picked = category == _selected;
             int banned = _options.Count(o => o.Category == category && !rules.ItemAllowed(o.Code));
 
             var row = new VisualElement();
+            row.AddToClassList("metem-list-entry");
+            row.EnableInClassList("unity-collection-view__item--selected", category == _selected);
             row.style.flexDirection = FlexDirection.Row;
             row.style.alignItems = Align.Center;
             row.style.justifyContent = Justify.SpaceBetween;
-            row.style.flexShrink = 0;
             row.style.minHeight = 40;
-            Ui.Padding(row, 3, 10);
+            row.style.paddingRight = 10;
             Label name = Ui.GameLabel(category + (banned > 0 ? "  (" + banned + " BANNED)" : ""), "ui-text-size__medium");
-            name.style.fontSize = 21;
+            name.EnableInClassList("ui-text-color__light-grey", !allowed);
             name.style.unityFontStyleAndWeight = FontStyle.Bold;
             name.style.flexShrink = 1;
+            name.style.marginLeft = 10;
             row.Add(name);
             Button toggle = Ui.GameButton(allowed ? "ALLOWED" : "BLOCKED", () => ToggleCategory(category), "metem-button-size__small");
             toggle.pickingMode = ShipRules.CanEdit ? PickingMode.Position : PickingMode.Ignore;
@@ -238,29 +270,9 @@ namespace VoidCrewFleet
             toggle.style.paddingTop = 0;
             toggle.style.paddingBottom = 0;
             toggle.style.flexShrink = 0;
+            // A blocked category's button stays red under the pointer too.
+            if (!allowed) toggle.style.unityBackgroundImageTintColor = Ui.Warning;
             row.Add(toggle);
-
-            Color background = picked ? Ui.GameOrange : Color.clear;
-            Color text = picked ? Color.black : (allowed ? Color.white : Ui.GameLightGrey);
-            Color toggleTint = allowed ? Color.white : Ui.Warning;
-            row.style.backgroundColor = background;
-            name.style.color = text;
-            toggle.style.unityBackgroundImageTintColor = toggleTint;
-            row.RegisterCallback<PointerEnterEvent>(e =>
-            {
-                if (picked) return;
-                row.style.backgroundColor = Color.white;
-                name.style.color = Color.black;
-                toggle.style.unityBackgroundImageTintColor = Color.black;
-                toggle.style.color = Color.black;
-            });
-            row.RegisterCallback<PointerLeaveEvent>(e =>
-            {
-                row.style.backgroundColor = background;
-                name.style.color = text;
-                toggle.style.unityBackgroundImageTintColor = toggleTint;
-                toggle.style.color = new StyleColor(StyleKeyword.Null);
-            });
             Ui.Click(row, () =>
             {
                 _selected = category;
@@ -269,7 +281,11 @@ namespace VoidCrewFleet
             return row;
         }
 
-        /// <summary>One option, like a row of the terminal's RESOURCES list: its name, and its tier or why the rules refuse it.</summary>
+        /// <summary>
+        /// One option, a row of the terminal's RESOURCES list (.ship-loadout-list-entry): its name, and its tier or why the rules
+        /// refuse it. For the host, who bans and allows options with a click, it is one of the game's list entries too
+        /// (.metem-list-entry), lighting up under the pointer.
+        /// </summary>
         private static VisualElement OptionRow(Option option, ShipRules.Rules rules)
         {
             // Ship Customizer bans a weapon's crate along with the weapon (the same GUID), so it can't be built from one.
@@ -277,23 +293,25 @@ namespace VoidCrewFleet
             bool banned = !rules.ItemAllowed(option.Code) || crateOfBanned;
             bool tierOff = !rules.TierAllowed(option.Tier);
             bool categoryOff = !rules.CategoryAllowed(option.Category);
-            VisualElement row = Ui.GameListRow();
-            Label name = Ui.GameLabel(option.Name, "ui-text-size__medium");
-            name.style.fontSize = 19;
+            bool edit = ShipRules.CanEdit;
+            var row = new VisualElement();
+            row.AddToClassList("ship-loadout-list-entry");
+            if (edit) row.AddToClassList("metem-list-entry");
+            row.pickingMode = edit ? PickingMode.Position : PickingMode.Ignore;
+            // A long name takes two lines: the row grows with it.
+            row.style.height = StyleKeyword.Auto;
+            row.style.minHeight = 34;
+            Label name = Ui.GameLabel(option.Name, "ui-text-size__small", banned || tierOff || categoryOff ? "ui-text-color__light-grey" : "ui-text-color__white");
             name.style.flexShrink = 1;
             name.style.whiteSpace = WhiteSpace.Normal;
-            name.style.color = banned || tierOff || categoryOff ? Ui.GameLightGrey : Color.white;
             row.Add(name);
             string state = crateOfBanned ? "WEAPON BANNED" : banned ? "BANNED" : tierOff ? "TIER OFF" : categoryOff ? "BLOCKED" : (option.Tier > 0 ? ShipRules.TierName(option.Tier) : "");
-            Label tag = Ui.GameLabel(state, "ui-text-size__small");
-            tag.style.fontSize = 16;
+            Label tag = Ui.GameLabel(state, "ui-text-size__ultra-small", banned ? "ui-text-color__red" : (tierOff || categoryOff) ? "ui-text-color__light-grey" : "ui-text-color__bright-grey");
             tag.style.flexShrink = 0;
             tag.style.unityFontStyleAndWeight = FontStyle.Bold;
-            tag.style.color = banned ? Ui.Warning : (tierOff || categoryOff) ? Ui.GameLightGrey : Ui.GameBrightGrey;
             tag.style.marginLeft = 8;
             row.Add(tag);
-            if (!ShipRules.CanEdit) return row;
-            Ui.Hover(row, Ui.GameDarkGrey, new Color(0.27f, 0.27f, 0.27f, 1f));
+            if (!edit) return row;
             Ui.Click(row, () =>
             {
                 if (crateOfBanned) PvpTeamScreen.Flash("Its weapon is banned, which bans its crate too: allow the weapon in WEAPONS.");

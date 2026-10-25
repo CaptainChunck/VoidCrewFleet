@@ -19,6 +19,7 @@ using Gameplay.Chat;
 using HarmonyLib;
 using Photon.Pun;
 using ToolClasses;
+using UI.Core;
 using UI.MainHUD;
 using UnityEngine;
 using UnityEngine.InputSystem;
@@ -42,8 +43,9 @@ namespace VoidCrewFleet
     /// The camera is a Cinemachine virtual camera on the game's own camera rig (as the game's own debug camera is), above
     /// the character's and the pilot's cameras and below a ship's death camera. The game's HUD and markers stay hidden while
     /// they watch (closing a menu doesn't bring them back), but not its text chat: spectators talk among themselves. A
-    /// waiting player's loading screen is lifted. A label in the game's HUD style says who is watched; for a spectator
-    /// without a character, who has no chat, it also shows Fleet's notices. A waiting player who gets a seat has the HUD
+    /// waiting player's loading screen is lifted. A panel at the top of the screen, the game's own (its void jump panel's
+    /// look), says who is watched, with the game's key prompts for the view's keys; a spectator without a character, who has
+    /// no chat, gets Fleet's notices in the game's subtitle boxes at the bottom. A waiting player who gets a seat has the HUD
     /// back once their character is there.
     /// </summary>
     internal static class Spectator
@@ -56,10 +58,10 @@ namespace VoidCrewFleet
         /// <summary>How far above the middle of the fleet a waiting player without a team looks out from (no ship to make out).</summary>
         private const float NeutralHeight = 20000f;
 
-        /// <summary>How often the view reads the living ships again (FleetShips makes a new list for each read).</summary>
+        /// <summary>How often the view reads the living ships again (each read looks at every ship's slot).</summary>
         private const float ShipReadSeconds = 0.25f;
 
-        /// <summary>How long a notice stays over the label (the last NoticeFadeSeconds of it fading out), and how many show at once.</summary>
+        /// <summary>How long a notice stays (the last NoticeFadeSeconds of it fading out), and how many show at once.</summary>
         private const float NoticeSeconds = 10f;
         private const float NoticeFadeSeconds = 2f;
         private const int NoticeLines = 3;
@@ -80,9 +82,17 @@ namespace VoidCrewFleet
         private static float _nextPrepare;
         private static bool _endHandled;
         private static UIDocument _document;
-        private static Label _title;
-        private static Label _hint;
         private static bool _labelUnderMenu;
+
+        // The panel: its header (what the player is: lost their ship, or waiting), its big line (the watched ship), and its row
+        // of the game's key prompts (Q and E for the other ships, given their keys once the panel is on screen) and controls.
+        private static Label _header;
+        private static Label _title;
+        private static KeyBindVE _previousPrompt;
+        private static KeyBindVE _nextPrompt;
+        private static bool _keysGiven;
+        private static Label _shipKeys;
+        private static Label _look;
 
         /// <summary>The game's HUD canvas the view switched off, switched on again with the rest of the HUD (RestoreHudWhenPlaying).</summary>
         private static Canvas _hiddenCanvas;
@@ -110,7 +120,9 @@ namespace VoidCrewFleet
         private static int _labelSlot;
         private static int _labelShips;
 
-        // Fleet's notices over the label, for a spectator without a text chat: the lines (oldest first) and when each goes.
+        // Fleet's notices, for a spectator without a text chat: the game's subtitle boxes and their lines (oldest first), and
+        // when each goes.
+        private static readonly VisualElement[] NoticeBoxes = new VisualElement[NoticeLines];
         private static readonly Label[] NoticeLabels = new Label[NoticeLines];
         private static readonly float[] NoticeUntil = new float[NoticeLines];
         private static bool _noticesShown;
@@ -411,17 +423,15 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
-        /// Reads the living ships into LivingSlots when the last read is ShipReadSeconds old, or at once: FleetShips makes a new
-        /// list for each read, which the view would otherwise do every frame. A ship that starts dying leaves the view within
-        /// that time.
+        /// Reads the living ships into LivingSlots (a list kept for it: nothing is allocated) when the last read is
+        /// ShipReadSeconds old, or at once, rather than every frame. A ship that starts dying leaves the view within that time.
         /// </summary>
         private static void ReadShips(bool now)
         {
             float time = Time.unscaledTime;
             if (!now && time - _shipsReadAt < ShipReadSeconds) return;
             _shipsReadAt = time;
-            LivingSlots.Clear();
-            foreach (int slot in FleetShips.AliveSlots()) LivingSlots.Add(slot);
+            FleetShips.AliveSlots(LivingSlots);
         }
 
         /// <summary>
@@ -582,6 +592,7 @@ namespace VoidCrewFleet
             if (show) MakeLabel();
             if (_document != null && _document.rootVisualElement != null)
                 _document.rootVisualElement.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
+            if (show) GiveKeys();
         }
 
         /// <summary>
@@ -602,45 +613,110 @@ namespace VoidCrewFleet
             if (_document != null && _document.rootVisualElement != null) _document.rootVisualElement.style.display = DisplayStyle.None;
         }
 
-        /// <summary>The label's overlay, made once.</summary>
+        /// <summary>
+        /// The label's overlay, made once: the game's HUD is hidden while the player watches, so this is a screen of its own,
+        /// built from the game's own classes and art (its style sheets attached by name):
+        /// - at the top, the panel the game shows for a void jump's next objective (VoidFlowStyles: its fill, light blue outline,
+        ///   header and big line), saying what the player is and which ship they watch, over a row of the game's key prompts;
+        /// - at the bottom, where the game shows its subtitles, Fleet's notices in its subtitle boxes (SubtitlesStyles).
+        /// </summary>
         private static void MakeLabel()
         {
-            if (_document == null)
+            if (_document != null) return;
+            _document = Ui.CreateOverlay("Void Crew Fleet spectator", 4000);
+            if (_document == null || _document.rootVisualElement == null) return;
+            VisualElement root = _document.rootVisualElement;
+            root.pickingMode = PickingMode.Ignore;
+            Ui.UseGameStyles(root);
+            PvpTeamScreen.UseGameSheets(root, "VoidFlowStyles", "SubtitlesStyles");
+
+            // Where the game's HUD keeps its void jump panel: centred, 35 px from the top.
+            var top = new VisualElement { pickingMode = PickingMode.Ignore };
+            top.style.position = Position.Absolute;
+            top.style.left = 0;
+            top.style.right = 0;
+            top.style.top = 35;
+            top.style.flexDirection = FlexDirection.Row;
+            top.style.justifyContent = Justify.Center;
+            var panel = new VisualElement { name = "Panel", pickingMode = PickingMode.Ignore };
+            panel.AddToClassList("voidflow-panel");
+            var outline = new VisualElement { name = "Outline", pickingMode = PickingMode.Ignore };
+            outline.AddToClassList("voidflow-panel-outline");
+            panel.Add(outline);
+            _header = Ui.GameLabel("", "ui-text-size__small-plus", "voidflow-panel-header");
+            panel.Add(_header);
+            _title = Ui.GameLabel("", "ui-text-size__mediumPlus", "voidflow-panel-selected");
+            panel.Add(_title);
+            var keys = new VisualElement { pickingMode = PickingMode.Ignore };
+            keys.AddToClassList("keybind-container");
+            keys.style.alignItems = Align.Center;
+            keys.style.marginBottom = 12;
+            _previousPrompt = new KeyBindVE("FleetSpectatorPrevious", "", true) { pickingMode = PickingMode.Ignore };
+            keys.Add(_previousPrompt);
+            _nextPrompt = new KeyBindVE("FleetSpectatorNext", "", false) { pickingMode = PickingMode.Ignore };
+            keys.Add(_nextPrompt);
+            // Without the game's prompts (GiveKeys couldn't give them their keys): the keys as text, in the prompts' style.
+            _shipKeys = Ui.GameLabel("Q / E: OTHER SHIP", "keybind-action-name");
+            _shipKeys.style.display = DisplayStyle.None;
+            keys.Add(_shipKeys);
+            _look = Ui.GameLabel("", "keybind-action-name");
+            _look.style.marginLeft = 20;
+            keys.Add(_look);
+            panel.Add(keys);
+            top.Add(panel);
+            root.Add(top);
+
+            // Where the game's HUD shows its subtitles: centred, near the bottom, the newest at the bottom.
+            var bottom = new VisualElement { pickingMode = PickingMode.Ignore };
+            bottom.style.position = Position.Absolute;
+            bottom.style.left = 0;
+            bottom.style.right = 0;
+            bottom.style.bottom = 77;
+            bottom.style.alignItems = Align.Center;
+            for (int i = 0; i < NoticeLines; i++)
             {
-                _document = Ui.CreateOverlay("Void Crew Fleet spectator", 4000);
-                if (_document != null && _document.rootVisualElement != null)
-                {
-                    VisualElement root = _document.rootVisualElement;
-                    root.pickingMode = PickingMode.Ignore;
-                    Ui.UseGameStyles(root);
-                    var box = new VisualElement { pickingMode = PickingMode.Ignore };
-                    box.style.position = Position.Absolute;
-                    box.style.left = 0;
-                    box.style.right = 0;
-                    box.style.bottom = 70;
-                    box.style.alignItems = Align.Center;
-                    // Fleet's notices for a spectator without a text chat (ShowNotice), above the label. Player names in them
-                    // show as typed, not as markup.
-                    for (int i = 0; i < NoticeLines; i++)
-                    {
-                        Label line = Ui.HudLabel("", 20, Color.white);
-                        line.enableRichText = false;
-                        line.style.maxWidth = 1100;
-                        line.style.unityTextAlign = TextAnchor.UpperCenter;
-                        line.style.marginBottom = 6;
-                        line.style.display = DisplayStyle.None;
-                        NoticeLabels[i] = line;
-                        box.Add(line);
-                    }
-                    _title = Ui.HudLabel("", 30, Ui.GameOrange);
-                    _title.style.unityFontStyleAndWeight = FontStyle.Bold;
-                    _hint = Ui.HudLabel("", 20, Ui.GameBrightGrey);
-                    _hint.style.marginTop = 4;
-                    box.Add(_title);
-                    box.Add(_hint);
-                    root.Add(box);
-                }
+                var box = new VisualElement { pickingMode = PickingMode.Ignore };
+                box.AddToClassList("subtitles-textbox");
+                box.style.marginTop = 6;
+                box.style.display = DisplayStyle.None;
+                Label line = Ui.GameLabel("", "subtitles-label");
+                // Player names in them show as typed, not as markup.
+                line.enableRichText = false;
+                box.Add(line);
+                NoticeBoxes[i] = box;
+                NoticeLabels[i] = line;
+                bottom.Add(box);
             }
+            root.Add(bottom);
+            _keysGiven = false;
+        }
+
+        /// <summary>
+        /// The Q and E prompts get their keys (the game's icons for Q and E, or a gamepad's shoulder buttons) once the panel is on
+        /// screen: a prompt looks its key up as it attaches. Without the game's way to give them a key, the keys show as text.
+        /// </summary>
+        private static void GiveKeys()
+        {
+            if (_keysGiven || _previousPrompt == null || _previousPrompt.panel == null) return;
+            _keysGiven = true;
+            try
+            {
+                bool given = ActionHint.GiveKey(_previousPrompt, "<Keyboard>/q", ActionHint.KeyAction("<Keyboard>/q", "<Gamepad>/leftShoulder")) &&
+                             ActionHint.GiveKey(_nextPrompt, "<Keyboard>/e", ActionHint.KeyAction("<Keyboard>/e", "<Gamepad>/rightShoulder"));
+                Label action = _nextPrompt.Q<Label>("Action");
+                if (action != null) action.text = "OTHER SHIP";
+                if (given) return;
+                Log.WarnOnce("spectator prompts", "The game's key prompts can't be given a key any more; the spectator view names its keys as text.");
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Giving the spectator view's key prompts their keys", e);
+            }
+            _previousPrompt.style.display = DisplayStyle.None;
+            _nextPrompt.style.display = DisplayStyle.None;
+            _previousPrompt = null;
+            _nextPrompt = null;
+            _labelSet = false;
         }
 
         /// <summary>The label for the watched ship (slot -1: none, a waiting player without a team); written only when it changes.</summary>
@@ -654,28 +730,35 @@ namespace VoidCrewFleet
             _labelTeam = entry.Team;
             _labelSlot = slot;
             _labelShips = ships;
+            string waiting = "WAITING FOR A PLACE" + (entry.Team >= 0 && FleetSession.IsPvP ? " ON THE " + PvpTeams.TeamName(entry.Team) + " TEAM" : "");
+            bool otherShips = slot >= 0 && ships > 1;
+            bool prompts = _previousPrompt != null && _keysGiven;
+            if (_previousPrompt != null) _previousPrompt.style.display = otherShips && prompts ? DisplayStyle.Flex : DisplayStyle.None;
+            if (_nextPrompt != null) _nextPrompt.style.display = otherShips && prompts ? DisplayStyle.Flex : DisplayStyle.None;
+            _shipKeys.style.display = otherShips && !prompts ? DisplayStyle.Flex : DisplayStyle.None;
+            _look.style.marginLeft = otherShips ? 20 : 0;
             if (slot < 0)
             {
-                _title.text = "WAITING FOR A PLACE";
-                _hint.text = "MOUSE: LOOK AROUND";
+                _header.text = waiting;
+                _title.text = "YOU GET A TEAM WHEN A PLACE OPENS";
+                _look.text = "MOUSE: LOOK AROUND";
                 return;
             }
             string watched = FleetSlots.Name(slot, FleetSession.IsPvP);
             FleetPlan plan = FleetSession.Current;
             ShipPlan shipPlan = plan != null ? plan.Ship(slot) : null;
             if (shipPlan != null && !shipPlan.Type.IsNull) watched += " (" + FleetSlots.TypeName(shipPlan.Type) + ")";
-            _title.text = entry.State == CrewState.Dead
-                ? "YOUR SHIP IS LOST · WATCHING " + watched
-                : "WAITING FOR A PLACE" + (entry.Team >= 0 && FleetSession.IsPvP ? " ON THE " + PvpTeams.TeamName(entry.Team) + " TEAM" : "") + " · WATCHING " + watched;
-            _hint.text = ships > 1 ? "Q / E: OTHER SHIP     MOUSE: LOOK AROUND     WHEEL: ZOOM" : "MOUSE: LOOK AROUND     WHEEL: ZOOM";
+            _header.text = entry.State == CrewState.Dead ? "YOUR SHIP IS LOST" : waiting;
+            _title.text = "WATCHING " + watched;
+            _look.text = "MOUSE: LOOK AROUND     WHEEL: ZOOM";
         }
 
         // ---------------------------------------------------------------- notices without a chat
 
         /// <summary>
         /// One of Fleet's notices for a spectator without a text chat (the chat is part of the character: a waiting player, or
-        /// one back after their ship was lost, has none): a line over the label for NoticeSeconds, the newest at the bottom.
-        /// Nothing while the view is closed.
+        /// one back after their ship was lost, has none): a subtitle box for NoticeSeconds, the newest at the bottom. Nothing
+        /// while the view is closed.
         /// </summary>
         public static void ShowNotice(string message)
         {
@@ -687,7 +770,7 @@ namespace VoidCrewFleet
                     NoticeLabels[i].text = NoticeLabels[i + 1].text;
                     NoticeUntil[i] = NoticeUntil[i + 1];
                 }
-                NoticeLabels[NoticeLines - 1].text = message.ToUpperInvariant();
+                NoticeLabels[NoticeLines - 1].text = message;
                 NoticeUntil[NoticeLines - 1] = Time.unscaledTime + NoticeSeconds;
                 _noticesShown = true;
                 FadeNotices();
@@ -706,11 +789,11 @@ namespace VoidCrewFleet
             bool any = false;
             for (int i = 0; i < NoticeLines; i++)
             {
-                Label line = NoticeLabels[i];
-                if (line == null) continue;
+                VisualElement box = NoticeBoxes[i];
+                if (box == null) continue;
                 float left = NoticeUntil[i] - now;
-                line.style.display = left > 0f ? DisplayStyle.Flex : DisplayStyle.None;
-                line.style.opacity = Mathf.Clamp01(left / NoticeFadeSeconds);
+                box.style.display = left > 0f ? DisplayStyle.Flex : DisplayStyle.None;
+                box.style.opacity = Mathf.Clamp01(left / NoticeFadeSeconds);
                 if (left > 0f) any = true;
             }
             _noticesShown = any;
@@ -722,7 +805,7 @@ namespace VoidCrewFleet
             for (int i = 0; i < NoticeLines; i++)
             {
                 NoticeUntil[i] = 0f;
-                if (NoticeLabels[i] != null) NoticeLabels[i].style.display = DisplayStyle.None;
+                if (NoticeBoxes[i] != null) NoticeBoxes[i].style.display = DisplayStyle.None;
             }
             _noticesShown = false;
         }
@@ -875,28 +958,13 @@ namespace VoidCrewFleet
 
         /// <summary>An occlusion controller's hull parts, read without a reflection call; null when the field is missing.</summary>
         private static readonly AccessTools.FieldRef<LocalPlayerOcclusionController, List<IOcclusionNode>> OcclusionNodes =
-            FieldRef<LocalPlayerOcclusionController, List<IOcclusionNode>>(OcclusionNodesField);
+            PvpCombat.FieldRef<LocalPlayerOcclusionController, List<IOcclusionNode>>(OcclusionNodesField);
 
         /// <summary>
         /// The occlusion controllers whose hull parts are shown as from open space, by instance ID, with how many parts each
         /// had then: a controller is done again only when it is new or its parts have changed.
         /// </summary>
         private static readonly Dictionary<int, int> ShownFromSpace = new Dictionary<int, int>();
-
-        /// <summary>A reader for a field of a game object (no reflection call per read); null when the field is missing.</summary>
-        private static AccessTools.FieldRef<T, F> FieldRef<T, F>(FieldInfo field) where T : class
-        {
-            if (field == null) return null;
-            try
-            {
-                return AccessTools.FieldRefAccess<T, F>(field);
-            }
-            catch (Exception e)
-            {
-                Log.Warn("Game field " + field.DeclaringType.Name + "." + field.Name + " can't be read directly (" + e.Message + "); the game may have changed.");
-                return null;
-            }
-        }
 
         /// <summary>
         /// The ships' hidden parts (interior walls, exterior plates) are shown or hidden for where the local player is. A

@@ -151,6 +151,52 @@ namespace VoidCrewFleet
         }
 
         /// <summary>
+        /// Whether every kind of progression can be paused here, so a mission can be played without progression: the rewards
+        /// patch (the feature is off without it) and, for each other kind, at least one of its patches. The game hands these
+        /// calls along a chain of wrappers around the player's profile (the profile's own, the cloud's, Steam's, each passing
+        /// it on), so a patch anywhere in the chain stops the whole call. A data shard's codex entry is unlocked where the
+        /// shard is delivered, which then tells everyone else: that first patch is the one needed. The trackers need both
+        /// halves (finishing trackers that never started would save zeros), and fleet runs must not be saved. Without all of
+        /// them fleet missions are off (HubFleet.FleetReady) and rooms this player hosts keep to the game's own six players
+        /// (PlayerCap), so no mission needs a pause.
+        /// </summary>
+        public static bool Complete
+        {
+            get
+            {
+                string missing = MissingKinds();
+                if (missing == null) return true;
+                Log.WarnOnce("progression incomplete", "Not every kind of progression can be paused (the game may have changed; no patch for: " + missing +
+                                                       "), so fleet missions are off and rooms you host hold up to 6 players.");
+                return false;
+            }
+        }
+
+        /// <summary>The kinds of progression none of whose patches are in, or null when every kind can be paused.</summary>
+        private static string MissingKinds()
+        {
+            if (!Patcher.IsReady(Feature)) return "mission rewards and XP";
+            var missing = new List<string>();
+            if (!AnyIn(nameof(BlockAchievementsPrefix), nameof(BlockSteamAchievementsPrefix), nameof(BlockCloudAchievementsPrefix))) missing.Add("achievements");
+            if (!AnyIn(nameof(BlockQuestProgressPrefix), nameof(BlockCloudQuestProgressPrefix), nameof(BlockPhotonQuestProgressPrefix))) missing.Add("quest progress");
+            if (!AnyIn(nameof(BlockMetaquestPrefix), nameof(BlockCloudMetaquestPrefix))) missing.Add("daily and weekly quests");
+            if (!Patcher.HookIn(Feature, nameof(BlockDataShardPrefix))) missing.Add("codex entries from data shards");
+            if (!Patcher.HookIn(Feature, nameof(ActivateTrackersPrefix)) || !Patcher.HookIn(Feature, nameof(FinalizeTrackersPrefix)))
+                missing.Add("quest and achievement tracking");
+            if (!Patcher.HookIn(Feature, nameof(PreserveSessionPrefix))) missing.Add("saving fleet runs");
+            return missing.Count == 0 ? null : string.Join(", ", missing.ToArray());
+        }
+
+        private static bool AnyIn(params string[] hooks)
+        {
+            foreach (string hook in hooks)
+            {
+                if (Patcher.HookIn(Feature, hook)) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
         /// Host, as a mission starts (before its session data goes out to the other players): decide whether it gives
         /// progression, so the pause reaches the room before anyone starts tracking. Its players are the ones who played in
         /// the hub.
@@ -333,7 +379,8 @@ namespace VoidCrewFleet
             Log.Info("Quest and achievement tracking is off for the rest of this mission: it gives no progression.");
         }
 
-        private static bool _saveNoticeShown;
+        /// <summary>The mission whose players were last told it isn't saved (once per mission: the game saves at every void jump).</summary>
+        private static GameSession _saveNoticeSession;
 
         /// <summary>
         /// Host: fleet runs aren't saved. The game's save holds one ship, so a resumed fleet run would come back as a
@@ -346,9 +393,10 @@ namespace VoidCrewFleet
             {
                 if (FleetSession.ShipCount < 2 && !Paused) return true;
                 Log.InfoOnce("no fleet saves", "Not saving this run: fleet runs (and runs without progression) can't be continued later.");
-                if (!_saveNoticeShown)
+                GameSession session = GameSessionManager.ActiveSession;
+                if (!ReferenceEquals(session, _saveNoticeSession))
                 {
-                    _saveNoticeShown = true;
+                    _saveNoticeSession = session;
                     Notice.ShowAll("Fleet runs aren't saved: the game's save holds only one ship.");
                 }
                 return false;

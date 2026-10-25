@@ -29,8 +29,6 @@ namespace VoidCrewFleet
     /// </summary>
     internal static class PvpTeams
     {
-        public const string Feature = "PvP teams";
-
         private const string KeyLocked = "VCF_TeamsLocked";
 
         /// <summary>Orders players by actor number (join order), the one comparer for every sort.</summary>

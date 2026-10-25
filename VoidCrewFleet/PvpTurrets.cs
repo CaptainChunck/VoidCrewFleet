@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Reflection;
 using CG;
 using CG.Client.Player.Interactions;
 using CG.Game;
@@ -77,22 +76,23 @@ namespace VoidCrewFleet
         private const float SendSeconds = 0.25f;
         private const int SightMask = 134222848; // the auto-turret's own occlusion test: ship hulls and objects
 
-        // The auto-turret controller's own private steps, called directly (no reflection call at every physics step).
+        // The auto-turret controller's own private steps, called directly (no reflection call at every physics step). A step the
+        // game no longer has is logged at start-up (PvpCombat.Bind): without IsAThreat, auto-turrets only engage locked targets.
         private static readonly Action<AutoShootingTurretController, WeaponTarget> SetActiveTargetCall =
-            Bind<Action<AutoShootingTurretController, WeaponTarget>>(GameMember.Method(typeof(AutoShootingTurretController), "SetActiveTarget"));
+            PvpCombat.Bind<Action<AutoShootingTurretController, WeaponTarget>>(GameMember.Method(typeof(AutoShootingTurretController), "SetActiveTarget"));
 
         private static readonly Action<AutoShootingTurretController> CheckMagazineCall =
-            Bind<Action<AutoShootingTurretController>>(GameMember.Method(typeof(AutoShootingTurretController), "CheckMagazine"));
+            PvpCombat.Bind<Action<AutoShootingTurretController>>(GameMember.Method(typeof(AutoShootingTurretController), "CheckMagazine"));
 
         private static readonly Func<AutoShootingTurretController, OrbitObject, bool> IsAThreatCall =
-            Bind<Func<AutoShootingTurretController, OrbitObject, bool>>(GameMember.Method(typeof(AutoShootingTurretController), "IsAThreat"));
+            PvpCombat.Bind<Func<AutoShootingTurretController, OrbitObject, bool>>(GameMember.Method(typeof(AutoShootingTurretController), "IsAThreat"));
 
         private static readonly Action<AutoShootingTurretController> UpdateActiveElementsCall =
-            Bind<Action<AutoShootingTurretController>>(GameMember.Method(typeof(AutoShootingTurretController), "UpdateActiveElements"));
+            PvpCombat.Bind<Action<AutoShootingTurretController>>(GameMember.Method(typeof(AutoShootingTurretController), "UpdateActiveElements"));
 
         /// <summary>A point defense's current target (the game's private field), read directly; null when the game has changed.</summary>
         private static readonly HarmonyLib.AccessTools.FieldRef<KineticPointDefenseModule, IDamageReceiver> PointDefenseTarget =
-            FieldRef<KineticPointDefenseModule, IDamageReceiver>(GameMember.Field(typeof(KineticPointDefenseModule), "_targetProjectile"));
+            PvpCombat.FieldRef<KineticPointDefenseModule, IDamageReceiver>(GameMember.Field(typeof(KineticPointDefenseModule), "_targetProjectile"));
 
         /// <summary>What the game's bullets hit (static and space-object layers; not the interior and pivot layer 27).</summary>
         private const int ShotMask = (1 << 10) | (1 << 12);
@@ -147,34 +147,6 @@ namespace VoidCrewFleet
         private static readonly Dictionary<int, EnemyScan> Scans = new Dictionary<int, EnemyScan>();
         private static readonly EnemyScan NoEnemies = new EnemyScan();
 
-        /// <summary>A fast call to a private game method, or null when it is missing or has changed.</summary>
-        private static T Bind<T>(MethodInfo method) where T : class
-        {
-            if (method == null) return null;
-            try
-            {
-                return Delegate.CreateDelegate(typeof(T), method, false) as T;
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        /// <summary>A direct reader for a game's private field, or null when it is missing or has changed.</summary>
-        private static HarmonyLib.AccessTools.FieldRef<T, F> FieldRef<T, F>(FieldInfo field) where T : class
-        {
-            if (field == null) return null;
-            try
-            {
-                return HarmonyLib.AccessTools.FieldRefAccess<T, F>(field);
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
         // ---------------------------------------------------------------- who can be shot
 
         /// <summary>
@@ -196,7 +168,7 @@ namespace VoidCrewFleet
             foreach (Player player in game.Players)
             {
                 if (player == null || PlayerLife.IsDead(player) || !player.IsInSpace) continue;
-                int actor = ActorOf(player);
+                int actor = PvpCombat.ActorOf(player);
                 if (actor < 0 || !PvpBoarding.IsEnemyOf(actor, ship)) continue;
                 if (FleetShips.InteriorAt(player.transform.position) != null) continue;
                 CustomCharacterHealth health = HealthOf(player);
@@ -205,11 +177,6 @@ namespace VoidCrewFleet
                 scan.Healths.Add(health);
             }
             return scan;
-        }
-
-        private static int ActorOf(Player player)
-        {
-            return player != null && player.photonView != null && player.photonView.Owner != null ? player.photonView.Owner.ActorNumber : -1;
         }
 
         private static CustomCharacterHealth HealthOf(Player player)
@@ -320,7 +287,7 @@ namespace VoidCrewFleet
                 if (PvpCombat.Active && PhotonNetwork.IsMasterClient && source != null)
                 {
                     Player victim = health.GetComponentInParent<Player>();
-                    int actor = ActorOf(victim);
+                    int actor = PvpCombat.ActorOf(victim);
                     if (victim != null && !PlayerLife.IsDead(victim) && actor >= 0 && PvpBoarding.IsEnemyOf(actor, FleetShips.OwnerOf(source)) &&
                         victim.IsInSpace && FleetShips.InteriorAt(victim.transform.position) == null && InSight(PointDefenseOrigin(source), health.CentralPosition, victim))
                     {
@@ -404,7 +371,7 @@ namespace VoidCrewFleet
 
                 var health = ___activeTarget.ShootingElement as CustomCharacterHealth;
                 PlayerControlledShip ship = FleetShips.OwnerOf(___turret);
-                int actor = ActorOf(victim);
+                int actor = PvpCombat.ActorOf(victim);
                 Vector3 muzzle = Muzzle(___activeBarrel);
                 Vector3 aim = health != null ? health.CentralPosition : victim.transform.position;
                 bool valid = health != null && ___activePivot != null && ___activeBarrel != null && !PlayerLife.IsDead(victim) && victim.IsInSpace &&

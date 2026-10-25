@@ -14,8 +14,11 @@ namespace VoidCrewFleet
     /// Every player in the room, or one Fleet Battle team's, when the HUD's crew list can't show them all (CrewList): opened and
     /// closed with the key its prompt shows, or Escape. A window like Fleet's lobby screen and the game's hub terminals (their
     /// background, meander bars, header and lines) with the game's own crew rows in a scrolling list, made live as the HUD's
-    /// list makes them (CoopBuddyController and CoopBuddyView), with the HUD's style sheets; a team's list is grouped by ship.
-    /// Their menus mute and kick as the HUD's rows do. The cursor shows and the game's controls are in menu mode while it is open.
+    /// list makes them (CoopBuddyController and CoopBuddyView), with the HUD's style sheets; a team's list is grouped by ship,
+    /// then the players waiting for a place. BLUE's list (the left key's) also has the players without a team: once the teams
+    /// are confirmed, those who joined and found every crew full, who are on neither team's list. Their menus mute and kick as
+    /// the HUD's rows do. The cursor shows and the game's controls are in menu mode while it is open. The window is made the
+    /// first time a prompt for it shows (Prepare), not at the first key press: making a panel takes a moment.
     /// </summary>
     internal static class PlayerListPanel
     {
@@ -128,6 +131,19 @@ namespace VoidCrewFleet
             }
         }
 
+        /// <summary>Makes the window (hidden) ahead of its first use: CrewList, when a prompt for it first shows. Never throws.</summary>
+        public static void Prepare()
+        {
+            try
+            {
+                Ensure();
+            }
+            catch (Exception e)
+            {
+                Log.Failure("Making the player list", e);
+            }
+        }
+
         private static bool Ensure()
         {
             if (_screen != null && _screen.panel != null) return true;
@@ -211,7 +227,10 @@ namespace VoidCrewFleet
             root.Add(_screen);
         }
 
-        /// <summary>The players this list shows, in join order: everyone, or the team's (on its ships, from its crew list).</summary>
+        /// <summary>
+        /// The players this list shows, in join order: everyone, or the team's (from its crew list); BLUE's also those without a
+        /// team (CrewRules.WithoutTeam).
+        /// </summary>
         private static List<Player> Players(Dictionary<int, CrewEntry> crews)
         {
             var players = new List<Player>();
@@ -223,7 +242,8 @@ namespace VoidCrewFleet
                 if (_kind != Kind.Everyone)
                 {
                     CrewEntry entry;
-                    if (!crews.TryGetValue(player.PhotonPlayer.ActorNumber, out entry) || entry.Team != (_kind == Kind.Blue ? 0 : 1)) continue;
+                    bool teamless = !crews.TryGetValue(player.PhotonPlayer.ActorNumber, out entry) || entry.Team < 0;
+                    if (teamless ? _kind != Kind.Blue : entry.Team != (_kind == Kind.Blue ? 0 : 1)) continue;
                 }
                 players.Add(player);
             }
@@ -263,22 +283,34 @@ namespace VoidCrewFleet
                 foreach (Player player in players) AddRow(player, template);
                 return;
             }
-            // A team's list: each of its ships with its crew, then anyone of the team still waiting for a place.
+            // A team's list: each of its ships with its crew, then anyone of the team still waiting for a place (and in BLUE's,
+            // anyone without a team).
             int ships = PvpTeams.ShipCount;
             var placed = new HashSet<Player>();
+            int ofTeam = 0;
+            bool teamless = false;
+            foreach (Player player in players)
+            {
+                CrewEntry entry;
+                if (crews.TryGetValue(player.PhotonPlayer.ActorNumber, out entry) && entry.Team == team) ofTeam++;
+                else teamless = true;
+            }
             foreach (int slot in FleetSlots.SlotsOfTeam(team, ships))
             {
                 AddShipHeader(slot, team);
                 foreach (Player player in players)
                 {
                     CrewEntry entry;
-                    if (!crews.TryGetValue(player.PhotonPlayer.ActorNumber, out entry) || entry.Slot != slot) continue;
+                    if (!crews.TryGetValue(player.PhotonPlayer.ActorNumber, out entry) || entry.Team != team || entry.Slot != slot) continue;
                     AddRow(player, template);
                     placed.Add(player);
                 }
             }
-            if (placed.Count == players.Count) return;
-            AddHeader("WAITING FOR A PLACE", team);
+            int waiting = players.Count - placed.Count;
+            _count.text = ofTeam + (ofTeam == 1 ? " PLAYER" : " PLAYERS") + (waiting > 0 ? "  ·  " + waiting + " WAITING" : "");
+            if (waiting == 0) return;
+            // In the team's colour, unless players without a team wait too.
+            AddHeader("WAITING FOR A PLACE", teamless ? -1 : team);
             foreach (Player player in players)
             {
                 if (!placed.Contains(player)) AddRow(player, template);
@@ -292,11 +324,12 @@ namespace VoidCrewFleet
             AddHeader(FleetSlots.Name(slot, true) + (string.IsNullOrEmpty(type) ? "" : "  " + type), team);
         }
 
+        /// <summary>A group's header in a team's list, in the team's colour (team -1: no team's, the window's light grey).</summary>
         private static void AddHeader(string text, int team)
         {
             Label header = Ui.GameLabel(text, "ui-text-size__medium", "ui-text-dropshadow");
             header.style.unityFontStyleAndWeight = FontStyle.Bold;
-            header.style.color = FleetApi.TeamColor(team);
+            header.style.color = team >= 0 ? FleetApi.TeamColor(team) : Ui.GameBrightGrey;
             header.style.marginTop = _list.contentContainer.childCount > 0 ? 10 : 2;
             header.style.marginBottom = 2;
             _list.Add(header);
@@ -369,7 +402,10 @@ namespace VoidCrewFleet
             if (_list != null) _list.Clear();
         }
 
-        /// <summary>Self-test: the list as it looks with a big room, from stand-in rows made from the game's own row template.</summary>
+        /// <summary>
+        /// Self-test: the list as it looks with a big room, from stand-in rows made from the game's own row template; BLUE's
+        /// with a player waiting for a place at the end, as once the teams are confirmed.
+        /// </summary>
         internal static void OpenPreview(Kind kind, int players)
         {
             Open(kind);
@@ -380,26 +416,38 @@ namespace VoidCrewFleet
             int team = kind == Kind.Blue ? 0 : (kind == Kind.Red ? 1 : -1);
             // Stand-ins only: the real list (this one test player) makes way for them.
             Clear();
-            _count.text = players + " PLAYERS";
+            bool waiting = kind == Kind.Blue;
+            _count.text = players + " PLAYERS" + (waiting ? "  ·  1 WAITING" : "");
             for (int i = 0; i < players; i++)
             {
                 if (team >= 0 && i % 4 == 0) AddShipHeader(team + 2 * (i / 4), team);
-                TemplateContainer row = template.Instantiate();
-                Label name = row.Q<Label>("PlayerName");
-                if (name != null) name.text = "Crewmate " + (i + 2);
-                Label rank = row.Q<Label>("RankLabel");
-                if (rank != null) rank.text = (10 + i * 7).ToString();
-                foreach (string part in new[] { "ActionPanel", "ChatMuteState", "VoiceMuteState", "MicrophoneMutedState" })
-                {
-                    VisualElement hidden = row.Q(part);
-                    if (hidden != null) hidden.style.display = DisplayStyle.None;
-                }
-                StateVE state = row.Q<StateVE>();
-                if (state != null) state.SetClassState("player-hud-health", "high");
-                _list.Add(row);
+                _list.Add(StandIn(template, i + 2));
+            }
+            if (waiting)
+            {
+                AddHeader("WAITING FOR A PLACE", -1);
+                _list.Add(StandIn(template, players + 2));
             }
             // The stand-ins are no players: the next check must not replace them.
             _shownKey = Key();
+        }
+
+        /// <summary>A stand-in row for the self-test's preview, set up as the game sets a row up (CoopBuddyView): a healthy player.</summary>
+        private static TemplateContainer StandIn(VisualTreeAsset template, int number)
+        {
+            TemplateContainer row = template.Instantiate();
+            Label name = row.Q<Label>("PlayerName");
+            if (name != null) name.text = "Crewmate " + number;
+            Label rank = row.Q<Label>("RankLabel");
+            if (rank != null) rank.text = (10 + (number - 2) * 7).ToString();
+            foreach (string part in new[] { "ActionPanel", "ChatMuteState", "VoiceMuteState", "MicrophoneMutedState" })
+            {
+                VisualElement hidden = row.Q(part);
+                if (hidden != null) hidden.style.display = DisplayStyle.None;
+            }
+            StateVE state = row.Q<StateVE>();
+            if (state != null) state.SetClassState("player-hud-health", "high");
+            return row;
         }
 
         private static void SetInput(bool block)

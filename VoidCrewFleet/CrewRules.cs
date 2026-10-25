@@ -142,6 +142,31 @@ namespace VoidCrewFleet
             return players <= rows ? players : Math.Max(0, rows - 1);
         }
 
+        /// <summary>
+        /// RowsShown when the list's key prompt shows anyway (prompt: its whole list has players the rows don't, such as those
+        /// waiting for a place): one place goes to the prompt, so one row fewer than places at most.
+        /// </summary>
+        public static int RowsShown(int players, int rows, bool prompt)
+        {
+            return prompt ? Math.Min(players, Math.Max(0, rows - 1)) : RowsShown(players, rows);
+        }
+
+        /// <summary>
+        /// The players (in the list's order) on no team: without an entry, or one the host hasn't given a team. Once Fleet
+        /// Battle's teams are confirmed in the hub, these are the players who joined and found every crew full (they wait for a
+        /// free place), whom neither team's list has.
+        /// </summary>
+        public static List<int> WithoutTeam(IList<int> rows, IDictionary<int, CrewEntry> crews)
+        {
+            var players = new List<int>();
+            foreach (int actor in rows)
+            {
+                CrewEntry entry;
+                if (crews == null || !crews.TryGetValue(actor, out entry) || entry.Team < 0) players.Add(actor);
+            }
+            return players;
+        }
+
         /// <summary>Players crewing a ship (spectators not counted).</summary>
         public static int CrewOf(IDictionary<int, CrewEntry> crews, ICollection<int> players, int slot, int except = int.MinValue)
         {

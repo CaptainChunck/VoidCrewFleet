@@ -41,6 +41,17 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+Write-Output "== Building the hub checks (the host's copy of the fleet choices, players waiting in the crew list)"
+& $csc -nologo -target:exe -platform:x64 "-out:$(Join-Path $out 'HubChecksTest.exe')" (Join-Path $PSScriptRoot "OfflineChecks\HubChecksTest.cs") (Join-Path $root "VoidCrewFleet\RoomChoices.cs") (Join-Path $root "VoidCrewFleet\RoomCopyCheck.cs") (Join-Path $root "VoidCrewFleet\CrewRules.cs")
+if ($LASTEXITCODE -ne 0) {
+    Write-Output "HUB CHECKS BUILD FAILED"
+    exit 1
+}
+& (Join-Path $out "HubChecksTest.exe")
+if ($LASTEXITCODE -ne 0) {
+    exit 1
+}
+
 Write-Output "== Building the enemy budget tests"
 & $csc -nologo -target:exe -platform:x64 "-out:$(Join-Path $out 'SpawnBudgetTest.exe')" (Join-Path $PSScriptRoot "OfflineChecks\SpawnBudgetTest.cs") (Join-Path $root "VoidCrewFleet\SpawnBudget.cs")
 if ($LASTEXITCODE -ne 0) {
